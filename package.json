@@ -52,5 +52,9 @@
   "homepage": "https://github.com/yabo083/koishi-plugin-patchouli-knowledge#readme",
   "bugs": {
     "url": "https://github.com/yabo083/koishi-plugin-patchouli-knowledge/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
