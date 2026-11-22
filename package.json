@@ -6,10 +6,11 @@
   "types": "lib/index.d.ts",
   "files": [
     "lib",
-    "docs",
     "client",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/domain-glossary.md",
+    "docs/acceptance-checklist.md"
   ],
   "license": "MIT",
   "scripts": {
@@ -54,7 +55,6 @@
     "url": "https://github.com/yabo083/koishi-plugin-patchouli-knowledge/issues"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   }
 }
