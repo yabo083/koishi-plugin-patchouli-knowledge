@@ -176,6 +176,7 @@ test('SHADOW-LEDGER-07: evaluateVerdicts 两侧结论与同口径门限一致', 
   const now = BASE;
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,

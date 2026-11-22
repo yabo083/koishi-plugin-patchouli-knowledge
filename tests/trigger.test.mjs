@@ -33,6 +33,7 @@ test('BURST-01: 常态闲聊不误触 (速率低于突发阈值保持 IDLE)', ()
   const settled = [];
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -75,6 +76,7 @@ test('BURST-02 & BURST-03: 激烈讨论触发录制，并在平息后进入迟�
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -154,6 +156,7 @@ test('BURST-04: 冷却期次级突发重置状态机，防止截断论战', () =
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.0,
       minBurstRate: 5,
@@ -276,6 +279,7 @@ test('GATE-01: 单人高速刷屏在 IDLE 被物理门限拦截', () => {
   const settled = [];
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 1.5,
       minBurstRate: 4,
@@ -312,6 +316,7 @@ test('GATE-02: 双人复读机因信息熵率不足被拦截', () => {
   const settled = [];
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 1.5,
       minBurstRate: 4,
@@ -385,6 +390,7 @@ test('DYNQ-02: BURSTING 接近平息时按末尾语义延长 quiescence', () => 
   const settled = [];
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 1.5,
       minBurstRate: 4,
@@ -447,6 +453,7 @@ test('FREEZE-01: 突发期基线绝对冻结，结算后解冻', () => {
   let now = BASE_TIME;
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 1.5,
       minBurstRate: 4,
@@ -508,6 +515,7 @@ test('SLICE-01: 缓冲区达到 120 条触发软切片且相位不变', () => {
   const sessions = [];
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 1.5,
       minBurstRate: 4,
@@ -545,7 +553,7 @@ test('SLICE-01: 缓冲区达到 120 条触发软切片且相位不变', () => {
 
 test('BOUND-01: 超长消息在进入常驻容器前被裁到入口上限（且不阻塞事件循环）', () => {
   const detector = new BurstQuiescenceDetector({
-    options: { triggerMode: 'shadow', windowSizeSeconds: 60, minDiscussionMessages: 12, maxBufferMessages: 500 },
+    options: { triggerMode: 'rate', triggerMode: 'shadow', windowSizeSeconds: 60, minDiscussionMessages: 12, maxBufferMessages: 500 },
     onQuiescence: async () => {},
     onDiscard: async () => {},
   });
@@ -624,7 +632,7 @@ test('BOUND-04: getStatus({settle:false}) 是纯读，不推进结算', async ()
   const settled = [];
   const detector = new BurstQuiescenceDetector({
     now: () => clock,
-    options: { windowSizeSeconds: 60, burstMultiplier: 2.5, minBurstRate: 6, quiescenceSeconds: 300, minDiscussionMessages: 12, maxBufferMessages: 500 },
+    options: { triggerMode: 'rate', windowSizeSeconds: 60, burstMultiplier: 2.5, minBurstRate: 6, quiescenceSeconds: 300, minDiscussionMessages: 12, maxBufferMessages: 500 },
     onQuiescence: async (session) => { settled.push(session); },
     onDiscard: async () => {},
   });
@@ -652,7 +660,7 @@ test('BOUND-05: 迟到的上一轮完成回调不得清掉当前轮的 SUMMARIZI
   const sessions = [];
   const detector = new BurstQuiescenceDetector({
     now: () => clock,
-    options: { windowSizeSeconds: 60, burstMultiplier: 2.5, minBurstRate: 6, quiescenceSeconds: 300, minDiscussionMessages: 12, maxBufferMessages: 500 },
+    options: { triggerMode: 'rate', windowSizeSeconds: 60, burstMultiplier: 2.5, minBurstRate: 6, quiescenceSeconds: 300, minDiscussionMessages: 12, maxBufferMessages: 500 },
     onQuiescence: async (session) => { sessions.push(session); },
     onDiscard: async () => {},
   });

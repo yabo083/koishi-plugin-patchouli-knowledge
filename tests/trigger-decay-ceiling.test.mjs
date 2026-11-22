@@ -50,6 +50,7 @@ function createDetector(initialRate) {
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,

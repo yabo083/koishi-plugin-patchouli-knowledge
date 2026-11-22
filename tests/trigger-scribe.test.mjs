@@ -23,7 +23,7 @@ function createHarness(options = {}, hooks = {}) {
   const endings = [];
   const errors = [];
   const detector = new BurstQuiescenceDetector({
-    options: { triggerMode: 'rate', minDiscussionMessages: 12, ...options },
+    options: { triggerMode: 'rate', triggerMode: 'rate', minDiscussionMessages: 12, ...options },
     now: () => clock,
     scheduler: (callback, delayMs) => {
       const timer = { at: clock + delayMs, callback };

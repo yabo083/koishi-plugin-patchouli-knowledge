@@ -29,7 +29,7 @@ function makeSystem(wikiDir, channels = ['group-a']) {
       enabled: true,
       channels,
       notifyOnSummarized: false,
-      trigger: { windowSizeSeconds: 60, burstMultiplier: 2, minBurstRate: 5, quiescenceSeconds: 3600 },
+      trigger: { triggerMode: 'rate', windowSizeSeconds: 60, burstMultiplier: 2, minBurstRate: 5, quiescenceSeconds: 3600 },
       dispatcher: { provider: 'custom', apiKey: 'mock-key', baseURL: 'https://mock.api/v1', customModel: 'gpt-4o-mini' },
       storage: { wikiDir },
     },

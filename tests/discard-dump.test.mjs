@@ -114,6 +114,7 @@ function buildConfig(wikiDir, extra = {}) {
     channels: ['group-dump'],
     notifyOnSummarized: false,
     trigger: {
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.0,
       minBurstRate: 5,

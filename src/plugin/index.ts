@@ -566,15 +566,15 @@ export const Config: Schema<PluginOptions> = Schema.object({
     minDiscussionMessages: Schema.number().default(12).description('单次有效沉淀最低消息条数'),
     maxBufferMessages: Schema.number().default(500).description('最大缓存消息数'),
     baselineEwmaAlpha: Schema.number().default(0.05).description('动态基线 EWMA 平滑系数'),
-    triggerMode: Schema.union(['rate', 'potential', 'shadow'] as const).default('rate').description('触发判据模式（rate=频率现状 / potential=信息势能 / shadow=影子对照只观测不裁决）'),
+    triggerMode: Schema.union(['rate', 'potential', 'shadow'] as const).default('potential').description('触发判据模式（rate=频率现状 / potential=信息势能 / shadow=影子对照只观测不裁决）'),
     thetaMin: Schema.number().default(POTENTIAL_SEEDING.thetaMin).description('势能突发门限下限 Θ_min（nat 累加）'),
     potentialAutoTuning: Schema.boolean()
       .default(false)
       .description('shadow 对照时两套判据门限同步参与 AIMD（同一控制器同一时钟；默认关，仅做对照时开启）'),
     dispatchMargin: Schema.number()
-      .default(0)
+      .default(1.2)
       .description(
-        '调度质量门：结算后 peakQ < Θ_burst × 此值时跳过云端调度（0=关闭；1.3 表示「过阈 30% 以内不烧一次大模型」）',
+        '调度质量门：结算后 peakQ < Θ_burst × 此值时跳过云端调度（0=关闭）。默认 1.2 与势能默认配套：只放行明显过阈的轮次',
       ),
     densityMultiplier: Schema.number()
       .default(1)

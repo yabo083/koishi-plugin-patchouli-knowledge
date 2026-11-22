@@ -70,6 +70,7 @@ function makeConfig(wikiDir, channels, judge) {
     channels,
     notifyOnSummarized: false,
     trigger: {
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -217,7 +218,9 @@ test('GATE-07: margin=0 与软切片会话都不受质量门影响', async () =>
     // ① 默认关闭：同一份「勉强过阈」的峰值照常调度（判据只在 margin > 0 时生效）。
     const off = makeSystem(offDir, [offChannel]);
     try {
-      assert.equal(off.system.config.trigger.dispatchMargin, undefined, '未配置即未启用');
+      // 默认值已改为 1.2（与势能默认配套），这里显式关闭以验证「margin=0 不受影响」
+      off.system.detector.updateOptions(offChannel, { dispatchMargin: 0 });
+      assert.equal(off.system.detector.getOptions(offChannel).dispatchMargin, 0, '显式 0 即关闭');
       await off.system.handleQuiescence(makeSession(offChannel, MARGINAL_PEAK));
       assert.equal(off.dispatchCount(), 1, 'margin=0 必须照常调度');
       assert.equal(judgeCalls.length, 1, 'judge 门控照常参与');
@@ -242,8 +245,8 @@ test('GATE-07: margin=0 与软切片会话都不受质量门影响', async () =>
     }
   });
 
-  // ③ Schema 默认值 = 0（关闭），因此旧配置升级后行为逐位不变。
-  assert.equal(Config({}).trigger.dispatchMargin, 0);
+  // ③ 默认值 = 1.2（与势能默认配套：势能比速率敏感，默认就要有质量门）。
+  assert.equal(Config({}).trigger.dispatchMargin, 1.2);
   assert.equal(Config({ trigger: { dispatchMargin: 1.3 } }).trigger.dispatchMargin, 1.3);
 
   await removeDir(offDir);

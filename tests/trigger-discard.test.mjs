@@ -87,6 +87,7 @@ function makePluginConfig(wikiDir, channels) {
     channels,
     notifyOnSummarized: false,
     trigger: {
+triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -145,6 +146,7 @@ test('DISCARD-01: 缓冲不足时 onDiscard 上报完整判定依据并回到 ID
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -197,6 +199,7 @@ test('DISCARD-02: 正常 finalize 交付的会话 partial === false', () => {
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -229,6 +232,7 @@ test('DISCARD-03: flushSlice 软切片交付的会话 partial === true 且不改
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -261,6 +265,7 @@ test('DISCARD-04: onDiscard 回调抛错被吞掉且状态机照常推进', () =
 
   const detector = new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,

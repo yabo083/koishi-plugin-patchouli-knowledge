@@ -133,6 +133,7 @@ function makePluginConfig(wikiDir, channels, judge) {
     channels,
     notifyOnSummarized: false,
     trigger: {
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,

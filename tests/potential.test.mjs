@@ -397,7 +397,7 @@ test('POTENTIAL-11: thetaMin 下限为正（0 被拒 ⇒ 冷启动 Θ_cool 恒�
     'thetaMin=0 必须被拒：冷启动 b_Q=0 时 Θ_cool=max(0,0)×1.1=0，闭式解恒 null ⇒ 永不冷却',
   );
   assert.throws(
-    () => new BurstQuiescenceDetector({ options: { thetaMin: 0 }, onQuiescence: () => {} }),
+    () => new BurstQuiescenceDetector({ options: { triggerMode: 'rate', triggerMode: 'rate', thetaMin: 0 }, onQuiescence: () => {} }),
     RangeError,
     '构造函数走同一套参数校验，同样不得接受 thetaMin=0',
   );
@@ -804,7 +804,7 @@ test('POTENTIAL-16: 结算会话携带 potentialPeak（rate 模式为 undefined�
   }
 
   // rate 模式：判据层不做势能观测，会话不得带 potentialPeak。
-  const rate = createHarness({ quiescenceSeconds: 10, minDiscussionMessages: 4 });
+  const rate = createHarness({ triggerMode: 'rate', quiescenceSeconds: 10, minDiscussionMessages: 4 });
   try {
     for (let index = 0; index < 12; index += 1) {
       rate.say(index % 2 === 0 ? 'u1' : 'u2', freshExposition(index), T0 + index * 2000);

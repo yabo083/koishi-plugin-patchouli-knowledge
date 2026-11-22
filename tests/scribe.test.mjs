@@ -30,6 +30,7 @@ const NOW = 1793000000000;
 function buildDetector(now = NOW, onQuiescence = async () => {}) {
   return new BurstQuiescenceDetector({
     options: {
+triggerMode: 'rate', triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,

@@ -98,7 +98,10 @@ export const DEFAULT_TRIGGER_OPTIONS: Readonly<TriggerOptions> = Object.freeze({
   minDiscussionMessages: 12,
   maxBufferMessages: 500,
   baselineEwmaAlpha: DEFAULT_BASELINE_ALPHA,
-  triggerMode: 'rate',
+  // 默认即势能判据：速率判据只能看到「此刻多吵」，势能侧能看到「消息里的信息量累积」。
+  // `dispatchMargin` 必须同开：势能比速率敏感（实测召回 +45%），没有质量门会让沉淀量暴涨。
+  triggerMode: 'potential',
+  dispatchMargin: 1.2,
   thetaMin: POTENTIAL_SEEDING.thetaMin,
   rhoMin: POTENTIAL_SEEDING.rhoMin,
   peakCoolFraction: 0.5,

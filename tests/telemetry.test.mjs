@@ -97,6 +97,8 @@ function baseConfig(overrides = {}) {
     channels: [CHANNEL],
     notifyOnSummarized: false,
     trigger: {
+      // 该文件的行为断言基于速率判据；显式覆盖 triggerMode 的用例不受影响
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -446,6 +448,7 @@ test('TELEMETRY-05: NEAR_MISS 擦肩而过正常记录并带 3 分钟频控', as
 
   const config = baseConfig({
     trigger: {
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -599,6 +602,7 @@ test('TELEMETRY-07: attachTelemetry 语法糖幂等挂载与自定义阈值生�
 
   const config = baseConfig({
     trigger: {
+      triggerMode: 'rate',
       windowSizeSeconds: 60,
       burstMultiplier: 2.5,
       minBurstRate: 6,
@@ -723,6 +727,8 @@ test('TELEMETRY-09: shadow 模式闸门向量与 NEAR_MISS / PHASE_CHANGE 载荷
       maxBufferMessages: 200,
       baselineEwmaAlpha: 0.05,
       triggerMode: 'shadow',
+      // 该用例验证 AIMD 放宽，必须确保质量门不拦截调度
+      dispatchMargin: 0,
       thetaMin: 20,
       rhoMin: 1.2,
     },
