@@ -1,0 +1,45 @@
+name: Bug report
+description: 报告可复现的异常行为
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认不是配置问题（白名单、模型端点、权限）。
+        日志与配置里的密钥请自行打码。
+  - type: input
+    id: version
+    attributes:
+      label: 插件版本
+      placeholder: 0.8.49
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: Koishi 版本 / Node 版本 / 数据库 / 是否使用 ChatLuna
+      placeholder: Koishi 4.18 · Node 22 · SQLite · ChatLuna 关闭
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 配置 ...
+        2. 在群内发送 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志（已打码）
+      render: shell

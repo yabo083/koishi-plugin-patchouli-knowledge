@@ -1,0 +1,6454 @@
+// Patchouli Knowledge - LLMWiki 知识阅读器下属组件 (Koishi Console Client Extension)
+// 挂载路径: /plugins/0848oh (plugin-console 静态服务以 <uiPath>/@plugin-<entry>/index.js 提供)
+// 材质：瓷白 / 葱绿 · 工具级精密质感
+//   - 外骨骼容器：固定圆角 14px + 四边同一条中性发丝线（--hairline-frame，底边不做单独覆盖）
+//     + 单层中性双层立体影（近层贴边 3px / 远层铺开 28px，无荧光泛光、无墨绿脏边）
+//   - 封底：子元素不再各自补内层圆角，四个底角统一由 .ptx-shell 的实体底色 + 单一
+//     overflow 硬裁剪闭合；旧版底边那条实色亮灰发丝线会在 14px 圆角处让深线突变亮线，
+//     看起来像拐角撕裂，已彻底移除
+//   - 位移与裁剪分离：.ptx-window 只承担几何与 translate3d（拖拽合成层），圆角 / 边框 /
+//     投影 / overflow 全部下沉到 .ptx-shell。位移层自身带圆角裁剪时，合成器要逐帧重算那圈
+//     遮罩，运动中的边缘是断续的（截图拍不到，横向拖动肉眼最明显）
+//   - 控件：固定几何（7px 倒角 / 28-40px 尺寸），hover / active 仅颜色、描边与阴影反馈，绝不形变
+//   - 瓷白/肤白基底：--bg-porcelain #f7f5f0 → 生物膜 --bg-membrane #fffdf9（100% 不透明实体色）
+//     窗口 / 左栏 / 顶栏 / 底栏四条承载面渐变全部无 alpha，.ptx-shell 另叠 background-color 遮光板，
+//     浮在宿主表单之上时不透任何底层文字
+//   - 窗口内无附加全窗图层（无噪点薄膜 / 场等势线）：实体底色 + 发丝线边框干净封闭，
+//     避免任何 composited 描边动画溢出窗口边界造成撕裂
+//   - 排版：窗内全部阶段容器共用 820px 单版心（整块居中、内部左缘严格齐平）
+//   - 语义点缀：葱绿 #0ea44f / 深海青 #0e8f86 / 琥珀孢子 #b8791e
+//   - 状态胶囊：中文检测器状态（就绪 / 突发采样 / 平息观察 / 沉淀生成 / 连接中断）
+// 交互：视口内自由拖拽 / 边缘与四角 8 向缩放（几何钳制在视口内）/ 静置 5 秒弹性收回为悬浮胶囊 /
+//       胶囊点击展开（hover 不擅自弹出）/ 两个核心页签（词条 / 监控）就地切换 / 齿轮是平级的第三个页签（设置页，非浮层）/
+//       词条正文可就地修正与删除（二次确认）/ 设置页清空知识库（二次确认）/
+//       rail 底部日 / 月按钮切换明暗主题（localStorage: patchouli-theme）；
+//       缺省主题跟随宿主：宿主深色（class="dark" / theme-dark / data-theme="dark" / body 底色偏暗）
+//       时直接以夜间渲染，优先级高于 localStorage 里残留的旧浅色记忆（仅本会话手动切换可覆盖）
+// 红线：零 Emoji，100% 内联 SVG；零 window.open；零 iframe；DOM 一律文本节点安全
+//       （用户内容绝不经过 innerHTML 注入）；消息媒体仅放行 http(s) 直链，
+//       由浏览器自行加载，图片 / 视频 / 音频一律不自动播放
+// 性能：backdrop-filter 仅用于右下角悬浮胶囊（尺寸恒定、不参与缩放）；窗口本体不采样背板，
+//       缩放只做布局与轻量重绘；卡片不叠加模糊；正文小字无 text-shadow
+// 拖拽：纯平移 → 起手帧提升为独立合成层（.is-dragging 的 will-change: transform），每帧只写
+//       translate3d，零布局零重绘；落点同帧写 left / top 并清 transform，手势类延后一帧摘除。
+//       旧版每帧写 left / top 会让整窗逐帧重排重光栅，分数 DPI 下像素相位每帧被推 1.25 / 1.5
+//       设备 px，竖边 1px 发丝线与字形反复重算抗锯齿 —— 横向拖动时边缘像未开垂直同步一样抖裂。
+
+/* global window, document, fetch, setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame */
+
+const API_BASE = '/patchouli';
+/* 频道作用域兜底：留空，由宿主配置的频道列表决定（不在公开产物里硬编码任何真实群号）。 */
+const CHANNEL_ID = '';
+const DEFAULT_CHANNELS = [];
+const IDLE_COLLAPSE_MS = 5000;
+const TICKER_SWAP_MS = 400;
+const TICKER_COUNT_DEFAULT = 6;
+const TICKER_COUNT_MIN = 1;
+const TICKER_COUNT_MAX = 20;
+const TICKER_INTERVAL_DEFAULT = 5;
+const TICKER_INTERVAL_MIN = 3;
+const TICKER_INTERVAL_MAX = 60;
+const LATEST_POLL_MS = 30000;
+const LATEST_LIMIT = 20;
+const SETTINGS_KEY = 'patchouli.panel-settings';
+const THEME_KEY = 'patchouli-theme';
+const VIEW_KEY = 'patchouli-view-mode';
+const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
+const ROUTE_KEYS = ['0848oh', 'patchouli'];
+const ROOT_ID = 'patchouli-organic-root';
+const STYLE_ID = 'patchouli-organic-style';
+const PREFIX = 'ptxClient';
+const VIEWPORT_MARGIN = 14;
+const MIN_WIDTH = 480;
+const MIN_HEIGHT = 360;
+
+const STAGES = [
+  { key: 'entries', label: '词条', icon: 'entries', tip: '词条索引' },
+  { key: 'topics', label: '主题', icon: 'topics', tip: '跨时间主题聚合' },
+  { key: 'metrics', label: '监控', icon: 'metrics', tip: '实时监控' },
+];
+
+/* 8 向缩放手柄方向：e=右缘加宽，w=左缘（对边为锚），s=下缘，n=上缘，其余为对角双向 */
+const RESIZE_DIRS = ['n', 's', 'w', 'e', 'nw', 'ne', 'sw', 'se'];
+
+/** 8 向缩放手柄：热区独立成层，完全内嵌于窗口内部（8px 厚 / 四角 16×16），
+ *  因此容器可以 overflow: hidden；指针由 setPointerCapture 锁定，不靠外溢补偿。 */
+function resizeLayerMarkup() {
+  return `<div class="ptx-resize-layer" aria-hidden="true">` +
+    RESIZE_DIRS.map((dir) => `<span class="ptx-resize is-${dir}" data-resize="${dir}"></span>`).join('') +
+    `</div>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * 1. 内联 SVG 图标库（无字体图标、无 Emoji、无外部资源）
+ * ------------------------------------------------------------------ */
+
+const LUCIDE = 'fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"';
+
+const ICONS = {
+  nucleus: `<g ${LUCIDE}><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></g>`,
+  entries: `<g ${LUCIDE}><path d="M2 6h4m-4 4h4m-4 4h4m-4 4h4"/><rect width="16" height="20" x="4" y="2" rx="2"/><path d="M9.5 8h5m-5 4H16m-6.5 4H14"/></g>`,
+  matrix: `<g ${LUCIDE}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></g>`,
+  quote: `<g ${LUCIDE}><path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/></g>`,
+  metrics: `<g ${LUCIDE}><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></g>`,
+  pulse: `<g ${LUCIDE}><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676a.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"/><path d="M3.22 13H9.5l.5-1l2 4.5l2-7l1.5 3.5h5.27"/></g>`,
+  sync: `<g ${LUCIDE}><path d="M3 12a9 9 0 0 1 9-9a9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5m5 4a9 9 0 0 1-9 9a9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>`,
+  autodock: `<g ${LUCIDE}><path d="M10 2h4m-2 12l3-3"/><circle cx="12" cy="14" r="8"/></g>`,
+  collapse: `<g ${LUCIDE}><path d="m14 10l7-7m-1 7h-6V4M3 21l7-7m-6 0h6v6"/></g>`,
+  expand: `<g ${LUCIDE}><path d="M15 3h6v6m0-6l-7 7M3 21l7-7m-1 7H3v-6"/></g>`,
+  settings: `<g ${LUCIDE}><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></g>`,
+  maximize: `<g ${LUCIDE}><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></g>`,
+  restore: `<g ${LUCIDE}><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></g>`,
+  minimize: `<g ${LUCIDE}><path d="M5 12h14"/></g>`,
+  close: `<g ${LUCIDE}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>`,
+  chevron: `<g ${LUCIDE}><path d="m9 18l6-6l-6-6"/></g>`,
+  chevronDown: `<g ${LUCIDE}><path d="m6 9 6 6 6-6"/></g>`,
+  back: `<g ${LUCIDE}><path d="m15 18l-6-6l6-6"/></g>`,
+  check: `<g ${LUCIDE}><path d="M20 6L9 17l-5-5"/></g>`,
+  scope: `<g ${LUCIDE}><path d="M4 9h16M4 15h16M10 3L8 21m8-18l-2 18"/></g>`,
+  find: `<g ${LUCIDE}><path d="m21 21l-4.34-4.34"/><circle cx="11" cy="11" r="8"/></g>`,
+  node: `<g ${LUCIDE}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></g>`,
+  spore: `<g ${LUCIDE}><path d="M14 9.536V7a4 4 0 0 1 4-4h1.5a.5.5 0 0 1 .5.5V5a4 4 0 0 1-4 4a4 4 0 0 0-4 4c0 2 1 3 1 5a5 5 0 0 1-1 3M4 9a5 5 0 0 1 8 4a5 5 0 0 1-8-4m1 12h14"/></g>`,
+  grid: `<g ${LUCIDE}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></g>`,
+  list: `<g ${LUCIDE}><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></g>`,
+  pencil: `<g ${LUCIDE}><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></g>`,
+  trash: `<g ${LUCIDE}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></g>`,
+  sun: `<g ${LUCIDE}><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></g>`,
+  moon: `<g ${LUCIDE}><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></g>`,
+  /* Lucide layers：主题页签——长期聚合视图，与词条页的列表图标明确区分 */
+  topics: `<g ${LUCIDE}><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></g>`,
+};
+
+function organicIcon(name, size = 16) {
+  return `<svg class="ptx-icon" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ICONS.nucleus}</svg>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * 2. 休眠胚胎细胞核（8 参数：角度 / 半径 / X 缩放 / Y 缩放 /
+ *    不透明度 / 周期 / 相位延迟 / 色调）
+ * ------------------------------------------------------------------ */
+
+const STATUS_POLL_MS = 5000;
+const STATUS_IDLE_POLL_MS = 15000;
+
+
+const ORBIT_SEEDS = [
+  { angle: 0, radius: 52, sx: 1.16, sy: 0.68, opacity: 0.72, duration: 9.4, delay: 0, tone: '#0ea44f' },
+  { angle: 45, radius: 44, sx: 0.86, sy: 1.2, opacity: 0.6, duration: 11.6, delay: -1.6, tone: '#0e8f86' },
+  { angle: 90, radius: 56, sx: 1.24, sy: 0.62, opacity: 0.5, duration: 13.2, delay: -3.1, tone: '#0ea44f' },
+  { angle: 135, radius: 39, sx: 0.94, sy: 1.08, opacity: 0.66, duration: 10.4, delay: -4.7, tone: '#b8791e' },
+  { angle: 180, radius: 49, sx: 1.1, sy: 0.78, opacity: 0.44, duration: 12.8, delay: -2.3, tone: '#0e8f86' },
+  { angle: 225, radius: 58, sx: 0.8, sy: 1.14, opacity: 0.38, duration: 14.6, delay: -5.9, tone: '#0ea44f' },
+  { angle: 270, radius: 42, sx: 1.02, sy: 0.9, opacity: 0.58, duration: 9.9, delay: -0.8, tone: '#b8791e' },
+  { angle: 315, radius: 61, sx: 1.18, sy: 0.7, opacity: 0.34, duration: 15.4, delay: -6.8, tone: '#0e8f86' },
+];
+
+function nucleusSvg() {
+  const orbs = ORBIT_SEEDS.map((seed) => {
+    const vars =
+      `--n-angle:${seed.angle}deg;--n-radius:${seed.radius}px;` +
+      `--n-sx:${seed.sx};--n-sy:${seed.sy};--n-opacity:${seed.opacity};` +
+      `--n-dur:${seed.duration}s;--n-delay:${seed.delay}s;--n-tone:${seed.tone}`;
+    return `<g class="ptx-orb" style="${vars}"><ellipse cx="80" cy="80" rx="7.4" ry="5.2"/></g>`;
+  }).join('');
+
+  return (
+    `<svg class="ptx-nucleus" viewBox="0 0 160 160" aria-hidden="true" focusable="false">` +
+    `<defs><radialGradient id="${PREFIX}NucleusGlow" cx="50%" cy="50%" r="50%">` +
+    `<stop offset="0%" stop-color="#0ea44f" stop-opacity="0.22"/>` +
+    `<stop offset="58%" stop-color="#0e8f86" stop-opacity="0.08"/>` +
+    `<stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>` +
+    `</radialGradient></defs>` +
+    `<circle cx="80" cy="80" r="64" fill="url(#${PREFIX}NucleusGlow)"/>` +
+    `<circle class="ptx-nucleus-membrane" cx="80" cy="80" r="54"/>` +
+    `<circle class="ptx-nucleus-wall" cx="80" cy="80" r="41"/>` +
+    orbs +
+    `<circle class="ptx-nucleus-core" cx="80" cy="80" r="12"/>` +
+    `<circle class="ptx-nucleus-seed" cx="80" cy="80" r="4.4"/>` +
+    `</svg>`
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * 3. 工具函数
+ * ------------------------------------------------------------------ */
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => {
+    if (ch === '&') return '&amp;';
+    if (ch === '<') return '&lt;';
+    if (ch === '>') return '&gt;';
+    if (ch === '"') return '&quot;';
+    return '&#39;';
+  });
+}
+
+function num(value, fallback) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : (fallback || 0);
+}
+
+function fixed(value, digits) {
+  return num(value, 0).toFixed(digits == null ? 1 : digits);
+}
+
+function clip(text, limit) {
+  const raw = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (raw.length <= limit) return raw;
+  return raw.slice(0, limit - 1) + '…';
+}
+
+/* 请求超时：没有它，一个挂死的连接会让 status 轮询链永久停摆（promise 永不 settle）。 */
+const REQUEST_TIMEOUT_MS = 15000;
+function requestJson(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetch(url, Object.assign({ credentials: 'same-origin' }, options, { signal: controller.signal }))
+    .then((res) => {
+      clearTimeout(timer);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }, (err) => {
+      clearTimeout(timer);
+      throw err;
+    });
+}
+
+function tip(text, pos) {
+  return `data-tip="${escapeHtml(text)}"${pos ? ` data-tip-pos="${pos}"` : ''}`;
+}
+
+function namesOf(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const raw of list) {
+    const name = typeof raw === 'string' ? raw : (raw && (raw.name || raw.userName || raw.id));
+    const key = String(name == null ? '' : name).trim();
+    if (key) out.push(key);
+  }
+  return out;
+}
+
+function uniq(list) {
+  return Array.from(new Set(list));
+}
+
+function speakersOf(detail) {
+  if (!detail) return [];
+  let collected = namesOf(detail.participants);
+  const points = Array.isArray(detail.debateMatrix) ? detail.debateMatrix : [];
+  for (const point of points) {
+    collected = collected.concat(namesOf(point && point.proponents));
+    collected = collected.concat(namesOf(point && point.opponents));
+  }
+  const quotes = Array.isArray(detail.keyQuotes) ? detail.keyQuotes : [];
+  for (const quote of quotes) {
+    if (quote && quote.author) collected.push(String(quote.author));
+  }
+  return uniq(collected);
+}
+
+function nodeTag(name, tone) {
+  const cls = 'ptx-node' + (tone ? ' is-' + tone : '');
+  return `<span class="${cls}">${escapeHtml(name)}</span>`;
+}
+
+/* 检测器状态中文映射（与 src/web/organic-runtime.ts 同源）：OFFLINE 即与后端连接中断 */
+const PHASE_LABELS = {
+  LOADING: '正在连接',
+  IDLE: '就绪',
+  BURSTING: '突发采样',
+  COOLING: '平息观察',
+  SUMMARIZING: '沉淀生成',
+  OFFLINE: '连接中断',
+};
+
+function phaseLabel(phase) {
+  const key = String(phase == null ? '' : phase).trim().toUpperCase();
+  return PHASE_LABELS[key] || '状态未知';
+}
+
+/* 状态提示：只说当下有意义的一句，不罗列全部状态 */
+const PHASE_TIPS = {
+  LOADING: '正在连接服务',
+  IDLE: '等待讨论，暂无突发',
+  BURSTING: '正在缓存活跃讨论',
+  COOLING: '讨论已平息，等待沉淀',
+  SUMMARIZING: '正在生成词条',
+  OFFLINE: '无法连接服务，请检查后刷新',
+};
+
+/* 词条状态中文映射：后端只有 verified / tentative / open 三态 */
+const ENTRY_STATUS = { verified: '已核验', tentative: '待定', open: '存疑', draft: '草稿' };
+
+function entryStatusKey(status) {
+  const key = String(status == null ? '' : status).trim().toLowerCase();
+  return ENTRY_STATUS[key] ? key : 'unknown';
+}
+
+function entryStatusLabel(status) {
+  return ENTRY_STATUS[entryStatusKey(status)] || '未标注';
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. 样式（有机未来主义；backdrop-filter 仅用于悬浮胶囊）
+ * ------------------------------------------------------------------ */
+
+const ORGANIC_STYLES = `/* ================= 宿主 ================= */
+#patchouli-organic-root {
+--bg-porcelain: #f7f5f0;
+  --bg-membrane: #fffdf9;
+  --bio-primary: #0ea44f;
+  --bio-primary-strong: #2a6e3f;
+  --bio-secondary: #108b96;
+  --bio-cyan: #5aa4ae;
+  --bio-slate: #45465e;
+  --bio-violet: #7c3aed;
+  --bio-violet-strong: #5b21b6;
+  --bio-enzyme: #b8791e;
+  --bio-danger: #c4485c;
+  --bio-ink: #1b2620;
+  --bio-ink-2: #36443c;
+  --bio-ink-3: #4f5e56;
+  --bio-ink-4: #6b7870;
+  --hairline: rgba(20, 50, 34, 0.09);
+  --hairline-strong: rgba(20, 50, 34, 0.14);
+  /* 窗体框线：四边共用同一条中性发丝线（不含墨绿色相）。
+     旧版给底边单独覆盖一条实色亮灰（#dee2e0），左 / 上 / 右是暗线、底边却是一根发光
+     亮灰横线：在 14px 圆角处深线画到一半突然换成亮灰线，白窗压深色宿主时下沿两角就
+     像被切断翘起。四边同色同 alpha 之后，圆角处才真正连续闭合。 */
+  --hairline-frame: rgba(0, 0, 0, 0.12);
+  --r-ctl: 7px;
+  --r-card: 10px;
+  --r-window: 14px;
+  --r-pill: 999px;
+  --r-tag: 5px;
+  --ctl-sm: 28px;
+  --ctl: 32px;
+  --ctl-lg: 40px;
+  --bevel-hi: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --shadow-card: 0 1px 2px rgba(20, 50, 34, 0.04);
+  --shadow-float: 0 18px 40px -26px rgba(20, 50, 34, 0.34);
+  /* 窗体立体影：中性双层。近层 3px 压出贴边的不透明感，远层 28px 收在窗口下方铺开；
+     两层都只用中性黑，任何宿主底色上都不会渗出色相断层或墨绿脏边。 */
+  --shadow-window: 0 1px 3px rgba(0, 0, 0, 0.08), 0 10px 28px -6px rgba(0, 0, 0, 0.18);
+  --ease-organic: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.2, 0.64, 1);
+  --bio-mono: "JetBrains Mono", "Cascadia Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --bio-ui: "Inter", "Segoe UI Variable Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+
+  /* 承载面令牌：明暗两套主题只覆盖这一组，控件 / 卡片 / 输入框不各自持有色值。 */
+  --surface: #ffffff;
+  --surface-soft: #f7faf8;
+  --surface-warm: #fffdf8;
+  --surface-cyan: #f1f8f7;
+  --surface-cyan-soft: #eef7f6;
+  --surface-mint: #eff7f2;
+  --surface-mint-strong: #eef7f1;
+  --surface-mint-soft: #f4faf6;
+  --surface-hover: #f6faf7;
+  --surface-active: #eef5f0;
+  --surface-raise: #fcfdfb;
+  --surface-press: #f7faf7;
+  --surface-track: #f2f4f1;
+  --surface-amber: #fbf4e8;
+  --surface-danger: #fdf2f3;
+  --surface-float: #ffffff;
+  --knob: #ffffff;
+  --ctl-ink: #44534a;
+  --ctl-ink-weak: #c2ccc5;
+  --node-ink: #12703e;
+  --node-support-ink: #0a7c3a;
+  --amber-ink: #8a5b16;
+  --tag-ink: #0b6f68;
+  --brand-ink: #1d6b43;
+  --topbar-ink: #2b4636;
+  --danger-ink: #8f2f3d;
+  --scroll-thumb: rgba(20, 50, 34, 0.16);
+  --scroll-thumb-hover: rgba(20, 50, 34, 0.26);
+  /* 承载面渐变一律 100% 不透明实体色：窗口压在任何宿主页面之上，带 alpha 的渐变会让
+     宿主表单文字透上来（穿模），所以这四条令牌里 NEVER 出现 rgba。 */
+  --win-grad: linear-gradient(168deg, #ffffff 0%, #fffdf9 52%, #fafbf6 100%);
+  --rail-grad: linear-gradient(180deg, #ffffff 0%, #f4f7f2 100%);
+  --topbar-grad: linear-gradient(180deg, #ffffff 0%, #f7f9f5 100%);
+  --foot-grad: linear-gradient(180deg, #fbfcf9 0%, #f4f6f1 100%);
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  pointer-events: none;
+  color: var(--bio-ink);
+  font-family: var(--bio-ui);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+  #patchouli-organic-root * { box-sizing: border-box; }
+  #patchouli-organic-root button { font-family: inherit; }
+  #patchouli-organic-root svg { display: block; }
+
+  /* ================= 外骨骼容器（几何 / 位移层） =================
+     这一层只负责几何与排版，绝不承担圆角裁剪：拖拽时它是被 translate3d 搬运的合成层，
+     而「被位移的层」同时又是「带圆角的裁剪容器」时，那圈圆角裁剪必须由合成器遮罩每帧按新
+     位置重新求解，边缘在帧与帧之间就是断续的——截图（强制重新光栅）拍不到，肉眼在横向拖动
+     时最明显。裁剪下沉到 .ptx-shell 后，圆角边界是图层自身栅格的一部分，随层整体搬运。 */
+  #patchouli-organic-root .ptx-window {
+    display: flex;
+    position: fixed;
+    width: min(820px, calc(100vw - 48px));
+    height: min(560px, calc(100vh - 120px));
+    z-index: 10040;
+    /* 响应式换挡不再依赖容器查询：窗口宽度每帧都由 JS 写进行内样式，
+       同一处顺带维护 is-narrow / is-compact（见 syncResponsiveTier），
+       省掉 container-type 建立的查询容器——它会让每次尺寸变化都重算整窗查询。 */
+    transform-origin: 100% 100%;
+    transition: transform 0.56s var(--ease-spring), opacity 0.34s var(--ease-organic);
+  }
+
+  /* ================= 窗面（唯一硬裁剪矩形 + 全部材质，永不位移） ================= */
+  #patchouli-organic-root .ptx-shell {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    border-radius: var(--r-window);
+    background:
+      radial-gradient(120% 85% at 8% -12%, rgba(14, 143, 134, 0.04), transparent 56%),
+      var(--win-grad);
+    /* 遮光板底色：浮动窗口压在任何宿主表单之上，必须是一块 100% 不透明的实体纸面。
+       background 简写会把背景色重置为 transparent，实体底色只能写在简写之后；
+       渐变本身也已改为全实体色，宿主文字再也透不上来（穿模根因）。 */
+    background-color: var(--surface);
+    /* 不采样背板模糊：窗口背后的页面底色与膜色本就接近，blur 在视觉上几乎不可见，
+       却让每次尺寸变化都要重新采样整块背板，正是缩放时“边缘断裂后重绘”的来源。 */
+    border: 1px solid var(--hairline-frame);
+    /* 立体投影：中性双层，近层贴边、远层铺开。
+       旧版 0 24px 48px -28px rgba(20, 50, 34, 0.3) 是负外扩加 24px 位移的"悬浮假影"：
+       影体整体收在窗口内侧，只有下沿外 4px 处溢出一条比深色宿主更亮的墨绿带
+       （实测该处 G 通道比背景高 3、亮度高 1.5），白窗压黑底时就像下沿裂开一道脏口子。
+       中性黑只会把宿主压得更暗，与任何底色都自然衔接，也没有色相断层。 */
+    box-shadow: var(--shadow-window);
+    /* 天然单一硬裁剪矩形：圆角裁剪由这一层自己承担，窗口内全部子层（.ptx-rail /
+       .ptx-body / 内容版心）一律被这件矩形裁住，每帧都不可能再脱离边界。
+       实体底色（--surface）+ 这唯一的硬裁剪已经足够闭合下沿两角，子元素不再各自补内层
+       圆角——那些补丁在分数 DPI 下与父级圆角各算一次抗锯齿，反而描出双重轮廓。
+       缩放手柄全部内嵌在窗口内部最上层，因此这里不再需要 overflow: visible。 */
+    overflow: hidden;
+  }
+
+  /* ================= 手势态（拖拽 / 缩放） =================
+     零材质重写：这两个类上不允许出现 background / backdrop-filter / box-shadow / display
+     任何一条——静止、拖拽、缩放全程材质、底色、投影、裁剪矩形 100% 恒定不变。
+     手势态只做三件事：关掉过渡（几何逐帧直写，不允许补间）、给出抓取光标、
+     拖拽期把整窗提升成独立合成层。
+     拖拽是纯平移：起手帧把整窗光栅化一次，之后每帧只由合成器搬运 translate3d，
+     既不重排也不重绘。旧版每帧写 left / top，等于每帧对 820×560 的整窗（近白渐变底 +
+     发丝线边框 + 双层投影 + 全部卡片文本）重排重光栅；125% / 150% 缩放下每次写进 1 CSS px
+     就等于把整窗的像素相位推 1.25 / 1.5 设备 px，竖边的 1px 发丝线与全部字形每帧重算一次
+     抗锯齿——拖动途中边缘就在"1 行 / 2 行"两种像素形态之间来回跳，观感等同未开垂直同步。
+     横向拖动最明显：竖边是唯一被搬运、且相位敏感的 1px 线；纵向拖动时上下边沿落在投影的
+     柔和斜坡里，同样的抖动看不出来。
+     缩放是尺寸变化：本来就必须逐帧重新光栅，提升合成层只会多付一次全幅重光栅，故不提升。 */
+  #patchouli-organic-root .ptx-window.is-dragging,
+  #patchouli-organic-root .ptx-window.is-resizing { transition: none; }
+  #patchouli-organic-root .ptx-window.is-dragging { cursor: grabbing; will-change: transform; }
+
+  /* 窗口收回 / 展开：整体缩放属于容器状态变化，不是按钮形变 */
+  #patchouli-organic-root .ptx-window.is-collapsed {
+    transform: scale(0.14) translate(38px, 42px);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* JS 在折叠过渡结束后挂载：彻底摘除内容层，避免留下无内容的幽灵玻璃。
+     窗口本体从未使用 backdrop-filter，这里只保留可见性，不写任何材质属性。 */
+  #patchouli-organic-root .ptx-window.is-docked {
+    visibility: hidden;
+  }
+
+  /* 最大化：page / dock / overlay 三种承载面统一覆盖为视口内缩 12px。
+     !important 用于压过拖拽写入的行内 left / top / width / height，几何仍然固定无过渡形变。 */
+  #patchouli-organic-root .ptx-window.is-maximized {
+    position: fixed !important;
+    inset: 12px !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    margin: 0 !important;
+    z-index: 10040;
+  }
+
+  /* ================= 边缘 / 四角缩放手柄（8 向，完全内嵌） =================
+     全部热区都在窗口内部，向内厚度 8px，四角 16×16：容器可以放心 overflow: hidden，
+     手柄依然抓得住，圆角边界也不会被任何外溢元素撑破。
+     每个手柄在 pointerdown 时 setPointerCapture 锁定指针（见 bindResize），指针移出
+     热区甚至移出窗口也照样跟随，鼠标动得再快都不会脱手——内嵌方案不靠外溢补偿。
+     唯一反馈通道是系统标准缩放光标，绝不改变边框厚度 / 圆角 / 阴影（无按钮形变契约）。 */
+  #patchouli-organic-root .ptx-resize-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    touch-action: none;
+  }
+  #patchouli-organic-root .ptx-resize { position: absolute; pointer-events: auto; background: transparent; touch-action: none; }
+  #patchouli-organic-root .ptx-resize.is-n { top: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }
+  #patchouli-organic-root .ptx-resize.is-s { bottom: 0; left: 16px; right: 16px; height: 8px; cursor: ns-resize; }
+  #patchouli-organic-root .ptx-resize.is-w { left: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }
+  #patchouli-organic-root .ptx-resize.is-e { right: 0; top: 16px; bottom: 16px; width: 8px; cursor: ew-resize; }
+  #patchouli-organic-root .ptx-resize.is-nw { top: 0; left: 0; width: 16px; height: 16px; cursor: nwse-resize; }
+  #patchouli-organic-root .ptx-resize.is-ne { top: 0; right: 0; width: 16px; height: 16px; cursor: nesw-resize; }
+  #patchouli-organic-root .ptx-resize.is-sw { bottom: 0; left: 0; width: 16px; height: 16px; cursor: nesw-resize; }
+  #patchouli-organic-root .ptx-resize.is-se { bottom: 0; right: 0; width: 16px; height: 16px; cursor: nwse-resize; }
+
+  /* 最大化由视口接管；收回 / 停靠隐藏态手柄整体退场，不参与命中测试 */
+  #patchouli-organic-root .ptx-window.is-maximized .ptx-resize-layer,
+  #patchouli-organic-root .ptx-window.is-collapsed .ptx-resize-layer,
+  #patchouli-organic-root .ptx-window.is-docked .ptx-resize-layer { display: none; }
+
+  /* ================= 内容入场：纯淡入 + 网格 stagger（无位移、无缩放） ================= */
+  #patchouli-organic-root .ptx-viewport > :not(dialog) { animation: ptxFade 0.4s var(--ease-organic) backwards; }
+  #patchouli-organic-root .ptx-spores > *,
+  #patchouli-organic-root .ptx-points > *,
+  #patchouli-organic-root .ptx-quotes > *,
+  #patchouli-organic-root .ptx-tiles > *,
+  #patchouli-organic-root .ptx-strip > * {
+    animation: ptxFade 0.45s var(--ease-organic) backwards;
+  }
+  #patchouli-organic-root .ptx-spores > *:nth-child(2), #patchouli-organic-root .ptx-points > *:nth-child(2), #patchouli-organic-root .ptx-quotes > *:nth-child(2), #patchouli-organic-root .ptx-tiles > *:nth-child(2) { animation-delay: 0.04s; }
+  #patchouli-organic-root .ptx-spores > *:nth-child(3), #patchouli-organic-root .ptx-points > *:nth-child(3), #patchouli-organic-root .ptx-quotes > *:nth-child(3), #patchouli-organic-root .ptx-tiles > *:nth-child(3) { animation-delay: 0.08s; }
+  #patchouli-organic-root .ptx-spores > *:nth-child(4), #patchouli-organic-root .ptx-points > *:nth-child(4), #patchouli-organic-root .ptx-quotes > *:nth-child(4), #patchouli-organic-root .ptx-tiles > *:nth-child(4) { animation-delay: 0.12s; }
+  #patchouli-organic-root .ptx-spores > *:nth-child(5), #patchouli-organic-root .ptx-points > *:nth-child(5), #patchouli-organic-root .ptx-quotes > *:nth-child(5), #patchouli-organic-root .ptx-tiles > *:nth-child(5) { animation-delay: 0.16s; }
+  #patchouli-organic-root .ptx-spores > *:nth-child(n+6), #patchouli-organic-root .ptx-points > *:nth-child(n+6), #patchouli-organic-root .ptx-quotes > *:nth-child(n+6), #patchouli-organic-root .ptx-tiles > *:nth-child(n+6) { animation-delay: 0.2s; }
+
+  /* ================= 左侧工具栏 ================= */
+  #patchouli-organic-root .ptx-rail {
+    position: relative;
+    z-index: 7;
+    flex: none;
+    width: 62px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 0 12px;
+    background: var(--rail-grad);
+    border-right: 1px solid var(--hairline);
+    /* 左栏不再自持底角圆角：父级 .ptx-shell 的实体底色 + 单一 overflow 裁剪已经闭合
+       下沿两角。子层各补一枚 calc(--r-window - 1px) 会和父级圆角各算一次抗锯齿，
+       在分数 DPI 下描出双重轮廓，也正是在下沿看到的"撕裂"痕迹之一。 */
+    box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.8);
+  }
+
+  #patchouli-organic-root .ptx-rail-brand {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--r-card);
+    color: var(--bio-primary-strong);
+    background: var(--surface-mint);
+    border: 1px solid rgba(14, 164, 79, 0.16);
+  }
+
+  #patchouli-organic-root .ptx-keys {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding-top: 2px;
+  }
+
+  /* 系统区：齿轮固定在侧栏底部，与导航区用 margin-top + 留白隔离。
+     这里不再画 border-top：那条横线距底 70px，而底栏的 border-top 距底 52px，
+     两条线一高一低在左下角形成 ~18px 的错位断阶；留白已经把齿轮与导航区分开，
+     侧栏因此保持为一根连续纯净的垂直侧轨。 */
+  #patchouli-organic-root .ptx-rail-foot {
+    flex: none;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 10px;
+  }
+
+  /* 齿轮页签激活态：与 .ptx-tab.is-active 同一套视觉语言（左侧葱绿指示条 + 浅绿底） */
+  #patchouli-organic-root .ptx-gear.is-active {
+    color: var(--bio-primary-strong);
+    background: var(--surface-mint-strong);
+    border-color: rgba(14, 164, 79, 0.28);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-gear.is-active::before {
+    content: "";
+    position: absolute;
+    left: -8px;
+    top: 7px;
+    bottom: 7px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--bio-primary);
+  }
+
+  /* ================= 设置页（页签化：与词条 / 监控同级，就地复用主视窗） =================
+     不再是绝对定位浮层：进入设置页签后整块替换视窗内容，底栏轮播照常运行。 */
+  #patchouli-organic-root .ptx-settings-page {
+    display: flex;
+    flex-direction: column;
+  }
+  #patchouli-organic-root .ptx-settings-shell {
+    display: grid;
+    grid-template-columns: 128px minmax(0, 1fr);
+    gap: 22px;
+    align-items: start;
+  }
+  #patchouli-organic-root .ptx-settings-outline {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 2px 12px 2px 0;
+    border-right: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-outline-h {
+    margin-bottom: 8px;
+    font-family: var(--bio-mono);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--bio-primary-strong);
+  }
+  #patchouli-organic-root .ptx-outline-item {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: left;
+    color: var(--bio-ink-3);
+    cursor: pointer;
+    transition: color 0.16s var(--ease-organic), background-color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-outline-item:hover,
+  #patchouli-organic-root .ptx-outline-item:focus-visible {
+    outline: none;
+    color: var(--bio-primary-strong);
+    background: var(--surface-mint);
+  }
+  #patchouli-organic-root .ptx-settings-main { min-width: 0; display: flex; flex-direction: column; }
+  #patchouli-organic-root .ptx-settings-main > .ptx-sec + .ptx-sec { margin-top: 18px; }
+  #patchouli-organic-root .ptx-settings-main > .ptx-sec > .ptx-sec-h { cursor: pointer; user-select: none; }
+  #patchouli-organic-root .ptx-settings-main > .ptx-sec > .ptx-sec-h::before {
+    content: "−";
+    flex: none;
+    width: 14px;
+    font-family: var(--bio-mono);
+    font-size: 13px;
+    line-height: 1;
+    color: var(--bio-primary-strong);
+  }
+  #patchouli-organic-root .ptx-settings-main > .ptx-sec.is-collapsed > .ptx-sec-h::before { content: "+"; }
+  #patchouli-organic-root .ptx-settings-main > .ptx-sec.is-collapsed > :not(.ptx-sec-h) { display: none; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-settings-shell { grid-template-columns: 1fr; gap: 0; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-settings-outline { position: static; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--hairline); padding: 0 0 10px; margin-bottom: 16px; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-outline-h { width: 100%; margin: 0 0 4px; }
+  #patchouli-organic-root .ptx-settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 46px;
+    padding: 8px 12px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-settings-row + .ptx-settings-row { margin-top: 8px; }
+  #patchouli-organic-root .ptx-settings-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-2);
+  }
+  #patchouli-organic-root .ptx-settings-label em {
+    font-style: normal;
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.62;
+    color: var(--bio-ink-4);
+  }
+
+  #patchouli-organic-root .ptx-input.ptx-settings-num { width: 84px; height: 30px; padding: 0 9px; font-size: 12.5px; text-align: right; }
+
+  #patchouli-organic-root .ptx-settings-inline { display: inline-flex; align-items: center; gap: 6px; }
+  #patchouli-organic-root .ptx-settings-sep { font-size: 12.5px; color: var(--bio-ink-4); }
+
+  #patchouli-organic-root .ptx-settings-note {
+    margin-top: 10px;
+    padding: 0 2px;
+    font-size: 11.5px;
+    line-height: 1.62;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+  }
+
+  /* 知识库维护：危险操作独立成卡，柔和朱红发丝线，二次确认就地展开 */
+  #patchouli-organic-root .ptx-maint {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 11px 12px;
+    border-radius: var(--r-card);
+    background: var(--surface-danger);
+    border: 1px solid rgba(196, 72, 92, 0.2);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-maint-text { font-size: 12.5px; line-height: 1.68; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-maint-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
+  #patchouli-organic-root .ptx-maint-confirm .ptx-act-ask { flex: 1 1 180px; color: var(--danger-ink); }
+
+  /* 系统提示词状态行：与词条修正表单共用 ptx-editor 卡片，
+     只保留这一条状态文本（等宽小字，自定义生效时转向主绿）。 */
+  #patchouli-organic-root .ptx-prompt-status {
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-4);
+  }
+  #patchouli-organic-root .ptx-prompt-status.is-custom { color: var(--bio-primary-strong); }
+
+  /* 开关：几何固定 34×20，仅轨道底色 / 描边与滑块位移变化 */
+  #patchouli-organic-root .ptx-switch {
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 20px;
+    padding: 0;
+    border-radius: var(--r-pill);
+    background: var(--surface-track);
+    border: 1px solid var(--hairline-strong);
+    cursor: pointer;
+    transition: background-color 0.16s var(--ease-organic), border-color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--knob);
+    box-shadow: 0 1px 2px rgba(20, 50, 34, 0.18);
+    transition: transform 0.2s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-switch.is-on { background: var(--bio-primary); border-color: #0a7c3a; }
+  #patchouli-organic-root .ptx-switch.is-on::after { transform: translateX(14px); }
+  #patchouli-organic-root .ptx-switch:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 2px; }
+
+  /* ================= 控件基座：几何固定，仅颜色 / 描边 / 阴影反馈 ================= */
+  #patchouli-organic-root .ptx-tab,
+  #patchouli-organic-root .ptx-tool,
+  #patchouli-organic-root .ptx-foot-btn,
+  #patchouli-organic-root .ptx-back {
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+    color: var(--ctl-ink);
+    cursor: pointer;
+    transition:
+      color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic),
+      border-color 0.16s var(--ease-organic),
+      box-shadow 0.16s var(--ease-organic);
+  }
+
+  #patchouli-organic-root .ptx-tab:hover,
+  #patchouli-organic-root .ptx-tool:hover,
+  #patchouli-organic-root .ptx-foot-btn:hover,
+  #patchouli-organic-root .ptx-back:hover {
+    color: var(--bio-primary-strong);
+    background: var(--surface-hover);
+    border-color: rgba(14, 164, 79, 0.26);
+    box-shadow: 0 1px 2px rgba(20, 50, 34, 0.06);
+  }
+
+  #patchouli-organic-root .ptx-tab:active,
+  #patchouli-organic-root .ptx-tool:active,
+  #patchouli-organic-root .ptx-foot-btn:active,
+  #patchouli-organic-root .ptx-back:active {
+    background: var(--surface-active);
+    border-color: rgba(14, 164, 79, 0.34);
+    box-shadow: inset 0 1px 2px rgba(20, 50, 34, 0.07);
+  }
+
+  #patchouli-organic-root .ptx-tab:focus-visible,
+  #patchouli-organic-root .ptx-tool:focus-visible,
+  #patchouli-organic-root .ptx-foot-btn:focus-visible,
+  #patchouli-organic-root .ptx-back:focus-visible,
+  #patchouli-organic-root .ptx-spore:focus-visible,
+  #patchouli-organic-root .ptx-pill:focus-visible,
+  #patchouli-organic-root .ptx-trow:focus-visible,
+  #patchouli-organic-root .ptx-btn:focus-visible {
+    outline: 2px solid rgba(14, 164, 79, 0.55);
+    outline-offset: 2px;
+  }
+
+  /* ================= 词条操作按钮（发丝线 + 柔和朱红危险标注，几何恒定） ================= */
+  #patchouli-organic-root .ptx-acts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 12px;
+    padding: 8px 10px;
+    border-radius: var(--r-card);
+    background: var(--surface-hover);
+    border: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-acts.is-confirm { background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.24); }
+  #patchouli-organic-root .ptx-act-ask { flex: 1 1 auto; min-width: 0; font-size: 12.5px; line-height: 1.6; color: var(--bio-ink-2); }
+  #patchouli-organic-root .ptx-acts.is-confirm .ptx-act-ask { color: var(--danger-ink); }
+
+  #patchouli-organic-root .ptx-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex: none;
+    height: var(--ctl-sm);
+    padding: 0 11px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: var(--shadow-card);
+    color: var(--ctl-ink);
+    font-family: var(--bio-ui);
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic),
+      border-color 0.16s var(--ease-organic),
+      box-shadow 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-btn:hover {
+    color: var(--bio-primary-strong);
+    background: var(--surface-hover);
+    border-color: rgba(14, 164, 79, 0.26);
+    box-shadow: 0 1px 2px rgba(20, 50, 34, 0.06);
+  }
+  #patchouli-organic-root .ptx-btn:active { background: var(--surface-active); border-color: rgba(14, 164, 79, 0.34); box-shadow: inset 0 1px 2px rgba(20, 50, 34, 0.07); }
+  #patchouli-organic-root .ptx-btn.is-primary { color: var(--bio-primary-strong); border-color: rgba(14, 164, 79, 0.3); }
+  #patchouli-organic-root .ptx-btn.is-primary:hover { background: var(--bio-primary); border-color: rgba(10, 124, 58, 0.6); color: #ffffff; }
+  #patchouli-organic-root .ptx-btn.is-danger { color: var(--bio-danger); border-color: rgba(196, 72, 92, 0.32); }
+  #patchouli-organic-root .ptx-btn.is-danger:hover { color: var(--bio-danger); background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.48); }
+  #patchouli-organic-root .ptx-btn.is-danger-solid { color: #ffffff; background: var(--bio-danger); border-color: rgba(168, 58, 76, 0.9); }
+  #patchouli-organic-root .ptx-btn.is-danger-solid:hover { color: #ffffff; background: #b03d50; border-color: #97364a; }
+  #patchouli-organic-root .ptx-btn.is-danger-solid:active { background: #a83a4c; }
+  #patchouli-organic-root .ptx-btn.is-busy { opacity: 0.56; pointer-events: none; }
+
+  /* 明暗主题切换：rail 底部与齿轮并列，日 / 月图标只由 .is-dark 切换显隐，不产生形变 */
+  #patchouli-organic-root .ptx-theme .ptx-ico-sun { display: none; }
+  #patchouli-organic-root .ptx-theme .ptx-ico-moon { display: block; }
+
+  #patchouli-organic-root .ptx-tab {
+    position: relative;
+    width: var(--ctl-lg);
+    height: var(--ctl-lg);
+    display: grid;
+    place-items: center;
+    padding: 0;
+  }
+
+  #patchouli-organic-root .ptx-tab::before {
+    content: "";
+    position: absolute;
+    left: -7px;
+    top: 10px;
+    bottom: 10px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--bio-primary);
+    opacity: 0;
+    transition: opacity 0.16s var(--ease-organic);
+  }
+
+  #patchouli-organic-root .ptx-tab.is-active {
+    color: var(--bio-primary-strong);
+    background: var(--surface-mint-strong);
+    border-color: rgba(14, 164, 79, 0.28);
+    box-shadow: var(--shadow-card);
+  }
+
+  #patchouli-organic-root .ptx-tab.is-active::before { opacity: 1; }
+
+  /* ================= 主体 ================= */
+  /* 右列恢复标准 flex 列布局：圆角与裁剪一律由 .ptx-shell 自己承担，这里不再下沉圆角 */
+  #patchouli-organic-root .ptx-body {
+    position: relative;
+    z-index: 6;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #patchouli-organic-root .ptx-topbar {
+    flex: none;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 12px 0 14px;
+    background: var(--topbar-grad);
+    border-bottom: 1px solid var(--hairline);
+    cursor: grab;
+    /* 触控 / 触媒指针下不让浏览器把拖动解释成滚动或手势取消，pointer capture 才不会被收回 */
+    touch-action: none;
+  }
+
+  #patchouli-organic-root .ptx-window.is-dragging .ptx-topbar { cursor: grabbing; }
+
+  #patchouli-organic-root .ptx-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  #patchouli-organic-root .ptx-id-glyph { color: var(--bio-primary-strong); opacity: 0.92; }
+  #patchouli-organic-root .ptx-id-code {
+    font-family: var(--bio-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--topbar-ink);
+  }
+  #patchouli-organic-root .ptx-id-sep { width: 1px; height: 12px; background: var(--hairline-strong); }
+
+  /* 顶栏状态徽标：语义色 + 单点，无装饰斜杠、无呼吸缩放。
+     它必须是 <button>（点击跳转监控页签）：顶栏是拖拽手柄，守卫只放行
+     button/input/select/textarea/a，span 的点击会被拖拽吞掉。故先抹平 UA 按钮外观
+     （appearance / font / margin 归零），border / background / padding 全部按胶囊规格
+     显式重声明，观感与原来的 span 完全一致。 */
+  #patchouli-organic-root .ptx-phase {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    margin: 0;
+    padding: 0 9px 0 8px;
+    border-radius: var(--r-pill);
+    font: inherit;
+    font-family: var(--bio-mono);
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    color: var(--brand-ink);
+    background: var(--surface-mint);
+    border: 1px solid rgba(14, 164, 79, 0.2);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 0.16s var(--ease-organic);
+  }
+
+  #patchouli-organic-root .ptx-phase i {
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--bio-primary);
+  }
+
+  #patchouli-organic-root .ptx-phase[data-phase="BURSTING"] { color: var(--danger-ink); background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.28); }
+  #patchouli-organic-root .ptx-phase[data-phase="BURSTING"] i { background: var(--bio-danger); }
+  #patchouli-organic-root .ptx-phase[data-phase="COOLING"] { color: var(--amber-ink); background: var(--surface-amber); border-color: rgba(184, 121, 30, 0.28); }
+  #patchouli-organic-root .ptx-phase[data-phase="COOLING"] i { background: var(--bio-enzyme); }
+  #patchouli-organic-root .ptx-phase[data-phase="SUMMARIZING"] { color: var(--tag-ink); background: var(--surface-cyan-soft); border-color: rgba(14, 143, 134, 0.26); }
+  #patchouli-organic-root .ptx-phase[data-phase="SUMMARIZING"] i { background: var(--bio-secondary); }
+  #patchouli-organic-root .ptx-phase[data-phase="LOADING"] { color: var(--bio-ink-3); background: var(--surface-track); border-color: var(--hairline-strong); }
+  #patchouli-organic-root .ptx-phase[data-phase="LOADING"] i { background: var(--bio-ink-4); animation: ptxPhasePulse 2.6s var(--ease-organic) infinite; }
+  #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] { color: var(--danger-ink); background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.24); }
+  #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] i { background: var(--bio-danger); }
+
+  /* 可点击反馈：只加深描边（各相位用自己的语义色阶），底色与呼吸点一律不动 */
+  #patchouli-organic-root .ptx-phase:hover { border-color: rgba(14, 164, 79, 0.36); }
+  #patchouli-organic-root .ptx-phase[data-phase="LOADING"]:hover { border-color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-phase[data-phase="BURSTING"]:hover,
+  #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"]:hover { border-color: rgba(196, 72, 92, 0.46); }
+  #patchouli-organic-root .ptx-phase[data-phase="COOLING"]:hover { border-color: rgba(184, 121, 30, 0.46); }
+  #patchouli-organic-root .ptx-phase[data-phase="SUMMARIZING"]:hover { border-color: rgba(14, 143, 134, 0.44); }
+  #patchouli-organic-root .ptx-phase:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 2px; }
+
+  #patchouli-organic-root .ptx-tools { display: flex; align-items: center; gap: 6px; }
+
+  #patchouli-organic-root .ptx-tool { position: relative; width: var(--ctl); height: var(--ctl); display: grid; place-items: center; padding: 0; }
+  #patchouli-organic-root .ptx-tool.is-on { color: var(--bio-primary-strong); background: var(--surface-mint); border-color: rgba(14, 164, 79, 0.26); }
+  #patchouli-organic-root .ptx-tool.is-busy svg { animation: ptxSpin 0.9s linear infinite; }
+
+  /* 常规三窗口按钮：固定圆角 28px，hover / active 仅明度与描边变化，绝不形变 */
+  #patchouli-organic-root .ptx-winctl {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 2px;
+    padding-left: 10px;
+    border-left: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-winctl-btn {
+    width: var(--ctl-sm);
+    height: var(--ctl-sm);
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+    color: var(--ctl-ink);
+    cursor: pointer;
+    transition:
+      color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic),
+      border-color 0.16s var(--ease-organic),
+      box-shadow 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-winctl-btn:hover {
+    color: var(--bio-primary-strong);
+    background: var(--surface-hover);
+    border-color: rgba(14, 164, 79, 0.26);
+    box-shadow: 0 1px 2px rgba(20, 50, 34, 0.06);
+  }
+  #patchouli-organic-root .ptx-winctl-btn:active {
+    background: var(--surface-active);
+    border-color: rgba(14, 164, 79, 0.34);
+    box-shadow: inset 0 1px 2px rgba(20, 50, 34, 0.07);
+  }
+  #patchouli-organic-root .ptx-winctl-btn:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 2px; }
+  #patchouli-organic-root .ptx-winctl-btn.is-close:hover { color: #ffffff; background: var(--bio-danger); border-color: #a83a4c; box-shadow: 0 1px 2px rgba(196, 72, 92, 0.24); }
+  #patchouli-organic-root .ptx-winctl-btn.is-close:active { background: #b03c4e; border-color: #93333f; color: #ffffff; }
+
+  /* 最大化 / 还原图标按窗口状态纯 CSS 互换 */
+  #patchouli-organic-root .ptx-ico-restore { display: none; }
+  #patchouli-organic-root .ptx-window.is-maximized .ptx-ico-max { display: none; }
+  #patchouli-organic-root .ptx-window.is-maximized .ptx-ico-restore { display: grid; place-items: center; }
+
+  /* 筛选控件 */
+  #patchouli-organic-root .ptx-filter { display: flex; align-items: center; gap: 6px; }
+  #patchouli-organic-root .ptx-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--ctl);
+    padding: 0 9px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    color: var(--ctl-ink);
+    cursor: default;
+    transition: border-color 0.16s var(--ease-organic), background-color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-chip:focus-within { border-color: rgba(14, 164, 79, 0.4); background: var(--surface-hover); }
+  #patchouli-organic-root .ptx-chip > svg { flex: none; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-selectbtn,
+  #patchouli-organic-root .ptx-find {
+    height: 26px;
+    border: 0;
+    background: transparent;
+    color: var(--ctl-ink);
+    font-family: var(--bio-mono);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    outline: none;
+  }
+  #patchouli-organic-root .ptx-find { width: 112px; }
+  #patchouli-organic-root .ptx-find::placeholder { color: var(--bio-ink-4); letter-spacing: 0.02em; }
+  #patchouli-organic-root .ptx-find::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+
+  /* 群聊范围：自绘 listbox。原生 select 展开后是系统弹层（深色矩形 + 系统蓝高亮条），
+     与纸面材质完全冲突，故整块自绘：chip 里只留一个开合按钮 + 一层面板。 */
+  #patchouli-organic-root .ptx-channel { position: relative; padding-right: 7px; }
+  #patchouli-organic-root .ptx-channel.is-open { border-color: rgba(14, 164, 79, 0.4); background: var(--surface-hover); }
+  #patchouli-organic-root .ptx-selectbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    cursor: pointer;
+    transition: color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-selectbtn-label { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #patchouli-organic-root .ptx-selectbtn:hover { color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-selectbtn > svg { flex: none; color: var(--bio-ink-4); transition: transform 0.18s var(--ease-organic); }
+  #patchouli-organic-root .ptx-channel.is-open .ptx-selectbtn > svg { transform: rotate(180deg); }
+  #patchouli-organic-root .ptx-selectbtn:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 2px; border-radius: var(--r-tag); }
+
+  /* 面板绝对定位在 chip 正下方：右缘对齐、不窄于 chip，内部滚动上限 236px。
+     right / min-width 抵掉 chip 的 1px 边框与 7px 右内边距（100% 量的是 padding box），
+     面板因此与 chip 外缘等宽或更宽；z-index 高于顶栏内容，仍在 .ptx-body 自己的
+     层叠上下文与裁剪矩形内。 */
+  #patchouli-organic-root .ptx-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: -8px;
+    z-index: 80;
+    min-width: calc(100% + 2px);
+    max-height: 236px;
+    overflow-y: auto;
+    padding: 4px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-float);
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+  #patchouli-organic-root .ptx-menu-item {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 30px;
+    padding: 0 10px 0 11px;
+    border: 0;
+    border-radius: var(--r-tag);
+    background: transparent;
+    color: var(--ctl-ink);
+    font-family: var(--bio-mono);
+    font-size: 12px;
+    line-height: 30px;
+    letter-spacing: 0.01em;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.14s var(--ease-organic), color 0.14s var(--ease-organic);
+  }
+  /* 左侧 2px 葱绿指示条只标记当前值；hover 与键盘高亮只挪底色，绝不出现系统蓝 */
+  #patchouli-organic-root .ptx-menu-item::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 2px;
+    border-radius: 1px;
+    background: transparent;
+    transition: background-color 0.14s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-menu-item:hover,
+  #patchouli-organic-root .ptx-menu-item.is-active { background: var(--surface-hover); color: var(--bio-ink-2); }
+  #patchouli-organic-root .ptx-menu-item[aria-selected="true"] { background: var(--surface-mint-soft); color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-menu-item[aria-selected="true"]::before { background: var(--bio-primary); }
+  #patchouli-organic-root .ptx-menu-item:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.45); outline-offset: -2px; }
+
+  /* ================= 内容视窗 ================= */
+  #patchouli-organic-root .ptx-viewport {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px 20px 18px;
+    /* 东侧缩放手柄内嵌占住窗口右缘 8px：滚动条整列右移 8px（落在 8..16px），
+       绝不压在透明热区底下，滑块照常可以拖动。 */
+    margin-right: 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+  #patchouli-organic-root .ptx-viewport::-webkit-scrollbar { width: 8px; }
+  #patchouli-organic-root .ptx-viewport::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 4px; }
+  #patchouli-organic-root .ptx-viewport::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+
+  #patchouli-organic-root .ptx-vhead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 10px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-vhead-bar {
+    flex: none;
+    width: 14px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--bio-primary);
+  }
+  #patchouli-organic-root .ptx-vhead-title { font-size: 13.5px; font-weight: 650; letter-spacing: 0.02em; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-vhead-sub {
+    margin-left: auto;
+    font-family: var(--bio-mono);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-4);
+    white-space: nowrap;
+  }
+
+  #patchouli-organic-root .ptx-back { flex: none; width: var(--ctl-sm); height: var(--ctl-sm); display: grid; place-items: center; padding: 0; }
+
+  /* ================= 视图模式切换（卡片 / 列表） =================
+     标题行右端的分段胶囊：26px 底槽 + 两枚 24×22 按钮，几何恒定，
+     激活态只换底色与图标色。底槽用 --surface-track 与纸面拉开一档。 */
+  #patchouli-organic-root .ptx-view-mode {
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    gap: 1px;
+    height: 26px;
+    padding: 1px;
+    border-radius: var(--r-ctl);
+    background: var(--surface-track);
+    border: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-view-btn {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 24px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: calc(var(--r-ctl) - 2px);
+    background: transparent;
+    color: var(--ctl-ink-weak);
+    cursor: pointer;
+    transition:
+      color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic),
+      box-shadow 0.16s var(--ease-organic);
+  }
+  /* hover 只在底槽上浮一层纸面渐变（两端均为 100% 不透明实体色），绝不留半透明膜 */
+  #patchouli-organic-root .ptx-view-btn:hover {
+    color: var(--bio-primary-strong);
+    background: linear-gradient(180deg, var(--surface) 0%, var(--surface-hover) 100%);
+  }
+  #patchouli-organic-root .ptx-view-btn:active { background: var(--surface-active); }
+  /* 文字变体（触发器引擎切换）：图标按钮的 24px 定宽放不下中文标签 */
+  #patchouli-organic-root .ptx-view-btn.is-text {
+    width: auto;
+    min-width: 46px;
+    padding: 0 10px;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+  #patchouli-organic-root .ptx-view-btn.is-active {
+    color: var(--bio-primary-strong);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-view-btn:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 1px; }
+
+  /* ================= 词条网格 ================= */
+  #patchouli-organic-root .ptx-spores {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+    gap: 8px;
+  }
+
+  #patchouli-organic-root .ptx-spore {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+    min-height: 128px;
+    text-align: left;
+    padding: 12px 13px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+    color: inherit;
+    cursor: pointer;
+    transition:
+      border-color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic),
+      box-shadow 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-spore:hover {
+    background: var(--surface-raise);
+    border-color: rgba(14, 164, 79, 0.26);
+    box-shadow: 0 1px 3px rgba(20, 50, 34, 0.07);
+  }
+  #patchouli-organic-root .ptx-spore:active {
+    background: var(--surface-press);
+    border-color: rgba(14, 164, 79, 0.34);
+    box-shadow: inset 0 1px 2px rgba(20, 50, 34, 0.06);
+  }
+
+  #patchouli-organic-root .ptx-spore-glyph {
+    flex: none;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--r-ctl);
+    color: var(--bio-primary-strong);
+    background: var(--surface-mint);
+    border: 1px solid rgba(14, 164, 79, 0.16);
+  }
+
+  /* 主题：长期聚合视图，深海青层叠图标 */
+  #patchouli-organic-root .ptx-spore-glyph.is-topic {
+    color: var(--bio-secondary);
+    background: rgba(14, 143, 134, 0.1);
+    border-color: rgba(14, 143, 134, 0.22);
+  }
+
+  #patchouli-organic-root .ptx-spore-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  #patchouli-organic-root .ptx-spore-top { display: flex; align-items: center; gap: 7px; }
+  #patchouli-organic-root .ptx-spore-date { font-family: var(--bio-mono); font-size: 10.5px; letter-spacing: 0.02em; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-spore-status {
+    font-family: var(--bio-mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-4);
+    padding-left: 7px;
+    border-left: 1px solid var(--hairline-strong);
+  }
+  #patchouli-organic-root .ptx-spore-status.is-verified { color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-spore-status.is-tentative { color: var(--bio-enzyme); }
+  #patchouli-organic-root .ptx-spore-status.is-open { color: var(--bio-violet); }
+  #patchouli-organic-root .ptx-spore-status.is-unknown { color: var(--bio-ink-4); }
+  /* 主题卡的状态位报「N 条相关词条」：主题永远是跨时间聚合的待定视图 */
+  #patchouli-organic-root .ptx-spore-status.is-topic { color: var(--bio-secondary); }
+  #patchouli-organic-root .ptx-spore-title {
+    font-size: 14.5px;
+    font-weight: 600;
+    line-height: 1.45;
+    letter-spacing: -0.005em;
+    color: var(--bio-ink);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #patchouli-organic-root .ptx-spore-sum {
+    font-size: 12.5px;
+    line-height: 1.68;
+    color: var(--bio-ink-2);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-shadow: none;
+  }
+  #patchouli-organic-root .ptx-spore-go { flex: none; align-self: center; color: var(--ctl-ink-weak); transition: color 0.16s var(--ease-organic); }
+  #patchouli-organic-root .ptx-spore:hover .ptx-spore-go { color: var(--bio-primary); }
+
+  /* 列表模式：单列紧凑横向条（最小 46px，垂直居中）。标题单行截断省略，
+     多行大摘要与发言人标签让位给密度；日期 / 状态 / 箭头照常保留。 */
+  #patchouli-organic-root .ptx-spores.is-list { grid-template-columns: 1fr; gap: 6px; }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore { min-height: 46px; align-items: center; padding: 6px 10px; }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-glyph { width: 24px; height: 24px; }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-main { flex-direction: row; align-items: center; gap: 8px; }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-title {
+    order: 1;
+    flex: 1;
+    min-width: 0;
+    display: block;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-top { order: 2; flex: none; }
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-sum,
+  #patchouli-organic-root .ptx-spores.is-list .ptx-spore-main .ptx-nodes { display: none; }
+
+  /* ================= 指标条（稀疏数据时的信息密度） ================= */
+  #patchouli-organic-root .ptx-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin: 0 0 10px 0;
+    border-radius: var(--r-card);
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+  }
+  #patchouli-organic-root .ptx-stat { display: flex; flex-direction: column; gap: 2px; padding: 11px 14px; min-width: 0; }
+  #patchouli-organic-root .ptx-stat + .ptx-stat { border-left: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-stat-l { font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.02em; color: var(--bio-ink-4); white-space: nowrap; }
+  #patchouli-organic-root .ptx-stat-v {
+    font-family: var(--bio-mono);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--bio-ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ================= 发言人标签 ================= */
+  #patchouli-organic-root .ptx-nodes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 2px; }
+  #patchouli-organic-root .ptx-node {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: var(--r-tag);
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.01em;
+    color: var(--node-ink);
+    background: var(--surface-mint);
+    border: 1px solid rgba(14, 164, 79, 0.18);
+    text-shadow: none;
+    transition: border-color 0.16s var(--ease-organic), background-color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-node:hover { border-color: rgba(14, 164, 79, 0.34); background: var(--surface-mint-strong); }
+  #patchouli-organic-root .ptx-node.is-support { color: var(--node-support-ink); background: var(--surface-mint-strong); border-color: rgba(14, 164, 79, 0.26); }
+  #patchouli-organic-root .ptx-node.is-dissent { color: var(--amber-ink); background: var(--surface-amber); border-color: rgba(184, 121, 30, 0.26); }
+  #patchouli-organic-root .ptx-node.is-dissent:hover { border-color: rgba(184, 121, 30, 0.4); }
+  #patchouli-organic-root .ptx-nodes-label {
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-4);
+    margin-right: 2px;
+  }
+
+  /* ================= 词条正文 ================= */
+  #patchouli-organic-root .ptx-r-title { font-size: 19px; font-weight: 700; line-height: 1.38; letter-spacing: -0.01em; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+  #patchouli-organic-root .ptx-tag {
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.01em;
+    color: var(--tag-ink);
+    border: 1px solid rgba(14, 143, 134, 0.2);
+    background: var(--surface-cyan);
+    border-radius: var(--r-tag);
+    padding: 1px 7px;
+  }
+  #patchouli-organic-root .ptx-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 12px;
+    font-family: var(--bio-mono);
+    font-size: 11px;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+  }
+  #patchouli-organic-root .ptx-meta b { color: var(--bio-ink-2); font-weight: 600; margin-left: 3px; }
+
+  #patchouli-organic-root .ptx-sec { margin-bottom: 16px; }
+  #patchouli-organic-root .ptx-sec-h {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    color: var(--bio-primary-strong);
+  }
+  #patchouli-organic-root .ptx-sec-h::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--hairline);
+  }
+
+  #patchouli-organic-root .ptx-text { max-width: 72ch; font-size: 14px; line-height: 1.78; color: var(--bio-ink-2); white-space: pre-wrap; text-shadow: none; }
+  #patchouli-organic-root .ptx-bul { max-width: 72ch; margin: 0; padding-left: 17px; }
+  #patchouli-organic-root .ptx-bul li { font-size: 13.5px; line-height: 1.75; color: var(--bio-ink-2); text-shadow: none; }
+  #patchouli-organic-root .ptx-bul li + li { margin-top: 3px; }
+  #patchouli-organic-root .ptx-bul li::marker { color: rgba(14, 164, 79, 0.6); }
+
+  /* 词条修正：就地编辑表单。正文用等宽字，随内容增高到上限后内部滚动。 */
+  #patchouli-organic-root .ptx-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-editor-row { display: flex; flex-wrap: wrap; gap: 10px; }
+  #patchouli-organic-root .ptx-editor-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  #patchouli-organic-root .ptx-editor-row .ptx-editor-field { flex: 1 1 240px; }
+  #patchouli-organic-root .ptx-editor-row .ptx-editor-field.is-narrow { flex: 0 0 132px; }
+  #patchouli-organic-root .ptx-editor-label { font-family: var(--bio-mono); font-size: 10.5px; letter-spacing: 0.02em; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-editor .ptx-input { width: 100%; height: var(--ctl); padding: 0 10px; font-size: 13px; }
+  #patchouli-organic-root .ptx-editor select.ptx-input { padding-right: 6px; cursor: pointer; }
+  #patchouli-organic-root .ptx-editor .ptx-editor-area {
+    height: auto;
+    min-height: 72px;
+    padding: 8px 10px;
+    line-height: 1.72;
+    resize: vertical;
+    overflow-y: auto;
+  }
+  #patchouli-organic-root .ptx-editor .ptx-editor-md {
+    min-height: 190px;
+    max-height: 340px;
+    overflow: auto;
+    font-family: var(--bio-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    white-space: pre;
+    tab-size: 2;
+  }
+  #patchouli-organic-root .ptx-editor-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 2px; }
+  #patchouli-organic-root .ptx-editor-hint { margin-left: auto; font-size: 11px; line-height: 1.6; color: var(--bio-ink-4); }
+
+  /* 参与群友条 */
+  #patchouli-organic-root .ptx-speakers {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 12px;
+    margin-bottom: 12px;
+    border-radius: var(--r-card);
+    background: var(--surface-soft);
+    border: 1px solid var(--hairline);
+  }
+
+  /* 观点矩阵卡片 */
+  #patchouli-organic-root .ptx-points { display: grid; grid-template-columns: repeat(auto-fit, minmax(244px, 1fr)); gap: 8px; }
+  #patchouli-organic-root .ptx-point {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 11px 13px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-left: 2px solid rgba(14, 164, 79, 0.45);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-point-view { font-size: 13.5px; font-weight: 650; line-height: 1.5; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  #patchouli-organic-root .ptx-voice-l {
+    font-family: var(--bio-mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-4);
+    min-width: 28px;
+  }
+  #patchouli-organic-root .ptx-voice.is-support .ptx-voice-l { color: rgba(10, 124, 58, 0.8); }
+  #patchouli-organic-root .ptx-voice.is-dissent .ptx-voice-l { color: rgba(138, 91, 22, 0.85); }
+  #patchouli-organic-root .ptx-point-line { font-size: 12.5px; line-height: 1.7; color: var(--bio-ink-2); text-shadow: none; }
+  #patchouli-organic-root .ptx-point-line b { color: var(--bio-ink-3); font-weight: 600; margin-right: 5px; }
+
+  /* 原始引用 */
+  #patchouli-organic-root .ptx-quotes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }
+  #patchouli-organic-root .ptx-quote {
+    padding: 11px 13px;
+    border-radius: var(--r-card);
+    border-left: 2px solid rgba(184, 121, 30, 0.5);
+    background: var(--surface-warm);
+    border-top: 1px solid var(--hairline);
+    border-right: 1px solid var(--hairline);
+    border-bottom: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-quote-t { font-size: 13.5px; line-height: 1.75; color: var(--bio-ink); text-shadow: none; }
+  #patchouli-organic-root .ptx-quote-a { margin-top: 5px; font-family: var(--bio-mono); font-size: 10.5px; letter-spacing: 0.01em; color: rgba(138, 91, 22, 0.9); }
+
+  /* 导语与起因行 */
+  #patchouli-organic-root .ptx-lead { max-width: 72ch; font-size: 14.5px; line-height: 1.75; color: var(--bio-ink); border-left: 2px solid rgba(14, 164, 79, 0.45); padding-left: 12px; text-shadow: none; }
+  #patchouli-organic-root .ptx-cause { margin-top: 7px; max-width: 72ch; font-size: 12.5px; line-height: 1.65; color: var(--bio-ink-3); text-shadow: none; }
+  #patchouli-organic-root .ptx-cause-l { font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.02em; color: var(--bio-slate); margin-right: 6px; }
+
+  /* 讨论脉络 / 主题综述：词条主体的连续叙事 */
+  #patchouli-organic-root .ptx-narrative { max-width: 68ch; }
+  #patchouli-organic-root .ptx-narrative p { margin: 0 0 12px; font-size: 14px; line-height: 1.85; color: var(--bio-ink-2); text-shadow: none; }
+  #patchouli-organic-root .ptx-narrative p:last-child { margin-bottom: 0; }
+  #patchouli-organic-root .ptx-quote-span { color: var(--bio-primary-strong); background: rgba(14, 143, 134, 0.08); border-radius: 3px; padding: 0 2px; }
+
+  /* 正文内联昵称胶囊：与「…」原话高亮（无边框）在视觉上区分 */
+  #patchouli-organic-root .ptx-node.is-inline { display: inline; padding: 0 5px; margin: 0 1px; font-size: 0.84em; line-height: inherit; vertical-align: baseline; white-space: nowrap; box-decoration-break: clone; }
+
+  /* 相关线索：序号 + 标题 + 一行摘要（+ 箭头 / 未入索引旗标） */
+  #patchouli-organic-root .ptx-related { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; max-width: 72ch; }
+  #patchouli-organic-root .ptx-link { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; width: 100%; padding: 7px 10px; border: 1px solid transparent; border-radius: var(--r-ctl); background: none; font: inherit; text-align: left; color: inherit; cursor: pointer; transition: background-color 0.16s var(--ease-organic), border-color 0.16s var(--ease-organic); }
+  #patchouli-organic-root button.ptx-link:hover, #patchouli-organic-root button.ptx-link:focus-visible { background: var(--surface-mint); border-color: rgba(14, 164, 79, 0.18); outline: none; }
+  #patchouli-organic-root button.ptx-link:hover .ptx-link-title, #patchouli-organic-root button.ptx-link:focus-visible .ptx-link-title { color: var(--bio-primary-strong); }
+  #patchouli-organic-root button.ptx-link:hover .ptx-link-go, #patchouli-organic-root button.ptx-link:focus-visible .ptx-link-go { color: var(--bio-primary); transform: translateX(2px); }
+  #patchouli-organic-root .ptx-link-no { font-family: var(--bio-mono); font-size: 10.5px; color: var(--bio-ink-4); font-variant-numeric: tabular-nums; }
+  #patchouli-organic-root .ptx-link-main { display: grid; gap: 1px; min-width: 0; }
+  #patchouli-organic-root .ptx-link-title { font-size: 13.5px; font-weight: 600; color: var(--bio-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #patchouli-organic-root .ptx-link-sum { display: block; font-size: 12px; line-height: 1.55; color: var(--bio-ink-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #patchouli-organic-root .ptx-link-go { color: var(--ctl-ink-weak); transition: color 0.16s var(--ease-organic), transform 0.16s var(--ease-organic); }
+  #patchouli-organic-root .ptx-link.is-missing { cursor: default; opacity: 0.62; }
+  #patchouli-organic-root .ptx-link.is-missing .ptx-link-title { font-weight: 500; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-link-flag { font-family: var(--bio-mono); font-size: 10px; padding: 0 6px; border: 1px solid var(--hairline); border-radius: var(--r-tag); color: var(--bio-ink-4); }
+
+  /* 「其余 N 条」折叠：安静的小字 summary */
+  #patchouli-organic-root .ptx-related-more { margin-top: 2px; }
+  #patchouli-organic-root .ptx-related-more > summary { cursor: pointer; padding: 6px 10px; font-family: var(--bio-mono); font-size: 11px; color: var(--bio-ink-3); list-style: none; }
+  #patchouli-organic-root .ptx-related-more > summary::-webkit-details-marker { display: none; }
+  #patchouli-organic-root .ptx-related-more > summary::after { content: "＋"; float: right; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-related-more[open] > summary::after { content: "－"; }
+
+  /* 附录：争点对照 + 摘句收进默认折叠的结构化索引 */
+  #patchouli-organic-root .ptx-appendix { border: 1px solid var(--hairline); border-radius: var(--r-card); background: var(--surface); }
+  #patchouli-organic-root .ptx-appendix > summary { cursor: pointer; padding: 9px 12px; font-size: 12px; font-weight: 650; letter-spacing: 0.02em; color: var(--bio-primary-strong); list-style: none; }
+  #patchouli-organic-root .ptx-appendix > summary::-webkit-details-marker { display: none; }
+  #patchouli-organic-root .ptx-appendix > summary::after { content: "＋"; float: right; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-appendix[open] > summary::after { content: "－"; }
+  #patchouli-organic-root .ptx-appendix .ptx-points, #patchouli-organic-root .ptx-appendix .ptx-quotes { padding: 0 12px 12px; }
+  #patchouli-organic-root .ptx-app-h { padding: 0 12px 6px; font-size: 11px; font-weight: 650; letter-spacing: 0.04em; color: var(--bio-secondary); }
+
+  /* 落点：已收敛 / 仍悬而未决 双列 */
+  #patchouli-organic-root .ptx-outcome { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  #patchouli-organic-root .ptx-outcome-col { padding: 10px 12px; border-radius: var(--r-card); background: var(--surface); border: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-outcome-l { display: block; margin-bottom: 6px; font-size: 11.5px; font-weight: 650; color: var(--bio-ink-3); }
+
+  /* 名词注：紧凑释义表 */
+  #patchouli-organic-root .ptx-gloss { max-width: 72ch; margin: 0; }
+  #patchouli-organic-root .ptx-gloss-row { display: flex; gap: 10px; font-size: 13px; line-height: 1.7; margin-bottom: 4px; }
+  #patchouli-organic-root .ptx-gloss-row dt { flex: 0 0 auto; font-weight: 650; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-gloss-row dd { margin: 0; color: var(--bio-ink-2); text-shadow: none; }
+
+  /* ================= 监控 ================= */
+  #patchouli-organic-root .ptx-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  #patchouli-organic-root .ptx-tile {
+    padding: 10px 12px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+    min-width: 0;
+  }
+  #patchouli-organic-root .ptx-tile-l { font-size: 11.5px; line-height: 1.4; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-tile-v {
+    margin-top: 2px;
+    font-family: var(--bio-mono);
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+    color: var(--bio-ink);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  #patchouli-organic-root .ptx-tile-v small { margin-left: 4px; font-size: 10.5px; font-weight: 500; color: var(--bio-ink-4); }
+
+  /* 监控页纵向顺序：流量图表 → 最新消息 → 指标磁贴（消息夹在趋势与数值之间充当事件锚点） */
+  #patchouli-organic-root .ptx-message-preview + .ptx-tiles { margin-top: 10px; }
+
+  /* 当前群最新消息横条：柔和葱绿底 + 发丝线边界；富媒体段就地展开，绝不撑满监控视窗 */
+  #patchouli-organic-root .ptx-message-preview {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--r-card);
+    background: var(--surface-mint-soft);
+    border: 1px solid rgba(14, 164, 79, 0.16);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-message-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+  }
+  #patchouli-organic-root .ptx-message-head strong {
+    flex: none;
+    font-family: var(--bio-ui);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink);
+  }
+  #patchouli-organic-root .ptx-message-head [data-message-author] {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--bio-primary-strong);
+  }
+  #patchouli-organic-root .ptx-message-head time { flex: none; font-variant-numeric: tabular-nums; }
+  /* 正文容器：文字段与媒体段共用一条可换行基线，媒体段独占整行 */
+  #patchouli-organic-root .ptx-message-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px 8px;
+    margin-top: 6px;
+    font-size: 12.5px;
+    line-height: 1.7;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-2);
+    overflow-wrap: anywhere;
+    text-shadow: none;
+  }
+  #patchouli-organic-root .ptx-rich-text {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #patchouli-organic-root .ptx-rich-face { width: 20px; height: 20px; border-radius: 5px; object-fit: cover; vertical-align: -5px; }
+
+  /* 图片缩略：点击放大走原生 dialog；按钮本体永不形变（只换边框色，无位移 / 缩放 / 发光） */
+  #patchouli-organic-root .ptx-rich-image {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    box-shadow: var(--shadow-card);
+    overflow: hidden;
+    cursor: zoom-in;
+    line-height: 0;
+  }
+  #patchouli-organic-root .ptx-rich-image img { display: block; max-width: 100%; max-height: 140px; width: auto; height: auto; }
+  #patchouli-organic-root .ptx-rich-image:hover { border-color: rgba(14, 164, 79, 0.3); }
+  #patchouli-organic-root .ptx-rich-image:active { border-color: rgba(14, 164, 79, 0.44); }
+  #patchouli-organic-root .ptx-rich-image:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.42); outline-offset: 1px; }
+  /* 加载失败的可见兜底（直链失效 / 媒体代理已过期），绝不留空白或假图 */
+  #patchouli-organic-root .ptx-rich-failed { font-family: var(--bio-mono); font-size: 10.5px; color: var(--bio-danger); }
+
+  /* 卡片 / 视频：白底发丝线小卡，封面统一裁切，避免富媒体抢走图表的注意力 */
+  #patchouli-organic-root .ptx-rich-media-card,
+  #patchouli-organic-root .ptx-rich-card {
+    flex: 1 1 100%;
+    min-width: 0;
+    display: block;
+    padding: 8px 10px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+    color: var(--bio-ink-2);
+    text-decoration: none;
+    overflow: hidden;
+  }
+  #patchouli-organic-root .ptx-rich-card:hover { border-color: rgba(14, 164, 79, 0.26); }
+  #patchouli-organic-root .ptx-rich-cover {
+    display: block;
+    width: 100%;
+    max-height: 128px;
+    object-fit: cover;
+    border-radius: var(--r-ctl);
+    background: rgba(20, 50, 34, 0.04);
+  }
+  #patchouli-organic-root .ptx-rich-media-title,
+  #patchouli-organic-root .ptx-rich-card-title { display: block; margin-top: 6px; font-size: 12px; font-weight: 650; line-height: 1.5; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-rich-media-title:first-child { margin-top: 0; }
+  #patchouli-organic-root .ptx-rich-card-text { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.6; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-rich-card-source { display: block; margin-top: 4px; font-family: var(--bio-mono); font-size: 10px; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-rich-video-player { display: block; width: 100%; max-height: 168px; margin-top: 6px; border-radius: var(--r-ctl); background: #0f1a14; }
+  #patchouli-organic-root .ptx-rich-link { display: inline-block; margin-top: 6px; font-family: var(--bio-mono); font-size: 10.5px; color: var(--bio-primary-strong); text-decoration: none; }
+  #patchouli-organic-root .ptx-rich-link:hover { text-decoration: underline; }
+
+  /* 引用 / 合并转发：左侧薄荷绿竖线（与观点矩阵同一套样式语言） */
+  #patchouli-organic-root .ptx-rich-quote,
+  #patchouli-organic-root .ptx-rich-forward {
+    flex: 1 1 100%;
+    min-width: 0;
+    padding: 6px 10px;
+    border-left: 2px solid rgba(14, 164, 79, 0.28);
+    border-radius: 0 var(--r-ctl) var(--r-ctl) 0;
+    background: rgba(14, 164, 79, 0.05);
+  }
+  #patchouli-organic-root .ptx-rich-quote-title { display: block; font-size: 11px; font-weight: 650; line-height: 1.5; color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-rich-quote-text { display: block; font-size: 11.5px; line-height: 1.6; color: var(--bio-ink-3); overflow-wrap: anywhere; }
+  #patchouli-organic-root .ptx-rich-forward-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    cursor: pointer;
+    list-style: none;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--bio-primary-strong);
+  }
+  #patchouli-organic-root .ptx-rich-forward-summary::-webkit-details-marker { display: none; }
+  #patchouli-organic-root .ptx-rich-forward-summary::after { content: "展开"; margin-left: auto; flex: none; font-family: var(--bio-mono); font-size: 10px; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-rich-forward[open] > .ptx-rich-forward-summary::after { content: "收起"; }
+  #patchouli-organic-root .ptx-rich-forward-title { flex: none; font-weight: 650; }
+  #patchouli-organic-root .ptx-rich-forward-count { flex: 1; min-width: 0; font-family: var(--bio-mono); font-size: 10px; color: var(--bio-ink-4); }
+  /* 展开后就地推挤，但内部细滚动 + 高度上限，绝不把监控视窗无节制向下推 */
+  #patchouli-organic-root .ptx-rich-forward-body {
+    max-height: 180px;
+    margin-top: 6px;
+    padding-right: 2px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(20, 50, 34, 0.18) transparent;
+  }
+  #patchouli-organic-root .ptx-rich-forward-body::-webkit-scrollbar { width: 6px; }
+  #patchouli-organic-root .ptx-rich-forward-body::-webkit-scrollbar-thumb { border-radius: 3px; background: rgba(20, 50, 34, 0.16); }
+  #patchouli-organic-root .ptx-rich-forward-item { padding: 5px 0; border-top: 1px dashed rgba(20, 50, 34, 0.1); }
+  #patchouli-organic-root .ptx-rich-forward-item:first-child { padding-top: 0; border-top: none; }
+  #patchouli-organic-root .ptx-rich-forward-author { display: block; font-size: 10.5px; font-weight: 650; line-height: 1.5; color: var(--bio-ink-2); }
+  #patchouli-organic-root .ptx-rich-forward-more { display: block; margin-top: 4px; font-family: var(--bio-mono); font-size: 10px; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-rich-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 4px 6px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--bio-ink-3);
+    overflow-wrap: anywhere;
+  }
+  #patchouli-organic-root .ptx-rich-line .ptx-rich-image img { max-height: 96px; }
+  #patchouli-organic-root .ptx-rich-line .ptx-rich-cover { max-height: 96px; }
+
+  /* 文件 / 语音：单行胶囊，链接仅在 URL 合法时出现 */
+  #patchouli-organic-root .ptx-rich-file {
+    flex: 1 1 100%;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-rich-file-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 11.5px;
+    color: var(--bio-ink-2);
+  }
+  #patchouli-organic-root .ptx-rich-file .ptx-rich-link { flex: none; margin-top: 0; }
+  #patchouli-organic-root .ptx-rich-record { flex: 1 1 100%; min-width: 0; display: flex; align-items: center; gap: 8px; }
+  #patchouli-organic-root .ptx-rich-audio { flex: 1 1 auto; min-width: 0; height: 30px; }
+  #patchouli-organic-root .ptx-rich-record-label { flex: none; font-family: var(--bio-mono); font-size: 10.5px; color: var(--bio-ink-4); font-variant-numeric: tabular-nums; }
+
+  /* 图片放大：原生 dialog（Esc / 点空白关闭），固定全屏居中的顶层弹窗。
+     dialog 挂在 #patchouli-organic-root 下（不是 .ptx-viewport 里），因此定位与尺寸必须
+     自带全套：fixed + inset: 0 + margin: auto 才同时拿到水平与垂直居中，width: fit-content
+     让小图不撑成整屏；!important 用于压过 top layer 的 UA 版式与宿主继承下来的宽容规则
+     （旧版正是被 .ptx-viewport > * 的 100% 宽度 + 左右 auto 边距锁成 820px 并偏左）。 */
+  #patchouli-organic-root .ptx-rich-lightbox {
+    position: fixed !important;
+    inset: 0 !important;
+    margin: auto !important;
+    width: fit-content !important;
+    max-width: min(92vw, 1040px) !important;
+    max-height: 92vh !important;
+    padding: 0;
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    box-shadow: var(--shadow-float);
+    overflow: hidden;
+    /* 根容器整体 pointer-events: none，弹窗必须自己收回命中测试，点空白才能关闭 */
+    pointer-events: auto;
+  }
+  #patchouli-organic-root .ptx-rich-lightbox::backdrop { background: rgba(12, 24, 18, 0.56); }
+  #patchouli-organic-root .ptx-rich-lightbox img {
+    display: block;
+    margin: 0 auto;
+    max-width: min(92vw, 1040px);
+    max-height: 92vh;
+    object-fit: contain;
+  }
+
+  #patchouli-organic-root .ptx-bar { height: 3px; margin-top: 7px; overflow: hidden; border-radius: 2px; background: rgba(20, 50, 34, 0.08); }
+  #patchouli-organic-root .ptx-bar i {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--bio-secondary);
+    transition: width 0.5s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-bar.is-alert i { background: var(--bio-danger); }
+
+  /* 时间序列图表面板 */
+  #patchouli-organic-root .ptx-panel {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border-radius: var(--r-card);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    box-shadow: var(--shadow-card);
+  }
+  #patchouli-organic-root .ptx-panel-h {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  #patchouli-organic-root .ptx-panel-h strong {
+    font-family: var(--bio-ui);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink);
+  }
+  #patchouli-organic-root .ptx-panel-h > span:last-child { text-align: right; }
+  #patchouli-organic-root .ptx-panel-h b { font-weight: 700; color: var(--bio-ink-2); }
+  #patchouli-organic-root .ptx-panel-h + .ptx-panel-h { margin-top: 3px; font-size: 10px; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-ecg {
+    display: block;
+    width: 100%;
+    height: 78px;
+    margin-top: 8px;
+    overflow: visible;
+  }
+  /* 网格基准线：极淡虚线（流量图的三条 Y 刻度线） */
+  #patchouli-organic-root .ptx-ecg-base {
+    fill: none;
+    stroke: rgba(20, 50, 34, 0.12);
+    stroke-width: 1;
+    stroke-dasharray: 2 4;
+    vector-effect: non-scaling-stroke;
+  }
+  /* ============ 消息流量图：真实时间轴 × 每 5 秒消息条数 ============ */
+  /* 左列 42px 承载 Y 刻度，右列绘图区（minmax(0,1fr) 防止 SVG 撑破面板） */
+  #patchouli-organic-root .ptx-traffic-chart {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    align-items: stretch;
+    margin-top: 8px;
+  }
+  #patchouli-organic-root .ptx-traffic-y {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding-right: 6px;
+    font-family: var(--bio-mono);
+    font-size: 9.5px;
+    line-height: 1;
+    color: var(--bio-ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  /* 上边距由图表容器承担：SVG 归零后与 Y 刻度逐行对齐；高度放宽到 140px 供读数 */
+  #patchouli-organic-root .ptx-traffic-chart .ptx-ecg { margin-top: 0; height: 140px; }
+  /* 时间刻度：缩进 42px 与绘图区左边界对齐 */
+  #patchouli-organic-root .ptx-traffic-times {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    margin-left: 42px;
+    font-family: var(--bio-mono);
+    font-size: 9.5px;
+    line-height: 1;
+    color: var(--bio-ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  /* 监控状态条：连接中断 / 等待采样；空态不占位 */
+  #patchouli-organic-root .ptx-monitor-status {
+    margin-bottom: 8px;
+    font-family: var(--bio-mono);
+    font-size: 10px;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+  }
+  #patchouli-organic-root .ptx-monitor-status:empty { display: none; }
+  #patchouli-organic-root .ptx-ecg-line {
+    fill: none;
+    stroke: var(--bio-primary-strong);
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+    transition: stroke 0.3s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-ecg-note {
+    margin-top: 4px;
+    font-family: var(--bio-mono);
+    font-size: 10px;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+  }
+  /* 突发相位：曲线与描边转为绯红语义色 */
+  #patchouli-organic-root .ptx-panel.is-burst { border-color: rgba(196, 72, 92, 0.28); }
+  #patchouli-organic-root .ptx-panel.is-burst .ptx-panel-h b { color: var(--bio-danger); }
+  #patchouli-organic-root .ptx-panel.is-burst .ptx-ecg-base { stroke: rgba(196, 72, 92, 0.16); }
+  #patchouli-organic-root .ptx-panel.is-burst .ptx-ecg-line { stroke: var(--bio-danger); }
+  #patchouli-organic-root .ptx-panel.is-burst .ptx-ecg-note { color: var(--bio-danger); }
+
+  #patchouli-organic-root .ptx-input {
+    width: 92px;
+    height: 30px;
+    padding: 0 9px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: inset 0 1px 1px rgba(20, 50, 34, 0.04);
+    color: var(--bio-ink);
+    font-family: var(--bio-mono);
+    font-size: 12.5px;
+    outline: none;
+    transition: border-color 0.16s var(--ease-organic), box-shadow 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-input:focus { border-color: rgba(14, 164, 79, 0.5); box-shadow: 0 0 0 3px rgba(14, 164, 79, 0.12); }
+
+  /* ================= 空状态 ================= */
+  #patchouli-organic-root .ptx-dormant {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 26px 16px 30px;
+    text-align: center;
+  }
+  #patchouli-organic-root .ptx-nucleus { width: 124px; height: 124px; }
+  #patchouli-organic-root .ptx-nucleus-membrane { fill: none; stroke: rgba(14, 164, 79, 0.2); stroke-width: 1; stroke-dasharray: 3 6; }
+  #patchouli-organic-root .ptx-nucleus-wall { fill: none; stroke: rgba(14, 143, 134, 0.16); stroke-width: 1; }
+  #patchouli-organic-root .ptx-nucleus-core { fill: rgba(14, 164, 79, 0.06); stroke: rgba(14, 164, 79, 0.34); stroke-width: 1; }
+  #patchouli-organic-root .ptx-nucleus-seed { fill: var(--bio-primary); opacity: 0.75; }
+
+  /* 空状态点缀轨道：仅保留定位所需动画，无缩放脉冲 */
+  #patchouli-organic-root .ptx-orb { transform-origin: 80px 80px; animation: ptxOrbit var(--n-dur) var(--ease-organic) infinite; animation-delay: var(--n-delay); }
+  #patchouli-organic-root .ptx-orb ellipse { fill: var(--n-tone); opacity: var(--n-opacity); }
+
+  #patchouli-organic-root .ptx-dormant-t { margin-top: 2px; font-size: 13px; font-weight: 650; letter-spacing: 0.02em; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-dormant-s { font-size: 12px; line-height: 1.6; letter-spacing: 0.01em; color: var(--bio-ink-3); text-shadow: none; max-width: 34ch; }
+
+  /* ================= 底栏 ================= */
+  #patchouli-organic-root .ptx-foot {
+    flex: none;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 14px;
+    border-top: 1px solid var(--hairline);
+    background: var(--foot-grad);
+    /* 右下角同样交给父级统一硬裁剪，底栏不再自补内层圆角（见 .ptx-rail 同段说明）。 */
+  }
+
+  /* 双槽位滑入：容器自身就是唯一裁切矩形（28px 高 + 上下 2px 微羽化），
+     行绝对定位在同一槽位里交替进出——不再有承载长轨道的内层元素。 */
+  #patchouli-organic-root .ptx-ticker {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    overflow: hidden;
+    mask-image: linear-gradient(180deg, transparent 0, #000 2px, #000 calc(100% - 2px), transparent 100%);
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 2px, #000 calc(100% - 2px), transparent 100%);
+  }
+
+  #patchouli-organic-root .ptx-trow {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 28px;
+    line-height: 28px;
+    min-width: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 0;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transform: translateY(0);
+    opacity: 1;
+    transition: transform 0.4s var(--ease-organic), opacity 0.3s ease;
+  }
+  #patchouli-organic-root .ptx-trow.is-active { transform: translateY(0); opacity: 1; }
+  #patchouli-organic-root .ptx-trow.is-leaving {
+    transform: translateY(-100%);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 0.4s var(--ease-organic), opacity 0.3s ease;
+  }
+  #patchouli-organic-root .ptx-trow.is-entering { transform: translateY(100%); opacity: 0; }
+  #patchouli-organic-root .ptx-tdot { flex: none; width: 4px; height: 4px; border-radius: 50%; background: rgba(14, 164, 79, 0.55); }
+  #patchouli-organic-root .ptx-ttitle { flex: 1; min-width: 0; font-size: 13px; font-weight: 550; color: var(--bio-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: color 0.16s var(--ease-organic); }
+  #patchouli-organic-root .ptx-trow:hover .ptx-ttitle { color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-tdate { flex: none; font-family: var(--bio-mono); font-size: 11px; white-space: nowrap; color: var(--bio-ink-4); }
+
+  #patchouli-organic-root .ptx-foot-acts { flex: none; display: flex; align-items: center; gap: 7px; }
+  #patchouli-organic-root .ptx-foot-btn { width: var(--ctl); height: var(--ctl); display: grid; place-items: center; padding: 0; }
+
+  /* 主操作按钮：实心葱绿，固定圆形 */
+  #patchouli-organic-root .ptx-foot-btn.is-core {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    color: #ffffff;
+    background: var(--bio-primary);
+    border: 1px solid #0a7c3a;
+    box-shadow: 0 1px 2px rgba(20, 50, 34, 0.12);
+  }
+  #patchouli-organic-root .ptx-foot-btn.is-core:hover {
+    background: #0b9446;
+    border-color: #076d33;
+    color: #ffffff;
+    box-shadow: 0 2px 4px rgba(20, 50, 34, 0.16);
+  }
+  /* 刷新中的唯一反馈：图标匀速旋转，按钮本体不形变 */
+  #patchouli-organic-root .ptx-foot-btn.is-busy svg { animation: ptxSpin 0.9s linear infinite; }
+
+  /* ================= 悬浮胶囊（第二处 backdrop-filter，点击展开） ================= */
+  #patchouli-organic-root .ptx-pill {
+    position: fixed;
+    right: 24px;
+    bottom: 116px;
+    z-index: 10050;
+    height: 46px;
+    padding: 0 16px 0 9px;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    border-radius: var(--r-pill);
+    background: var(--surface-float);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: var(--bevel-hi), var(--shadow-float);
+    color: var(--bio-ink);
+    cursor: pointer;
+    /* 触摸拖动：胶囊自身吞掉手势，页面滚动 / 双指缩放不再抢走指针 */
+    touch-action: none;
+    opacity: 0;
+    transform: scale(0.66) translateY(12px);
+    visibility: hidden;
+    transition:
+      transform 0.46s var(--ease-spring),
+      opacity 0.34s var(--ease-organic),
+      visibility 0s linear 0.46s,
+      border-color 0.16s var(--ease-organic),
+      background-color 0.16s var(--ease-organic);
+  }
+
+  /* 展开 / 收回的显隐过渡：窗口状态变化，按钮本体 hover / active 不形变 */
+  #patchouli-organic-root .ptx-pill.is-visible {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    visibility: visible;
+    transition-delay: 0s;
+  }
+
+  #patchouli-organic-root .ptx-pill:hover {
+    background: var(--surface);
+    border-color: rgba(14, 164, 79, 0.32);
+  }
+
+  /* 拖动中：唯一状态类是 .is-dragging，位移全部走行内 left / top（无过渡、无 transform 形变） */
+  #patchouli-organic-root .ptx-pill.is-dragging {
+    transition: none;
+    transform: none;
+    cursor: grabbing;
+  }
+
+  #patchouli-organic-root .ptx-pill-core {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: #ffffff;
+    background: var(--bio-primary);
+    border: 1px solid #0a7c3a;
+  }
+
+  #patchouli-organic-root .ptx-pill-txt { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.32; }
+  #patchouli-organic-root .ptx-pill-name { font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-pill-id { font-size: 11px; letter-spacing: 0.01em; color: var(--bio-ink-4); }
+
+  /* ================= hover 浮层（说明文字唯一出口） ================= */
+  #patchouli-organic-root :where([data-tip]) { position: relative; }
+
+  #patchouli-organic-root [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 8px);
+    z-index: 70;
+    width: max-content;
+    max-width: 220px;
+    padding: 7px 10px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: var(--bevel-hi), 0 8px 20px -12px rgba(20, 50, 34, 0.32);
+    color: var(--bio-ink-2);
+    font-family: var(--bio-ui);
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+    text-align: left;
+    white-space: normal;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translate(-50%, -3px);
+    transition: opacity 0.16s var(--ease-organic), transform 0.16s var(--ease-organic), visibility 0s linear 0.16s;
+  }
+
+  #patchouli-organic-root [data-tip]:hover::after,
+  #patchouli-organic-root [data-tip]:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(-50%, 0);
+    transition-delay: 0s;
+  }
+
+  #patchouli-organic-root [data-tip][data-tip-pos="right"]::after { left: calc(100% + 10px); top: 50%; transform: translate(-4px, -50%); }
+  #patchouli-organic-root [data-tip][data-tip-pos="right"]:hover::after { transform: translate(0, -50%); }
+  #patchouli-organic-root [data-tip][data-tip-pos="top"]::after { top: auto; bottom: calc(100% + 8px); transform: translate(-50%, 3px); }
+  #patchouli-organic-root [data-tip][data-tip-pos="top"]:hover::after { transform: translate(-50%, 0); }
+
+  /* 群聊面板展开时压掉 chip 自己的提示气泡：面板正落在那条气泡的位置上 */
+  #patchouli-organic-root .ptx-channel.is-open::after { opacity: 0; visibility: hidden; }
+
+  /* ================= 轻提示 ================= */
+  #patchouli-organic-root .ptx-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 30px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 14px;
+    border-radius: var(--r-ctl);
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    box-shadow: var(--bevel-hi), 0 10px 24px -14px rgba(20, 50, 34, 0.36);
+    color: var(--bio-ink-2);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    opacity: 0;
+    transform: translate(-50%, 8px);
+    pointer-events: none;
+    transition: opacity 0.24s var(--ease-organic), transform 0.24s var(--ease-organic);
+    z-index: 10000;
+  }
+  #patchouli-organic-root .ptx-toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+
+  @keyframes ptxFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes ptxSpin { to { transform: rotate(360deg); } }
+  /* 连接中的状态点：仅透明度呼吸，无缩放 */
+  @keyframes ptxPhasePulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  @keyframes ptxOrbit {
+    from { transform: rotate(var(--n-angle)) translateX(var(--n-radius)); }
+    to { transform: rotate(calc(var(--n-angle) + 360deg)) translateX(var(--n-radius)); }
+  }
+
+
+  /* ================= 视窗主体：单一 820px 版心 =================
+     全部阶段容器共用同一条 820px 版心：整块内容在视窗中轴上居中（左右外边距完全对称），
+     版心内部每个容器都是 100% 宽，于是标题绿条、设置卡片边框、编辑器边框、列表边框
+     全部落在同一条垂直线上（严格左对齐）。不再有 960 / 720 / 82ch 三档宽度各自居中
+     造成的参差错位；视窗窄于 820px 时自动退化为整宽铺满，窄档无需额外覆盖。 */
+  #patchouli-organic-root .ptx-vhead {
+    max-width: 820px;
+    width: 100%;
+    margin: 0 auto 12px;
+  }
+  #patchouli-organic-root .ptx-strip {
+    max-width: 820px;
+    width: 100%;
+    margin: 0 auto 10px;
+  }
+  #patchouli-organic-root .ptx-spores,
+  #patchouli-organic-root .ptx-panel,
+  #patchouli-organic-root .ptx-message-preview,
+  #patchouli-organic-root .ptx-tiles,
+  #patchouli-organic-root .ptx-meta,
+  #patchouli-organic-root .ptx-sec,
+  #patchouli-organic-root .ptx-editor,
+  #patchouli-organic-root .ptx-dormant {
+    max-width: 820px;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  /* 设置页本身就是版心：内部行与编辑器满铺 100%，左缘与标题 100% 垂直对齐 */
+  #patchouli-organic-root .ptx-settings-page {
+    max-width: 820px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  #patchouli-organic-root .ptx-settings-row { width: 100%; }
+  /* 兜底：视窗是唯一的排版容器，任何直接子块（正文标题行 / 标签行 / 操作条 / 发言人
+     行，以及以后新增的阶段块）都约束在同一条 820px 版心里，左缘永远与标题绿条对齐。
+     只排除 dialog：弹窗是挂在根容器上的顶层浮层，fixed / inset / margin: auto 是它自身的
+     居中契约；被这里的 100% 宽度 + 左右 auto 边距接管的后果就是“820px 宽、贴左不居中”。 */
+  #patchouli-organic-root .ptx-viewport > :not(dialog) {
+    max-width: 820px;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* ================= 窗口尺寸响应（运行时档位类：排版随窗口宽度换挡，而非浏览器宽度） =================
+     不再使用 container-type / @container：查询容器会让窗口每次尺寸变化都重算整窗查询条件，
+     正是缩放时的全屏重光栅瓶颈。JS 在写入宽度的同一次调用里维护
+     .ptx-window.is-narrow（宽度 ≤ 782px）与 .ptx-window.is-compact（≤ 562px），
+     由 ResizeObserver 与几何提交共用同一个同步函数维护（见 syncResponsiveTier）。
+     只有窗口本体几何与窗口外的浮层入口（胶囊 / 重开按钮）仍按视口判定。 */
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-id-code { display: none; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-spore-sum { display: none; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-spores { grid-template-columns: 1fr; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-viewport { padding: 14px 16px 16px; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-stat:nth-child(3) { border-left: 0; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-stat:nth-child(n+3) { border-top: 1px solid var(--hairline); }
+
+  /* 极窄档的顶栏改成两行：第一行 id 左对齐 + 三键右对齐，第二行筛选与搜索整行铺满。
+     .ptx-tools 只是常规档的右侧聚拢层，窄档用 display: contents 把它解包，
+     让 filter / winctl 直接成为顶栏的 flex 子项，才能用 order 重新分行。 */
+  #patchouli-organic-root .ptx-window.is-compact .ptx-topbar {
+    height: auto;
+    min-height: 56px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px 8px 12px;
+    row-gap: 8px;
+  }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-tools { display: contents; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-id {
+    order: 1;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-winctl {
+    order: 2;
+    flex: none;
+    margin-left: auto;
+    gap: 4px;
+    padding-left: 8px;
+  }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-filter {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-chip:last-child { flex: 1 1 96px; min-width: 0; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-find { flex: 1 1 auto; width: auto; min-width: 0; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-tiles { grid-template-columns: 1fr; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-tile-v { font-size: 18px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-panel { padding: 10px 12px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-panel-h { flex-wrap: wrap; gap: 2px 10px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-panel-h > span:last-child { text-align: left; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-ecg { height: 64px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-traffic-chart .ptx-ecg { height: 120px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-input { width: 84px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-editor .ptx-input { width: 100%; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-settings-page { max-width: none; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-acts { padding: 8px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-editor { padding: 10px; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-editor-field.is-narrow { flex: 1 1 100%; }
+  #patchouli-organic-root .ptx-window.is-compact .ptx-editor-hint { margin-left: 0; }
+
+  /* ================= 夜间主题（根容器 .is-dark 上的变量覆盖） =================
+     中性冷炭灰（charcoal / slate，参考 Koishi 控制台、Linear、GitHub Dark）：
+     页面 #222327、窗口面 #28292e、提升面 #32333b、悬浮面 #393b44，形成 5 级灰度高程；
+     主波长收敛为清爽薄荷翠绿 #10b981，发丝线转为白色 8% / 14%，文字走柔白 → 中灰四级。
+     明暗共用同一套几何与布局，只换纸面与墨色。 */
+  #patchouli-organic-root.is-dark {
+    color-scheme: dark;
+    --bg-porcelain: #222327;
+    --bg-membrane: #28292e;
+    --bio-primary: #10b981;
+    --bio-primary-strong: #34d399;
+    --bio-secondary: #2dd4bf;
+    --bio-cyan: #5eead4;
+    --bio-slate: #9499b0;
+    --bio-violet: #a78bfa;
+    --bio-violet-strong: #c4b5fd;
+    --bio-enzyme: #e3b781;
+    --bio-danger: #f08c9c;
+    --bio-ink: #f3f4f6;
+    --bio-ink-2: #d1d5db;
+    --bio-ink-3: #9ca3af;
+    --bio-ink-4: #6b7280;
+    --hairline: rgba(255, 255, 255, 0.08);
+    --hairline-strong: rgba(255, 255, 255, 0.14);
+    /* 夜间窗体框线：与日间同一策略，四边同一条白光发丝线，圆角处连续闭合 */
+    --hairline-frame: rgba(255, 255, 255, 0.1);
+    --surface: #28292e;
+    --surface-soft: #2e3036;
+    --surface-warm: #2c2d33;
+    --surface-cyan: #1e2b2c;
+    --surface-cyan-soft: #1f3031;
+    --surface-mint: #203328;
+    --surface-mint-strong: #253f30;
+    --surface-mint-soft: #21352a;
+    --surface-hover: #393b44;
+    --surface-active: #2c2e35;
+    --surface-raise: #32333b;
+    --surface-press: #24252b;
+    --surface-track: #1f2024;
+    --surface-amber: #322a1e;
+    --surface-danger: #33222a;
+    --surface-float: #2d2e35;
+    --knob: #e5e7eb;
+    --ctl-ink: #d1d5db;
+    --ctl-ink-weak: #6b7280;
+    --node-ink: #6ee7b7;
+    --node-support-ink: #a7f3d0;
+    --amber-ink: #e8c493;
+    --tag-ink: #5eead4;
+    --brand-ink: #6ee7b7;
+    --topbar-ink: #e5e7eb;
+    --danger-ink: #f8a4b2;
+    --scroll-thumb: rgba(255, 255, 255, 0.13);
+    --scroll-thumb-hover: rgba(255, 255, 255, 0.22);
+    --bevel-hi: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-float: 0 18px 40px -26px rgba(0, 0, 0, 0.7);
+    /* 夜间窗体影：深色宿主上需要更实的贴边层与更长的铺开层，才不会被炭灰底吃掉 */
+    --shadow-window: 0 1px 3px rgba(0, 0, 0, 0.4), 0 12px 32px -8px rgba(0, 0, 0, 0.55);
+    --win-grad: linear-gradient(168deg, #2c2d33 0%, #28292e 52%, #24252a 100%);
+    --rail-grad: linear-gradient(180deg, #2b2c32 0%, #25262b 100%);
+    --topbar-grad: linear-gradient(180deg, #2d2e34 0%, #28292e 100%);
+    --foot-grad: linear-gradient(180deg, #2a2b31 0%, #25262b 100%);
+  }
+  #patchouli-organic-root.is-dark .ptx-rail { box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.05); }
+  #patchouli-organic-root.is-dark .ptx-input { box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35); }
+  /* 荧光绿底上的文字改用深墨：高亮底色配白字在夜间会发灰、刺眼 */
+  #patchouli-organic-root.is-dark .ptx-btn.is-primary:hover,
+  #patchouli-organic-root.is-dark .ptx-foot-btn.is-core,
+  #patchouli-organic-root.is-dark .ptx-foot-btn.is-core:hover,
+  #patchouli-organic-root.is-dark .ptx-pill-core { color: #0b1710; }
+  /* 夜间危险色压暗一档，保证白字可读，仍是柔和朱红而非鲜红 */
+  #patchouli-organic-root.is-dark .ptx-btn.is-danger-solid { color: #fdf3f5; background: #9c3b4c; border-color: #b45263; }
+  #patchouli-organic-root.is-dark .ptx-btn.is-danger-solid:hover { background: #ad4658; border-color: #c06070; }
+  #patchouli-organic-root.is-dark .ptx-btn.is-danger-solid:active { background: #8f3545; }
+  #patchouli-organic-root.is-dark .ptx-winctl-btn.is-close:hover { background: #9c3b4c; border-color: #b45263; }
+  #patchouli-organic-root.is-dark .ptx-winctl-btn.is-close:active { background: #8f3545; border-color: #7c2e3d; }
+  #patchouli-organic-root.is-dark .ptx-rich-forward-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); }
+  #patchouli-organic-root.is-dark .ptx-rich-lightbox::backdrop { background: rgba(10, 11, 13, 0.72); }
+  #patchouli-organic-root.is-dark .ptx-bar { background: rgba(255, 255, 255, 0.1); }
+  #patchouli-organic-root.is-dark .ptx-theme .ptx-ico-sun { display: block; }
+  #patchouli-organic-root.is-dark .ptx-theme .ptx-ico-moon { display: none; }
+
+
+  /* ===== 阅读区重整：相关线索 / 附录 / 名词注 / 内联昵称 ===== */
+  #patchouli-organic-root .ptx-node.is-inline { font-size: 0.92em; line-height: 1.5; padding: 0 6px; margin: 0 2px; border-radius: 4px; font-weight: 600; white-space: nowrap; }
+
+  #patchouli-organic-root .ptx-related { display: flex; flex-direction: column; gap: 0; max-width: 72ch; margin: 0; padding: 0; border-top: 1px solid var(--hairline); background: transparent; }
+  #patchouli-organic-root .ptx-link { -webkit-appearance: none; appearance: none; display: grid; grid-template-columns: 22px minmax(0, 1fr) 14px; align-items: start; column-gap: 10px; width: 100%; margin: 0; padding: 9px 6px 9px 2px; border: 0; border-bottom: 1px solid var(--hairline); border-radius: 0; background: transparent; box-shadow: none; font: inherit; text-align: left; color: inherit; cursor: pointer; transition: background-color 0.16s var(--ease-organic); }
+  #patchouli-organic-root .ptx-link:last-child { border-bottom: 0; }
+  #patchouli-organic-root button.ptx-link:hover, #patchouli-organic-root button.ptx-link:focus-visible { background: var(--surface-mint); border-radius: 6px; outline: none; }
+  #patchouli-organic-root button.ptx-link:hover .ptx-link-title, #patchouli-organic-root button.ptx-link:focus-visible .ptx-link-title { color: var(--bio-primary-strong); }
+  #patchouli-organic-root button.ptx-link:hover .ptx-link-go, #patchouli-organic-root button.ptx-link:focus-visible .ptx-link-go { color: var(--bio-primary); opacity: 1; transform: translateX(2px); }
+  #patchouli-organic-root .ptx-link-no { padding-top: 1px; font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--bio-primary-strong); font-variant-numeric: tabular-nums; }
+  #patchouli-organic-root .ptx-link-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  #patchouli-organic-root .ptx-link-title { font-size: 13px; line-height: 1.5; font-weight: 600; color: var(--bio-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #patchouli-organic-root .ptx-link-sum { font-size: 11.5px; line-height: 1.55; color: var(--bio-ink-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #patchouli-organic-root .ptx-link-go { align-self: center; color: var(--bio-ink-4); opacity: 0.5; transition: color 0.16s var(--ease-organic), opacity 0.16s var(--ease-organic), transform 0.16s var(--ease-organic); }
+  #patchouli-organic-root .ptx-link.is-missing { grid-template-columns: 22px minmax(0, 1fr) auto; cursor: default; opacity: 0.55; }
+  #patchouli-organic-root .ptx-link.is-missing .ptx-link-title { font-weight: 500; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-link-flag { align-self: center; margin-left: 6px; padding: 0 5px; border: 1px solid var(--hairline); border-radius: var(--r-tag); font-family: var(--bio-mono); font-size: 10px; color: var(--bio-ink-4); white-space: nowrap; }
+  #patchouli-organic-root .ptx-related-more { margin-top: 0; border-top: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-related-more > summary { display: flex; align-items: center; gap: 8px; padding: 9px 6px 9px 2px; font-family: var(--bio-mono); font-size: 11px; color: var(--bio-ink-3); list-style: none; cursor: pointer; }
+  #patchouli-organic-root .ptx-related-more > summary::-webkit-details-marker { display: none; }
+  #patchouli-organic-root .ptx-related-more > summary::after { content: "＋"; margin-left: auto; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-related-more[open] > summary::after { content: "－"; }
+  #patchouli-organic-root .ptx-related-more > .ptx-related { border-top: 0; }
+
+  /* 主题时间轴：左侧一条发丝竖线 + 节点圆点；等宽日期、13px/600 可点击标题、一句贡献。
+     延续相关线索的安静分隔语法，不做卡片堆叠。 */
+  #patchouli-organic-root .ptx-timeline { list-style: none; margin: 0; padding: 0; max-width: 72ch; }
+  #patchouli-organic-root .ptx-tl { position: relative; padding: 0 0 15px 20px; }
+  #patchouli-organic-root .ptx-tl:last-child { padding-bottom: 0; }
+  #patchouli-organic-root .ptx-tl::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 1px; background: var(--hairline-strong); }
+  #patchouli-organic-root .ptx-tl:last-child::before { bottom: auto; height: 12px; }
+  #patchouli-organic-root .ptx-tl-dot { position: absolute; left: 0; top: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--bio-cyan); box-shadow: 0 0 0 2px var(--bg-membrane); }
+  #patchouli-organic-root .ptx-tl-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  #patchouli-organic-root .ptx-tl-date { font-family: var(--bio-mono); font-size: 10.5px; line-height: 1.4; letter-spacing: 0.02em; color: var(--bio-ink-4); font-variant-numeric: tabular-nums; }
+  #patchouli-organic-root .ptx-tl-title { -webkit-appearance: none; appearance: none; display: inline; align-self: flex-start; max-width: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; font: inherit; font-size: 13px; line-height: 1.5; font-weight: 600; color: var(--bio-ink); text-align: left; cursor: pointer; transition: color 0.16s var(--ease-organic); }
+  #patchouli-organic-root button.ptx-tl-title:hover, #patchouli-organic-root button.ptx-tl-title:focus-visible { color: var(--bio-primary-strong); outline: none; }
+  #patchouli-organic-root span.ptx-tl-title { cursor: default; color: var(--bio-ink-2); font-weight: 500; }
+  #patchouli-organic-root .ptx-tl-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--bio-ink-4); text-shadow: none; }
+
+  #patchouli-organic-root .ptx-appendix { margin-top: 18px; border: 0; border-top: 1px solid var(--hairline); border-radius: 0; background: transparent; box-shadow: none; }
+  #patchouli-organic-root .ptx-appendix > summary { display: flex; align-items: center; gap: 8px; padding: 11px 2px; font-family: var(--bio-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; color: var(--bio-primary-strong); list-style: none; cursor: pointer; }
+  #patchouli-organic-root .ptx-appendix > summary::-webkit-details-marker { display: none; }
+  #patchouli-organic-root .ptx-appendix > summary::after { content: "＋"; margin-left: auto; font-family: var(--bio-ui); font-size: 13px; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-appendix[open] > summary::after { content: "－"; }
+  #patchouli-organic-root .ptx-appendix .ptx-points, #patchouli-organic-root .ptx-appendix .ptx-quotes { padding: 0; }
+  #patchouli-organic-root .ptx-app-h { margin: 18px 0 2px; padding-top: 12px; border-top: 1px solid var(--hairline); font-family: var(--bio-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--bio-secondary); }
+
+  #patchouli-organic-root .ptx-points { counter-reset: point; display: block; }
+  #patchouli-organic-root .ptx-point { counter-increment: point; position: relative; display: flex; flex-direction: column; gap: 6px; padding: 12px 0 12px 30px; border: 0; border-bottom: 1px solid var(--hairline); border-radius: 0; background: transparent; box-shadow: none; }
+  #patchouli-organic-root .ptx-point:last-child { border-bottom: 0; }
+  #patchouli-organic-root .ptx-point::before { content: counter(point, decimal-leading-zero); position: absolute; left: 0; top: 14px; font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.03em; color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-point-view { font-size: 13.5px; font-weight: 650; line-height: 1.55; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  #patchouli-organic-root .ptx-voice-l { min-width: 24px; font-family: var(--bio-mono); font-size: 9.5px; letter-spacing: 0.06em; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-voice.is-support .ptx-voice-l { color: rgba(10, 124, 58, 0.8); }
+  #patchouli-organic-root .ptx-voice.is-dissent .ptx-voice-l { color: rgba(138, 91, 22, 0.85); }
+  #patchouli-organic-root .ptx-point-line { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 8px; font-size: 12.5px; line-height: 1.7; color: var(--bio-ink-2); text-shadow: none; }
+  #patchouli-organic-root .ptx-point-line b { margin: 0; padding-top: 2px; font-family: var(--bio-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em; color: var(--bio-ink-4); }
+
+  #patchouli-organic-root .ptx-quotes { display: block; }
+  /* 教科书式引诗：去掉竖线，整段居中，以留白与引号承担引用层级 */
+  #patchouli-organic-root .ptx-quote { padding: 10px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; text-align: center; }
+
+  #patchouli-organic-root .ptx-quote-t { font-size: 13px; line-height: 1.8; color: var(--bio-ink-2); text-align: center; }
+  #patchouli-organic-root .ptx-quote-a { margin-top: 8px; font-family: var(--bio-mono); font-size: 10.5px; color: rgba(138, 91, 22, 0.9); text-align: center; }
+
+  #patchouli-organic-root .ptx-gloss { max-width: 72ch; margin: 0; padding: 0; }
+  #patchouli-organic-root .ptx-gloss-row { display: grid; grid-template-columns: minmax(64px, 104px) minmax(0, 1fr); align-items: start; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; line-height: 1.7; }
+  #patchouli-organic-root .ptx-gloss-row:first-child { border-top: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-gloss-row dt { margin: 0; font-size: 12.5px; font-weight: 650; color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-gloss-row dd { margin: 0; color: var(--bio-ink-2); text-shadow: none; }
+  #patchouli-organic-root .ptx-window.is-narrow .ptx-gloss-row { grid-template-columns: 1fr; gap: 2px; }
+
+
+  /* 最终一致性：内联昵称略放大；落点改为无卡片的双栏发丝线结构 */
+  #patchouli-organic-root .ptx-node.is-inline { font-size: 0.95em; padding: 0 7px; line-height: 1.5; }
+  #patchouli-organic-root .ptx-outcome { gap: 24px; padding-top: 2px; }
+  #patchouli-organic-root .ptx-outcome-col { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  #patchouli-organic-root .ptx-outcome-l { margin-bottom: 6px; font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.06em; color: var(--bio-ink-3); }
+  #patchouli-organic-root .ptx-outcome-col.is-consensus .ptx-outcome-l { color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-outcome-col.is-open .ptx-outcome-l { color: var(--bio-violet-strong); }
+
+  /* 争点对照：真正的表格，便于横向对照；表头固定、单元格自动换行 */
+  #patchouli-organic-root .ptx-table-wrap { width: 100%; overflow-x: auto; }
+  #patchouli-organic-root .ptx-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; line-height: 1.65; }
+  #patchouli-organic-root .ptx-table th { padding: 7px 8px; text-align: left; font-family: var(--bio-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; color: var(--bio-slate); border-bottom: 1px solid var(--hairline-strong); white-space: nowrap; }
+  #patchouli-organic-root .ptx-table td { padding: 10px 8px; vertical-align: top; border-bottom: 1px solid var(--hairline); color: var(--bio-ink-2); overflow-wrap: anywhere; }
+  #patchouli-organic-root .ptx-table tbody tr:last-child td { border-bottom: 0; }
+  #patchouli-organic-root .ptx-table th:nth-child(1) { width: 26px; }
+  #patchouli-organic-root .ptx-table th:nth-child(2) { width: 24%; }
+  #patchouli-organic-root .ptx-table th:nth-child(3), #patchouli-organic-root .ptx-table th:nth-child(4) { width: 16%; }
+  #patchouli-organic-root .ptx-table th:nth-child(5), #patchouli-organic-root .ptx-table th:nth-child(6) { width: 21%; }
+  #patchouli-organic-root .ptx-table td:nth-child(1) { padding-left: 0; }
+  #patchouli-organic-root .ptx-table td:nth-child(6) { padding-right: 0; }
+  #patchouli-organic-root .ptx-td-no { font-family: var(--bio-mono); font-size: 10px; letter-spacing: 0.03em; color: var(--bio-primary-strong); font-variant-numeric: tabular-nums; }
+  #patchouli-organic-root .ptx-td-view { font-weight: 600; color: var(--bio-ink); }
+  #patchouli-organic-root .ptx-td-side .ptx-node { display: inline-flex; margin: 0 4px 4px 0; padding: 0 6px; font-size: 10.5px; line-height: 1.6; }
+  #patchouli-organic-root .ptx-td-body { font-size: 11.5px; line-height: 1.7; }
+  #patchouli-organic-root .ptx-td-empty { color: var(--bio-ink-4); }
+
+  /* 对照表转置：属性竖排、观点横排；只保留表头一条横线 */
+  #patchouli-organic-root .ptx-table.ptx-compare thead th { padding: 8px 10px; border-bottom: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-table.ptx-compare thead th:first-child { width: 64px; padding-left: 0; }
+  #patchouli-organic-root .ptx-table.ptx-compare thead th:not(:first-child) { width: auto; }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody th { width: 64px; padding: 11px 8px; text-align: center; vertical-align: top; font-family: var(--bio-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; color: var(--bio-ink-3); border: 0; }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody td { padding: 11px 10px; vertical-align: top; border: 0; color: var(--bio-ink-2); }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody tr:first-child td, #patchouli-organic-root .ptx-table.ptx-compare tbody tr:first-child th { padding-top: 12px; }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody tr:last-child td, #patchouli-organic-root .ptx-table.ptx-compare tbody tr:last-child th { padding-bottom: 16px; }
+  #patchouli-organic-root .ptx-table.ptx-compare .ptx-td-view { font-size: 12.5px; line-height: 1.6; }
+  #patchouli-organic-root .ptx-table.ptx-compare .ptx-td-body { font-size: 11.5px; line-height: 1.7; }
+
+  /* 横线收敛：列表、名词注、摘句、附录小标题不再逐行画线 */
+  #patchouli-organic-root .ptx-link { padding: 10px 8px; border-bottom: 0; border-radius: 6px; }
+  #patchouli-organic-root .ptx-related-more { border-top: 0; }
+  #patchouli-organic-root .ptx-gloss-row { padding: 9px 0; border-top: 0 !important; border-bottom: 0; }
+  #patchouli-organic-root .ptx-quote { border-bottom: 0; }
+  #patchouli-organic-root .ptx-app-h { margin: 16px 0 4px; padding-top: 0; border-top: 0; }
+
+  /* 正文占满版心并水平居中；段落首行缩进两字 */
+  #patchouli-organic-root .ptx-lead, #patchouli-organic-root .ptx-cause, #patchouli-organic-root .ptx-narrative, #patchouli-organic-root .ptx-gloss, #patchouli-organic-root .ptx-related, #patchouli-organic-root .ptx-outcome { width: 100%; max-width: none; margin-left: 0; margin-right: 0; }
+  #patchouli-organic-root .ptx-narrative p { text-indent: 2em; }
+
+  /* 附录小标题不再单独画线；只保留附录顶线与表头线 */
+  #patchouli-organic-root .ptx-app-h { border: 0 !important; }
+  #patchouli-organic-root .ptx-quotes { border-top: 0 !important; }
+
+  /* 争点对照：轻量网格边框 + 全部左对齐（内容不再居中） */
+  #patchouli-organic-root .ptx-table.ptx-compare {
+    border: 1px solid var(--hairline);
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+    text-align: left;
+  }
+  #patchouli-organic-root .ptx-table.ptx-compare th,
+  #patchouli-organic-root .ptx-table.ptx-compare td { text-align: left; }
+  #patchouli-organic-root .ptx-table.ptx-compare thead th {
+    background: transparent;
+    border-bottom: 1px solid var(--hairline-strong);
+  }
+  #patchouli-organic-root .ptx-table.ptx-compare thead th + th { border-left: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody th {
+    background: transparent;
+    border-right: 1px solid var(--hairline);
+  }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody td + td { border-left: 1px solid var(--hairline); }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody tr:not(:last-child) > th,
+  #patchouli-organic-root .ptx-table.ptx-compare tbody tr:not(:last-child) > td { border-bottom: 1px solid var(--hairline); }
+
+  /* 表头与行首属性标签居中，内容左对齐 */
+  #patchouli-organic-root .ptx-table.ptx-compare thead th,
+  #patchouli-organic-root .ptx-table.ptx-compare tbody th { text-align: center; }
+  #patchouli-organic-root .ptx-table.ptx-compare tbody td { text-align: left; }
+  @media (max-width: 780px) {
+    #patchouli-organic-root .ptx-window { width: calc(100vw - 24px); height: calc(100vh - 48px); }
+  }
+
+  @media (max-width: 560px) {
+    #patchouli-organic-root .ptx-pill { right: 14px; bottom: 96px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #patchouli-organic-root * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+
+  #patchouli-organic-root.ptx-hidden { display: none; }
+  #patchouli-organic-root .ptx-window,
+  #patchouli-organic-root .ptx-pill,
+  #patchouli-organic-root .ptx-toast { pointer-events: auto; }`;
+
+/* ------------------------------------------------------------------ *
+ * 5. 状态与 DOM 引用
+ * ------------------------------------------------------------------ */
+
+/* 面板设置（localStorage，独立页 / dock / Console 三处共用同一键）。
+ * 读取容错：损坏、越界、类型不符的字段一律回退保守默认值。 */
+function clampInt(value, min, max, fallback) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const rounded = Math.round(parsed);
+  if (rounded < min) return min;
+  if (rounded > max) return max;
+  return rounded;
+}
+
+function defaultSettings() {
+  return {
+    autoDock: true,
+    tickerCount: TICKER_COUNT_DEFAULT,
+    tickerInterval: TICKER_INTERVAL_DEFAULT,
+    collapsedSections: {},
+  };
+}
+
+function loadSettings() {
+  const out = defaultSettings();
+  let raw = null;
+  try { raw = window.localStorage.getItem(SETTINGS_KEY); } catch (err) { raw = null; }
+  if (!raw) return out;
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
+  if (!parsed || typeof parsed !== 'object') return out;
+  if (typeof parsed.autoDock === 'boolean') out.autoDock = parsed.autoDock;
+  out.tickerCount = clampInt(parsed.tickerCount, TICKER_COUNT_MIN, TICKER_COUNT_MAX, out.tickerCount);
+  out.tickerInterval = clampInt(parsed.tickerInterval, TICKER_INTERVAL_MIN, TICKER_INTERVAL_MAX, out.tickerInterval);
+  if (parsed.collapsedSections && typeof parsed.collapsedSections === 'object') {
+    for (const [key, value] of Object.entries(parsed.collapsedSections)) {
+      if (value === true) out.collapsedSections[String(key)] = true;
+    }
+  }
+  return out;
+}
+
+function saveSettings() {
+  try {
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      autoDock: state.settings.autoDock,
+      tickerCount: state.settings.tickerCount,
+      tickerInterval: state.settings.tickerInterval,
+      collapsedSections: state.settings.collapsedSections,
+    }));
+  } catch (err) { /* 隐私模式或配额异常时静默降级：仅本次会话生效 */ }
+}
+
+/* ---------------- 卡片 / 列表视图模式（唯一键 patchouli-view-mode） ----------------
+ * 布局偏好独立于 SETTINGS：重置面板设置不应把用户刚选的布局一起清掉。
+ * 读取容错同设置项——任何异常 / 非法值都退回默认的卡片模式。 */
+function readStoredViewMode() {
+  let raw = null;
+  try { raw = window.localStorage.getItem(VIEW_KEY); } catch (err) { raw = null; }
+  return raw === 'list' ? 'list' : 'card';
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode === 'list' ? 'list' : 'card';
+  try { window.localStorage.setItem(VIEW_KEY, state.viewMode); } catch (err) { /* 隐私模式：仅本次会话生效 */ }
+}
+
+/* ---------------- 群聊范围（唯一键 patchouli-channel-scope） ----------------
+ * 群聊筛选是用户在顶栏做的选择，属于跨会话记忆：下次打开面板仍停在同一个群。
+ * 读取容错："all" / 空值 / 读取异常都收敛到"全部"，具体群聊是否仍存在由
+ * loadChannels 的成员校验兜底（群被移除时回落"全部"）。 */
+function readStoredChannel() {
+  let raw = null;
+  try { raw = window.localStorage.getItem(CHANNEL_SCOPE_KEY); } catch (err) { raw = null; }
+  const value = String(raw == null ? '' : raw).trim();
+  return value || 'all';
+}
+
+function setChannelScope(value) {
+  try { window.localStorage.setItem(CHANNEL_SCOPE_KEY, value || 'all'); } catch (err) { /* 隐私模式：仅本次会话生效 */ }
+}
+
+/* ---------------- 明暗主题（唯一键 patchouli-theme，缺省跟随宿主） ----------------
+ * 变量覆盖全部落在根容器的 .is-dark 上，窗口内不持有任何主题分支；
+ * 独立页 / 内嵌组件 / 本客户端共用同一套切换逻辑与同一份记忆。
+ * 缺省主题优先跟随宿主（Koishi 控制台深色主题）：本客户端是挂在宿主 body 上的全屏浮层，
+ * 宿主深色时窗口还保持亮白纸面，就是一块刺眼的白板。 */
+function systemTheme() {
+  try {
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+  } catch (err) { /* 无 matchMedia 的老浏览器回退浅色 */ }
+  return 'light';
+}
+
+function readStoredTheme() {
+  let raw = null;
+  try { raw = window.localStorage.getItem(THEME_KEY); } catch (err) { raw = null; }
+  return raw === 'dark' || raw === 'light' ? raw : null;
+}
+
+/* 宿主底色亮度：只认 computed backgroundColor，alpha 为 0 视为“这层没铺底色”，
+ * 继续往下一层（body → html）找。Koishi 深色主题的底色亮度在 20~40 之间，
+ * 日间纸面在 240 以上，128 一刀切足够区分。 */
+function hostLuma(el) {
+  if (!el || typeof window.getComputedStyle !== 'function') return null;
+  let raw = '';
+  try { raw = window.getComputedStyle(el).backgroundColor; } catch (err) { return null; }
+  const match = /rgba?\(\s*([0-9.]+)[,\s/]+([0-9.]+)[,\s/]+([0-9.]+)(?:[,\s/]+([0-9.]+)(%?))?\s*\)/i.exec(String(raw || ''));
+  if (!match) return null;
+  const alpha = match[4] == null ? 1 : (match[5] ? Number(match[4]) / 100 : Number(match[4]));
+  if (!isFinite(alpha) || alpha <= 0) return null;
+  return 0.2126 * Number(match[1]) + 0.7152 * Number(match[2]) + 0.0722 * Number(match[3]);
+}
+
+/* 宿主 class 上的主题语义令牌：控制台可能写 dark / theme-dark / is-dark（浅色同理），
+ * 逐个显式列举，避免子串匹配把 .dark-mode-toggle 之类误判成夜间主题。 */
+const DARK_TOKENS = ['dark', 'theme-dark', 'is-dark', 'dark-theme'];
+const LIGHT_TOKENS = ['light', 'theme-light', 'is-light', 'light-theme'];
+
+function tokenTheme(el) {
+  if (!el || !el.classList) return null;
+  for (const token of DARK_TOKENS) if (el.classList.contains(token)) return 'dark';
+  for (const token of LIGHT_TOKENS) if (el.classList.contains(token)) return 'light';
+  return null;
+}
+
+/* 宿主暗色检测。宿主可能用 class="dark" / ["dark-mode"] / theme-dark、data-theme="dark"，
+ * 也可能只是把 <body> 刷成深色，所以三种信号依次判定：
+ * 显式声明 → 宿主实际底色亮度 → 系统偏好（两者都读不到时的兜底）。 */
+function detectHostDark() {
+  if (typeof document === 'undefined') return false;
+  const hosts = [document.body, document.documentElement];
+  for (const el of hosts) {
+    if (!el) continue;
+    const token = tokenTheme(el);
+    if (token === 'dark') return true;
+    if (token === 'light') return false;
+    const declared = el.getAttribute('data-theme');
+    if (declared === 'dark') return true;
+    if (declared === 'light') return false;
+  }
+  for (const el of hosts) {
+    const luma = hostLuma(el);
+    if (luma != null) return luma < 128;
+  }
+  return systemTheme() === 'dark';
+}
+
+/* 生效主题的唯一裁决点。宿主深色优先：控制台深底下，任何一次旧测试 / 旧会话留下的
+ * "light" 记忆都会把窗口刷成刺眼白板，因此宿主判定为深色时直接以夜间渲染，持久化的
+ * 浅色不再生效；本次会话内用户手动点过日 / 月按钮则尊重手动选择（manualTheme）。 */
+let manualTheme = null;
+
+function desiredTheme() {
+  if (manualTheme === 'dark' || manualTheme === 'light') return manualTheme;
+  if (detectHostDark()) return 'dark';
+  return readStoredTheme() || 'light';
+}
+
+function applyTheme(theme, persist) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  state.theme = next;
+  if (rootEl) rootEl.classList.toggle('is-dark', next === 'dark');
+  const button = rootEl ? rootEl.querySelector('.ptx-theme') : null;
+  if (button) {
+    const label = next === 'dark' ? '切换日间主题' : '切换夜间主题';
+    button.setAttribute('aria-pressed', next === 'dark' ? 'true' : 'false');
+    button.setAttribute('aria-label', label);
+    button.setAttribute('data-tip', label);
+  }
+  if (persist) {
+    try { window.localStorage.setItem(THEME_KEY, next); } catch (err) { /* 隐私模式：仅本次会话生效 */ }
+  }
+}
+
+function toggleTheme() {
+  manualTheme = state.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(manualTheme, true);
+}
+
+/* 宿主换肤跟随：宿主 class / data-theme / style 任一变化都重新判定一次。
+ * 裁决统一走 desiredTheme()：本会话内手动选择 > 宿主深色 > 持久化偏好 > 浅色。 */
+let hostObserver = null;
+
+function syncHostTheme() {
+  applyTheme(desiredTheme(), false);
+}
+
+function watchHostTheme() {
+  if (hostObserver || typeof MutationObserver !== 'function' || typeof document === 'undefined') return;
+  const targets = [document.documentElement, document.body].filter(Boolean);
+  if (!targets.length) return;
+  /* 连续换肤（宿主切主题往往改一串 class）合并成一次：60ms 内只判一次，避免反复重算样式。 */
+  let queued = false;
+  hostObserver = new MutationObserver(() => {
+    if (queued) return;
+    queued = true;
+    setTimeout(() => { queued = false; syncHostTheme(); }, 60);
+  });
+  for (const target of targets) {
+    hostObserver.observe(target, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+  }
+}
+
+const state = {
+  mounted: false,
+  visible: false,
+  collapsed: false,
+  maximized: false,
+  sized: false,
+  restoreStyle: '',
+  settings: loadSettings(),
+  theme: detectHostDark() ? 'dark' : 'light',
+  stage: 'entries',
+  /* 进入正文时记住来源列表页签：返回键与页签高亮都回到它 */
+  listStage: 'entries',
+  viewMode: readStoredViewMode(),
+  entries: [],
+  entriesLoaded: false,
+  entriesError: '',
+  latestEntries: [],
+  latestLoaded: false,
+  latestError: false,
+  channels: DEFAULT_CHANNELS.slice(),
+  channel: readStoredChannel(),
+  keyword: '',
+  activeId: null,
+  detail: null,
+  detailError: '',
+  detailLoading: false,
+  status: null,
+  statusChecked: false,
+  tickerIndex: 0,
+  lastView: '',
+  idleTimer: null,
+  refreshTimer: null,
+  tickerTimer: null,
+  tickerSwap: null,
+  routeTimer: null,
+  rafId: 0,
+  pending: null,
+  editingEntryId: null,
+  deleteArmed: false,
+  clearArmed: false,
+  /* <details> 开合态记忆（key → true/false）：render() 会整页重写 innerHTML，
+     用户开过 / 关过的折叠区（附录、其余线索）不能弹回默认态；缺省值由渲染处给出 */
+  folds: {},
+  /* 系统提示词：服务端真值，进入设置页时拉取；data 为 null 表示尚未读取 */
+  prompt: { data: null, error: '' },
+  /* 主题校准参数：与提示词同属服务端真值，进入设置页时一并拉取 */
+  topicSettings: { data: null, error: '' },
+  /* 出图选项（服务端持久化）：maskNames=false 时按原昵称出图。 */
+  cardSettings: { settings: { maskNames: true }, error: '' },
+};
+
+let rootEl = null;
+let frameEl = null;
+let pillEl = null;
+let viewportEl = null;
+let tickerEl = null;
+let phaseEl = null;
+let toastEl = null;
+let gearBtnEl = null;
+let latestTimer = null;
+/* 群聊范围：自绘 listbox（原生 select 的系统弹层与整体材质冲突，故整块自绘） */
+let channelChip = null;
+let channelToggle = null;
+let channelMenu = null;
+let searchInput = null;
+let dragHandle = null;
+
+/* ------------------------------------------------------------------ *
+ * 6. 渲染
+ * ------------------------------------------------------------------ */
+
+function renderHead(title, sub, extra) {
+  return `<div class="ptx-vhead"><span class="ptx-vhead-bar"></span>` +
+    `<span class="ptx-vhead-title">${escapeHtml(title)}</span>` +
+    `<span class="ptx-vhead-sub">${escapeHtml(sub)}</span>` +
+    `${extra || ''}</div>`;
+}
+
+/* 卡片 / 列表切换块：标题行右端的分段胶囊。两枚按钮共用一个 data-act，
+   各自带 data-mode 与 aria-pressed，点击即落库并整屏重绘（滚动位置由 lastView 保持）。 */
+function renderViewToggle() {
+  const card = state.viewMode !== 'list';
+  const btn = (mode, icon, label, active) =>
+    `<button type="button" class="ptx-view-btn${active ? ' is-active' : ''}"` +
+    ` data-act="view-mode" data-mode="${mode}"` +
+    ` aria-pressed="${active ? 'true' : 'false'}" ${tip(label)} aria-label="${label}">` +
+    organicIcon(icon, 12) + '</button>';
+  return `<div class="ptx-view-mode" role="group" aria-label="词条布局">` +
+    btn('card', 'grid', '卡片视图', card) +
+    btn('list', 'list', '列表视图', !card) +
+  `</div>`;
+}
+
+/* 空状态：中文短标题 + 一句可执行提示 */
+function renderDormant(title, hint) {
+  return `<div class="ptx-dormant">${nucleusSvg()}` +
+    `<span class="ptx-dormant-t">${escapeHtml(title)}</span>` +
+    `<span class="ptx-dormant-s">${escapeHtml(hint)}</span></div>`;
+}
+
+function renderSection(title, inner) {
+  return `<div class="ptx-sec"><div class="ptx-sec-h">${escapeHtml(title)}</div>${inner}</div>`;
+}
+
+/* 触发器引擎：模式选择 + 按模式分组的参数组。
+ * 选择的草稿保存在 engineDraft（不即写服务端），点「保存并校准」才随其余参数一起
+ * POST /api/tune；服务端 resolveOptions 会把 triggerMode 同步成新值并迁移基线。
+ * 三档共用：突发倍率 / 平息等待 / 沉淀下限；rate 组追加 minBurstRate，
+ * potential 组追加 thetaMin/rhoMin/densityMultiplier/peakCoolFraction/dispatchMargin，
+ * shadow 两组并列 + potentialAutoTuning（双判据同步调参，影子期才能公平对照）。 */
+let engineDraft = null;
+/* 未保存的 tune 数值草稿（模式切换重渲染的存活载体）：键 = data-role。 */
+let tuneDraft = {};
+/* 双判据同步调参开关草稿：null=未拨动（服务端为准），true/false=用户目标态。 */
+let autotuneDraft = null;
+
+function engineModeFrom(options) {
+  const raw = options && options.triggerMode;
+  return raw === 'potential' || raw === 'shadow' ? raw : 'rate';
+}
+
+function renderEngineSettings(tuneOptions) {
+  const mode = engineDraft || engineModeFrom(tuneOptions);
+  const current = engineModeFrom(tuneOptions);
+  const modeBtn = (value, label, desc) =>
+    `<button type="button" class="ptx-view-btn is-text${mode === value ? ' is-active' : ''}"` +
+    ` data-act="engine-mode" data-mode="${value}" aria-pressed="${mode === value ? 'true' : 'false'}"` +
+    ` ${tip(desc)} aria-label="${label}">${label}</button>`;
+  const field = (role, label, min, max, step, value, aria) =>
+    `<label class="ptx-settings-row">` +
+      `<span class="ptx-settings-label">${label}<em>${aria}</em></span>` +
+      `<input class="ptx-input ptx-settings-num" data-role="${role}" type="number"` +
+      ` min="${min}"${max === undefined ? '' : ` max="${max}"`} step="${step}" value="${value}" aria-label="${label}">` +
+    `</label>`;
+  const group = (label, inner) => `<div class="ptx-settings-note">${label}</div>${inner}`;
+  const common =
+    field('tune-burst', '突发倍率', 1, undefined, 0.1, num(tuneOptions.burstMultiplier, 2.5), '瞬时速率超过日常基线的倍数即判定为突发，下限 1。') +
+    field('tune-quiet', '平息等待', 30, undefined, 30, num(tuneOptions.quiescenceSeconds, 300), '突发结束后静默多久才回到常态判定，单位秒。') +
+    field('tune-min-messages', '沉淀下限', 6, 16, 1, num(tuneOptions.minDiscussionMessages, 12), '一轮讨论至少多少条消息才交给模型，硬限幅 6–16。');
+  const rateGroup =
+    field('tune-min-rate', '突发速底', 0, undefined, 0.5, num(tuneOptions.minBurstRate, 6), '速率判据的最低门槛（条/分），AIMD 会围绕它自动收紧/放宽。');
+  const potGroup =
+    field('tune-theta', '势能门限 Θ', 1, undefined, 1, num(tuneOptions.thetaMin, 20), '有效讨论势能 Q 的触发下限（nat），0.8.31 起线上校准值为 28。') +
+    field('tune-rho', '密度下限 ρ', 0, undefined, 0.1, num(tuneOptions.rhoMin, 1.2), '每条消息的信息密度下限（nat/条），ADR-021 后只做物理拦截。') +
+    field('tune-density-mult', '密度倍率', 0, 100, 0.1, num(tuneOptions.densityMultiplier, 1), 'ρ_eff = max(ρ_min, 倍率 × b_ρ)：0=只用固定下限，1=随本群量级浮动。') +
+    field('tune-peak-cool', '峰值冷却', 0, 1, 0.05, num(tuneOptions.peakCoolFraction, 0.5), 'Θ_cool 抬到 max(基线, 峰值×比例)，封顶 Θ_burst×0.99；0=纯基线口径。') +
+    field('tune-dispatch-margin', '质量门倍率', 0, 10, 0.1, num(tuneOptions.dispatchMargin, 0), '结算后 peakQ < Θ_burst×倍率 直接跳过云端调度；0=关闭（推荐 1.3）。');
+  const autoTuneRow =
+    `<div class="ptx-settings-row">` +
+      `<span class="ptx-settings-label">双判据同步调参<em>shadow 对照期两引擎共用同一 AIMD；关闭则势能侧只吃时间衰减，比较天然被让子。</em></span>` +
+      `<button class="ptx-switch${(autotuneDraft !== null ? autotuneDraft : tuneOptions.potentialAutoTuning === true) ? ' is-on' : ''}" data-act="toggle-engine-autotune" role="switch"` +
+      ` aria-checked="${tuneOptions.potentialAutoTuning === true ? 'true' : 'false'}" aria-label="双判据同步调参"></button>` +
+    `</div>`;
+  return `<div class="ptx-settings-note">当前生效：${current === 'rate' ? '速率引擎' : current === 'potential' ? '势能引擎' : '影子对照（rate 裁决 + 势能观测）'}` +
+    `${engineDraft && engineDraft !== current ? ` · 待保存：切换到「${engineDraft === 'potential' ? '势能' : engineDraft === 'shadow' ? '影子' : '速率'}」` : ''}</div>` +
+    `<div class="ptx-view-mode" role="group" aria-label="触发器引擎">` +
+    modeBtn('rate', '速率', '旧引擎：按消息速率与基线裁决，稳定但语义盲。') +
+    modeBtn('potential', '势能', '新引擎：按消息信息量与密度的势能裁决，θ_min=28 已校准。') +
+    modeBtn('shadow', '影子', 'rate 照常裁决 + 势能并行只观测：切换前的对照期。') +
+    `</div>` +
+    group('通用参数', common) +
+    (mode === 'rate' ? group('速率判据', rateGroup) : '') +
+    (mode === 'potential' ? group('势能判据', potGroup) : '') +
+    (mode === 'shadow' ? group('速率判据（裁决方）', rateGroup) + group('势能判据（观测方）', potGroup) + autoTuneRow : '') +
+    `<div class="ptx-settings-row">` +
+      `<span class="ptx-settings-label">保存校准<em>按当前群聊即时热生效（含引擎切换），不重启服务，也不改动已沉淀的词条。</em></span>` +
+      `<button class="ptx-btn is-primary" data-act="tune" type="button">${organicIcon('check', 13)}<span>保存并校准</span></button>` +
+    `</div>`;
+}
+
+function renderBullets(items, fallback) {
+  if (!Array.isArray(items) || !items.length) return `<div class="ptx-text">${escapeHtml(fallback)}</div>`;
+  return `<ul class="ptx-bul">${items.map((line) => `<li>${escapeHtml(String(line))}</li>`).join('')}</ul>`;
+}
+
+function extractMarkdownSection(markdown, headings) {
+  if (!markdown) return '';
+  const lines = String(markdown).split('\n');
+  const collected = [];
+  let capturing = false;
+  for (const line of lines) {
+    const heading = /^#{1,6}\s*(.+?)\s*$/.exec(line.trim());
+    if (heading) {
+      if (capturing) break;
+      const name = heading[1].toLowerCase();
+      if (headings.some((item) => name.includes(item))) capturing = true;
+      continue;
+    }
+    if (capturing) collected.push(line);
+  }
+  return collected.join('\n').trim();
+}
+
+function renderVoice(tone, label, list) {
+  if (!list.length) return '';
+  return `<div class="ptx-voice is-${tone}"><span class="ptx-voice-l">${label}</span>` +
+    list.map((name) => nodeTag(name, tone)).join('') + '</div>';
+}
+
+function renderSpeakers(list) {
+  if (!list.length) return '';
+  return `<div class="ptx-speakers">` +
+    `<span class="ptx-nodes-label">参与成员</span>` +
+    list.map((name) => nodeTag(name)).join('') + '</div>';
+}
+
+/* 主题判定：主题是跨时间的长期聚合视图，单独成页；
+   早期主题词条可能还没有 kind 字段，此时以 timeline 非空兜底。 */
+function isTopicEntry(entry) {
+  if (!entry) return false;
+  if (entry.kind === 'topic') return true;
+  if (entry.kind === 'debate') return false;
+  return Array.isArray(entry.timeline) && entry.timeline.length > 0;
+}
+
+/* 当前列表页签下的可见词条（state.entries 恒为全量，过滤只发生在渲染） */
+function listEntries() {
+  const wantTopic = state.stage === 'topics';
+  return state.entries.filter((entry) => entry && isTopicEntry(entry) === wantTopic);
+}
+
+/* 主题时间轴的日期覆盖范围：取首尾两条来源日期（后端按 date 升序）；
+   没有时间线时回退词条自身日期，绝不显示空占位。 */
+function topicRange(entry) {
+  const items = Array.isArray(entry.timeline) ? entry.timeline : [];
+  const dates = items.map((item) => String((item && item.date) || '').trim()).filter(Boolean);
+  if (!dates.length) return String(entry.date || '--');
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  return first === last ? first : `${first} → ${last}`;
+}
+
+/* <details> 开合态：state.folds 只记用户碰过的键，未碰过的按 defaultOpen 渲染。 */
+function foldOpen(key, defaultOpen) {
+  return Object.prototype.hasOwnProperty.call(state.folds, key)
+    ? state.folds[key] === true
+    : defaultOpen === true;
+}
+
+function renderStrip(list) {
+  const channels = new Set();
+  const nodes = [];
+  let latest = '';
+  for (const entry of list) {
+    nodes.push(...namesOf(entry.participants));
+    if (entry.channelId) channels.add(entry.channelId);
+    if (entry.date && entry.date > latest) latest = entry.date;
+  }
+  const stat = (label, value, tipText) =>
+    `<div class="ptx-stat" ${tip(tipText)}><span class="ptx-stat-l">${escapeHtml(label)}</span>` +
+    `<span class="ptx-stat-v">${escapeHtml(value)}</span></div>`;
+  return `<div class="ptx-strip">` +
+    stat(state.stage === 'topics' ? '主题' : '词条', String(list.length), '当前筛选下的条目数') +
+    stat('群聊', String(channels.size), '词条涉及的群聊数') +
+    stat('发言人', String(uniq(nodes).length), '参与过讨论的发言人数') +
+    stat('最近更新', latest || '--', '最新词条日期') +
+  `</div>`;
+}
+
+function renderSpores() {
+  const isTopicList = state.stage === 'topics';
+  const list = listEntries();
+  if (!list.length) {
+    if (state.entriesError) {
+      return renderDormant('读取失败', `无法读取索引（${state.entriesError}）。请检查网络或点击底栏核心按钮刷新数据重试。`);
+    }
+    if (!state.entriesLoaded) {
+      return renderDormant('正在加载', isTopicList ? '正在读取主题索引，请稍候。' : '正在读取词条索引，请稍候。');
+    }
+    if (state.keyword) {
+      return renderDormant('没有匹配结果', `当前关键词没有检索到${isTopicList ? '主题' : '词条'}；换个关键词，或清空搜索框查看全部。`);
+    }
+    return isTopicList
+      ? renderDormant('暂无主题', '跨时间的同一话题被识别归并后，会在这里形成长期主题；也可点击底栏核心按钮刷新数据重新读取。')
+      : renderDormant('暂无词条', '群聊讨论平息后会自动生成词条；也可点击底栏核心按钮刷新数据重新读取。');
+  }
+  const cards = list.map((entry) => {
+    const nodes = namesOf(entry.participants);
+    const nodeHtml = nodes.length
+      ? `<span class="ptx-nodes">${nodes.map((name) => `<span class="ptx-node">${escapeHtml(name)}</span>`).join('')}</span>`
+      : '';
+    const isTopic = isTopicEntry(entry);
+    const glyph = isTopic ? 'topics' : 'spore';
+    const glyphClass = isTopic ? ' is-topic' : '';
+    const timelineCount = isTopic && Array.isArray(entry.timeline) ? entry.timeline.length : 0;
+    /* 主题永远处于待定态（跨时间聚合，不做「已核验」断言），状态位改报时间线条数 */
+    const statusHtml = isTopic
+      ? `<span class="ptx-spore-status is-topic">${timelineCount || 0} 条相关词条</span>`
+      : `<span class="ptx-spore-status is-${escapeHtml(entryStatusKey(entry.status))}">${escapeHtml(entryStatusLabel(entry.status))}</span>`;
+    const dateText = isTopic ? topicRange(entry) : entry.date || '--';
+    return `<button class="ptx-spore" data-act="select" data-id="${escapeHtml(entry.id)}" ${tip('阅读词条')}>` +
+      `<span class="ptx-spore-glyph${glyphClass}">${organicIcon(glyph, 14)}</span>` +
+      `<span class="ptx-spore-main">` +
+        `<span class="ptx-spore-top">` +
+          `<span class="ptx-spore-date">${escapeHtml(dateText)}</span>` +
+          statusHtml +
+        `</span>` +
+        `<span class="ptx-spore-title">${escapeHtml(entry.title || '未命名词条')}</span>` +
+        `<span class="ptx-spore-sum">${escapeHtml(clip(entry.summary || '', 96))}</span>` +
+        nodeHtml +
+      `</span>` +
+      `<span class="ptx-spore-go">${organicIcon('chevron', 13)}</span>` +
+    `</button>`;
+  }).join('');
+  return renderStrip(list) + `<div class="ptx-spores${state.viewMode === 'list' ? ' is-list' : ''}">${cards}</div>`;
+}
+
+/* mentionize：把正文里的群友昵称渲染成 ptx-node 内联胶囊。
+   先整体转义，再用一条联合正则同时命中「昵称」与裸昵称（前者剥掉括号），
+   命中处暂存占位符；随后照常做「…」原话高亮，最后把占位符还原为胶囊——
+   三步分离保证胶囊与原话高亮不会互相嵌套出坏标签。
+   昵称首 / 尾字符是 ASCII 字母数字时要求相邻字符非字母数字（「7」不会误伤「17」）。 */
+function mentionize(text, names) {
+  const safe = escapeHtml(text);
+  const list = [];
+  const seen = new Set();
+  for (const item of Array.isArray(names) ? names : []) {
+    const raw = String(item == null ? '' : item).trim();
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    if (raw.length === 1 && !/[A-Za-z0-9]/.test(raw)) continue;
+    list.push(raw);
+  }
+  const wrapQuotes = (m, inner) => `<span class="ptx-quote-span">「${inner}」</span>`;
+  if (!list.length) return safe.replace(/「([^」]*)」/g, wrapQuotes);
+  const escNames = list.map((n) => escapeHtml(n)).sort((a, b) => b.length - a.length);
+  const alternation = escNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp(`「(${alternation})」|(${alternation})`, 'g');
+  const stash = [];
+  let staged = safe.replace(re, (match, bracketed, bare, offset) => {
+    const name = bracketed !== undefined ? bracketed : bare;
+    if (bracketed === undefined) {
+      const first = name.charAt(0);
+      const last = name.charAt(name.length - 1);
+      const before = offset > 0 ? safe.charAt(offset - 1) : '';
+      const after = safe.charAt(offset + match.length);
+      if (/[A-Za-z0-9]/.test(first) && /[A-Za-z0-9]/.test(before)) return match;
+      if (/[A-Za-z0-9]/.test(last) && /[A-Za-z0-9]/.test(after)) return match;
+    }
+    stash.push(name);
+    return '\u0000' + (stash.length - 1) + '\u0000';
+  });
+  staged = staged.replace(/「([^」]*)」/g, wrapQuotes);
+  return staged.replace(/\u0000(\d+)\u0000/g, (m, index) => `<span class="ptx-node is-inline">${stash[Number(index)]}</span>`);
+}
+
+/* 列表项版 mentionize：与 renderBullets 同形但正文走昵称胶囊化 */
+function mentionBullets(items, names) {
+  if (!Array.isArray(items) || !items.length) return '';
+  return `<ul class="ptx-bul">${items.map((line) => `<li>${mentionize(line, names)}</li>`).join('')}</ul>`;
+}
+
+function renderMatrixBody(detail, mentionNames) {
+  const points = detail && Array.isArray(detail.debateMatrix) ? detail.debateMatrix : [];
+  if (!points.length) return '';
+  const empty = '<span class="ptx-td-empty">—</span>';
+  const side = (list, tone) => list.length
+    ? list.map((name) => nodeTag(name, tone)).join('')
+    : empty;
+  const body = (list) => list.length
+    ? mentionize(clip(list.join('；'), 220), mentionNames)
+    : empty;
+  const namesOfPoint = (point, key) => namesOf(point && point[key]);
+  const listOfPoint = (point, key) => (Array.isArray(point && point[key]) ? point[key] : []);
+  const head = `<tr><th class="ptx-th-corner">对照</th>${points.map((_, index) =>
+    `<th>观点 ${(index + 1 < 10 ? '0' : '') + (index + 1)}</th>`).join('')}</tr>`;
+  const row = (label, render) =>
+    `<tr><th scope="row">${label}</th>${points.map(render).join('')}</tr>`;
+  return `<div class="ptx-table-wrap"><table class="ptx-table ptx-compare"><thead>${head}</thead><tbody>` +
+    row('立场', (point) => `<td class="ptx-td-view">${escapeHtml((point && point.viewpoint) || '未命名观点')}</td>`) +
+    row('支持', (point) => `<td class="ptx-td-side">${side(namesOfPoint(point, 'proponents'), 'support')}</td>`) +
+    row('质疑', (point) => `<td class="ptx-td-side">${side(namesOfPoint(point, 'opponents'), 'dissent')}</td>`) +
+    row('论据', (point) => `<td class="ptx-td-body">${body(listOfPoint(point, 'arguments'))}</td>`) +
+    row('反驳', (point) => `<td class="ptx-td-body">${body(listOfPoint(point, 'counterArguments'))}</td>`) +
+    `</tbody></table></div>`;
+}
+
+function renderQuotesBody(quotes) {
+  if (!Array.isArray(quotes) || !quotes.length) return '';
+  return `<div class="ptx-quotes">${quotes.map((item) => {
+    const author = (item && item.author) || '匿名成员';
+    return `<div class="ptx-quote">` +
+      `<div class="ptx-quote-t">「${escapeHtml(clip((item && item.quote) || '', 320))}」</div>` +
+      `<div class="ptx-quote-a">${nodeTag(author)}</div>` +
+    `</div>`;
+  }).join('')}</div>`;
+}
+
+/* ---------------- 系统提示词（服务端真值，热生效） ----------------
+ * 提示词不是浏览器偏好：读 / 写都走 /api/prompt，保存后下一轮沉淀即生效，
+ * 因此设置页永远显示服务端返回的 effective / isCustom，而不是本地缓存。 */
+function promptEditorValue() {
+  const data = state.prompt.data;
+  if (!data) return '';
+  const custom = String(data.customPrompt == null ? '' : data.customPrompt);
+  /* 自定义为空 = 使用默认预设：把默认全文摊开供查阅，而不是留一块空白 */
+  if (custom.trim()) return custom;
+  return String(data.defaultPrompt == null ? '' : data.defaultPrompt);
+}
+
+function promptStatusLabel() {
+  if (state.prompt.error) return `提示词读取失败：${state.prompt.error}`;
+  const data = state.prompt.data;
+  if (!data) return '正在读取提示词…';
+  return data.isCustom ? '自定义提示词生效中' : '默认预设生效中';
+}
+
+/* 就地回写，避免重新渲染整页（文本框里的换行缩进与焦点都不会被打断） */
+function syncPromptUI() {
+  if (!viewportEl || state.stage !== 'settings') return;
+  const field = viewportEl.querySelector('[data-role="system-prompt"]');
+  if (field) field.value = promptEditorValue();
+  const statusEl = viewportEl.querySelector('.ptx-prompt-status');
+  if (statusEl) {
+    statusEl.textContent = promptStatusLabel();
+    statusEl.classList.toggle('is-custom', Boolean(state.prompt.data && state.prompt.data.isCustom));
+  }
+  /* 主题聚合提示词与系统提示词同源：一次 /api/prompt 响应同时带两套真值 */
+  const topicField = viewportEl.querySelector('[data-role="topic-system-prompt"]');
+  if (topicField && state.prompt.data) {
+    topicField.value = state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt || '';
+  }
+  const topicStatusEl = viewportEl.querySelector('.ptx-topic-prompt-status');
+  if (topicStatusEl && state.prompt.data) {
+    topicStatusEl.textContent = state.prompt.data.isTopicCustom ? '自定义主题提示词生效中' : '默认主题提示词生效中';
+    topicStatusEl.classList.toggle('is-custom', Boolean(state.prompt.data.isTopicCustom));
+  }
+}
+
+function loadPrompt() {
+  return requestJson(`${API_BASE}/api/prompt`)
+    .then((data) => {
+      if (data && typeof data === 'object') state.prompt.data = data;
+      state.prompt.error = '';
+      syncPromptUI();
+    })
+    .catch((err) => {
+      state.prompt.error = err && err.message ? err.message : '未知错误';
+      syncPromptUI();
+    });
+}
+
+function loadTopicSettings() {
+  return requestJson(`${API_BASE}/api/topics/settings`)
+    .then((data) => {
+      if (data && typeof data === 'object') state.topicSettings.data = data;
+      state.topicSettings.error = '';
+      if (state.stage === 'settings') renderStage();
+    }, (err) => {
+      state.topicSettings.error = err && err.message ? err.message : '未知错误';
+      if (state.stage === 'settings') renderStage();
+    });
+}
+
+function postTopicSettings(payload) {
+  return requestJson(`${API_BASE}/api/topics/settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+function loadCardSettings() {
+  return requestJson(`${API_BASE}/api/card/settings`)
+    .then((data) => {
+      if (data && typeof data === 'object' && data.settings) state.cardSettings.settings = data.settings;
+      state.cardSettings.error = '';
+      if (state.stage === 'settings') renderStage();
+    }, (err) => {
+      state.cardSettings.error = err && err.message ? err.message : '未知错误';
+      if (state.stage === 'settings') renderStage();
+    });
+}
+
+/* 图片匿名化开关：切换即落盘并热生效，作用于下一次出图 */
+function toggleCardMask(node) {
+  const next = !(state.cardSettings.settings.maskNames !== false);
+  return requestJson(`${API_BASE}/api/card/settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ settings: { maskNames: next } }),
+  })
+    .then((data) => {
+      if (data && data.settings) state.cardSettings.settings = data.settings;
+      const on = state.cardSettings.settings.maskNames !== false;
+      if (node) {
+        node.classList.toggle('is-on', on);
+        node.setAttribute('aria-checked', on ? 'true' : 'false');
+      }
+      toast(on ? '图片匿名化已开启' : '图片匿名化已关闭：图片将按原昵称输出');
+    }, (err) => {
+      toast(`图片匿名化切换失败：${err && err.message ? err.message : '未知错误'}`);
+    });
+}
+
+/* 主题校准：读当前设置页输入 → POST 直传 settings 对象 → 回写服务端真值并重绘 */
+function saveTopicSettings() {
+  const read = (role, fallback) => {
+    const el = viewportEl ? viewportEl.querySelector(`[data-role="${role}"]`) : null;
+    const value = el ? Number(el.value) : NaN;
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const payload = {
+    enabled: !(state.topicSettings.data && state.topicSettings.data.settings && state.topicSettings.data.settings.enabled === false),
+    lookbackDays: read('topic-lookback', 30),
+    mergeThreshold: read('topic-threshold', 0.5),
+    minEntries: read('topic-min-entries', 1),
+  };
+  return postTopicSettings(payload)
+    .then(() => loadTopicSettings())
+    .then(() => {
+      toast('主题校准参数已保存并热生效');
+      renderStage();
+    })
+    .catch((err) => {
+      toast(`主题校准参数保存失败：${err && err.message ? err.message : '未知错误'}`);
+    });
+}
+
+function postPrompt(payload) {
+  return requestJson(`${API_BASE}/api/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+/* 保存：内容与默认提示词完全一致时按「恢复默认」提交，绝不留下一份同文的伪自定义副本 */
+function savePrompt() {
+  const field = viewportEl ? viewportEl.querySelector('[data-role="system-prompt"]') : null;
+  const value = field ? String(field.value == null ? '' : field.value) : '';
+  const button = viewportEl ? viewportEl.querySelector('[data-action="save-prompt"]') : null;
+  if (button) button.classList.add('is-busy');
+  const data = state.prompt.data;
+  const defaultText = data && typeof data.defaultPrompt === 'string' ? data.defaultPrompt.trim() : '';
+  const next = value.trim() === '' || value.trim() === defaultText ? '' : value;
+  return postPrompt({ customPrompt: next })
+    .then((result) => {
+      if (result && typeof result === 'object') state.prompt.data = result;
+      state.prompt.error = '';
+      syncPromptUI();
+      toast(next ? '自定义提示词已生效' : '已恢复默认提示词');
+    }, (err) => {
+      toast(`提示词保存失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then(() => {
+      if (button) button.classList.remove('is-busy');
+    });
+}
+
+/* 主题聚合提示词：与系统提示词同一端点，字段换成 customTopicPrompt，
+   内容与默认主题提示词完全一致时同样按「恢复默认」提交 */
+function saveTopicPrompt() {
+  const field = viewportEl ? viewportEl.querySelector('[data-role="topic-system-prompt"]') : null;
+  const value = field ? String(field.value == null ? '' : field.value) : '';
+  const data = state.prompt.data;
+  const defaultText = data && typeof data.topicDefaultPrompt === 'string' ? data.topicDefaultPrompt.trim() : '';
+  const next = value.trim() === '' || value.trim() === defaultText ? '' : value;
+  const button = viewportEl ? viewportEl.querySelector('[data-action="save-topic-prompt"]') : null;
+  if (button) button.classList.add('is-busy');
+  return postPrompt({ customTopicPrompt: next })
+    .then((result) => {
+      if (result && typeof result === 'object') state.prompt.data = result;
+      toast(next ? '主题聚合提示词已生效' : '已恢复主题聚合默认提示词');
+      renderStage();
+    }, (err) => {
+      toast(`主题提示词保存失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then(() => {
+      if (button) button.classList.remove('is-busy');
+    });
+}
+
+function resetTopicPrompt() {
+  const button = viewportEl ? viewportEl.querySelector('[data-action="reset-topic-prompt"]') : null;
+  if (button) button.classList.add('is-busy');
+  return postPrompt({ customTopicPrompt: '' })
+    .then((result) => {
+      if (result && typeof result === 'object') state.prompt.data = result;
+      toast('已恢复主题聚合默认提示词');
+      renderStage();
+    }, (err) => {
+      toast(`恢复默认失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then(() => {
+      if (button) button.classList.remove('is-busy');
+    });
+}
+
+/* 恢复默认：清空自定义后重新拉取，编辑区回填默认全文 */
+function resetPrompt() {
+  const button = viewportEl ? viewportEl.querySelector('[data-action="reset-prompt"]') : null;
+  if (button) button.classList.add('is-busy');
+  return postPrompt({ customPrompt: '' })
+    .then((result) => {
+      if (result && typeof result === 'object') state.prompt.data = result;
+      state.prompt.error = '';
+      syncPromptUI();
+      toast('已恢复默认提示词');
+    }, (err) => {
+      toast(`恢复默认失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then(() => {
+      if (button) button.classList.remove('is-busy');
+    });
+}
+
+/* 设置页（侧栏底部齿轮，与两个核心页签平级）
+ * 只放面板自身的配置：自动收纳开关、词条索引视图模式、底栏轮播条数与间隔；
+ * 触发器门限（突发倍率 / 平息等待）也从监控页收进这里——它们是配置而非观测，
+ * 放在仪表盘上会让监控页既是读数区又是调参区。数据刷新只有底栏核心按钮一个入口。
+ * 设置整块替换视窗内容，底栏轮播与状态轮询照常运行，绝不影响轮播节奏。 */
+function renderSettings() {
+  const settings = state.settings;
+  /* 门限当前值取服务端最近一次状态快照；群聊切换后 loadStatus 会带回该群自己的值，
+     保存走同一个 POST /api/tune，硬限幅仍由服务端夹紧。 */
+  const tuneOptions = (state.status && state.status.options) || {};
+  const topicData = (state.topicSettings.data && state.topicSettings.data.settings) || {};
+  const topicLast = state.topicSettings.data && state.topicSettings.data.lastRun;
+  const topicDispatch = (state.topicSettings.data && state.topicSettings.data.dispatcher) || {};
+  const cardMask = state.cardSettings.settings.maskNames !== false;
+  return renderHead('参数设置', '本机设置 · 服务端门限') +
+    `<div class="ptx-settings-page">` +
+      `<div class="ptx-settings-shell"><nav class="ptx-settings-outline" aria-label="设置大纲"></nav><div class="ptx-settings-main">` +
+      renderSection('面板行为',
+        `<div class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">自动收纳<em>静置 5 秒后收回为呼吸胶囊，点击胶囊可重新展开。</em></span>` +
+          `<button class="ptx-switch${settings.autoDock ? ' is-on' : ''}" data-act="autodock" role="switch" aria-checked="${settings.autoDock ? 'true' : 'false'}" aria-label="自动收纳"></button>` +
+        `</div>`) +
+      renderSection('图片脱敏',
+        `<div class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">图片匿名化<em>开启后词条图片里的昵称一律替换为假名；关闭则按群聊原文昵称出图。切换即生效，作用于下一次出图。</em></span>` +
+          `<button class="ptx-switch${cardMask ? ' is-on' : ''}" data-act="toggle-card-mask" role="switch" aria-checked="${cardMask ? 'true' : 'false'}" aria-label="图片匿名化"></button>` +
+        `</div>`) +
+      renderSection('索引视图',
+        `<div class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">默认展示模式<em>词条索引列表的默认展示方式，与索引标题行右侧的切换胶囊双向同步。</em></span>` +
+          renderViewToggle() +
+        `</div>`) +
+      renderSection('底栏轮播',
+        `<label class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">轮播条数<em>底栏最多显示的最新词条数，取值 ${TICKER_COUNT_MIN} – ${TICKER_COUNT_MAX}。</em></span>` +
+          `<input class="ptx-input ptx-settings-num" data-role="ticker-count" type="number" min="${TICKER_COUNT_MIN}" max="${TICKER_COUNT_MAX}" step="1" value="${settings.tickerCount}" aria-label="轮播条数">` +
+        `</label>` +
+        `<label class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">轮播间隔<em>每条轮播停留的秒数，取值 ${TICKER_INTERVAL_MIN} – ${TICKER_INTERVAL_MAX}。</em></span>` +
+          `<input class="ptx-input ptx-settings-num" data-role="ticker-interval" type="number" min="${TICKER_INTERVAL_MIN}" max="${TICKER_INTERVAL_MAX}" step="1" value="${settings.tickerInterval}" aria-label="轮播间隔（秒）">` +
+        `</label>`) +
+      renderSection('触发器引擎', renderEngineSettings(tuneOptions)) +
+      renderSection('主题校准',
+        `<div class="ptx-settings-note">跨时间聚合的运行时旋钮；保存后立即作用于下一轮校准，与 Console 的部署配置分开存放。</div>` +
+        `<div class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">每日校准<em>固定 04:00 触发；关闭后不再自动归并。</em></span>` +
+          `<button class="ptx-switch${topicData.enabled === false ? '' : ' is-on'}" data-action="toggle-topic-enabled" role="switch" aria-checked="${topicData.enabled === false ? 'false' : 'true'}" aria-label="每日主题校准"></button>` +
+        `</div>` +
+        `<label class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">回看天数<em>只扫描最近 N 天内尚未归入主题的词条，1–90。</em></span>` +
+          `<input class="ptx-input ptx-settings-num" data-role="topic-lookback" type="number" min="1" max="90" step="1" value="${num(topicData.lookbackDays, 30)}" aria-label="回看天数">` +
+        `</label>` +
+        `<label class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">聚类门限<em>标签 Jaccard 达到该值才进入候选组，0–1。</em></span>` +
+          `<input class="ptx-input ptx-settings-num" data-role="topic-threshold" type="number" min="0" max="1" step="0.05" value="${num(topicData.mergeThreshold, 0.5)}" aria-label="聚类门限">` +
+        `</label>` +
+        `<label class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">最少词条<em>窗口内可归入词条少于此数则跳过本轮，1–50。</em></span>` +
+          `<input class="ptx-input ptx-settings-num" data-role="topic-min-entries" type="number" min="1" max="50" step="1" value="${num(topicData.minEntries, 1)}" aria-label="最少词条">` +
+        `</label>` +
+        `<div class="ptx-settings-row">` +
+          `<span class="ptx-settings-label">只读状态<em>` +
+            `${escapeHtml(String(topicDispatch.provider || '—'))} · ${escapeHtml(String(topicDispatch.protocol || '—'))} · ${escapeHtml(String(topicDispatch.model || '—'))}` +
+            `${topicLast ? ` · 上次创建 ${topicLast.createdTopicIds ? topicLast.createdTopicIds.length : 0} / 更新 ${topicLast.updatedTopicIds ? topicLast.updatedTopicIds.length : 0} / 归入 ${topicLast.assignedEntryIds ? topicLast.assignedEntryIds.length : 0}` : ' · 本次尚未校准'}` +
+          `</em></span>` +
+          `<button class="ptx-btn is-primary" data-action="save-topic-settings" type="button">${organicIcon('check', 13)}<span>保存主题参数</span></button>` +
+        `</div>`) +
+      renderSection('系统提示词',
+        `<div class="ptx-editor">` +
+          `<label class="ptx-editor-field">` +
+            `<span class="ptx-editor-label">帕秋莉系统提示词 (SYSTEM PROMPT)</span>` +
+            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-role="system-prompt" spellcheck="false" aria-label="帕秋莉系统提示词">${escapeHtml(promptEditorValue())}</textarea>` +
+          `</label>` +
+          `<div class="ptx-editor-foot">` +
+            `<span class="ptx-prompt-status${state.prompt.data && state.prompt.data.isCustom ? ' is-custom' : ''}">${escapeHtml(promptStatusLabel())}</span>` +
+            `<span class="ptx-editor-hint">在悬浮窗内即时热生效，可随时一键恢复默认</span>` +
+            `<button class="ptx-btn" data-action="reset-prompt" type="button">恢复默认</button>` +
+            `<button class="ptx-btn is-primary" data-action="save-prompt" type="button">${organicIcon('check', 13)}<span>保存并应用</span></button>` +
+          `</div>` +
+        `</div>`) +
+      renderSection('主题聚合提示词',
+        `<div class="ptx-editor">` +
+          `<label class="ptx-editor-field">` +
+            `<span class="ptx-editor-label">主题校准系统提示词 (TOPIC PROMPT)</span>` +
+            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-role="topic-system-prompt" spellcheck="false" aria-label="主题聚合系统提示词">${escapeHtml((state.prompt.data && (state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt)) || '')}</textarea>` +
+          `</label>` +
+          `<div class="ptx-editor-foot">` +
+            `<span class="ptx-prompt-status ptx-topic-prompt-status${state.prompt.data && state.prompt.data.isTopicCustom ? ' is-custom' : ''}">${escapeHtml(state.prompt.data && state.prompt.data.isTopicCustom ? '自定义主题提示词生效中' : '默认主题提示词生效中')}</span>` +
+            `<span class="ptx-editor-hint">只影响主题聚合，保存即热生效</span>` +
+            `<button class="ptx-btn" data-action="reset-topic-prompt" type="button">恢复默认</button>` +
+            `<button class="ptx-btn is-primary" data-action="save-topic-prompt" type="button">${organicIcon('check', 13)}<span>保存并应用</span></button>` +
+          `</div>` +
+        `</div>`) +
+      renderSection('知识库维护',
+        `<div class="ptx-maint">` +
+          `<div class="ptx-maint-text">清空全部已沉淀条目与原始会话。保留默认目录结构与索引骨架。</div>` +
+          (state.clearArmed
+            ? `<div class="ptx-maint-confirm">` +
+                `<span class="ptx-act-ask">确定清空全部知识库？(不可逆)</span>` +
+                `<button class="ptx-btn is-danger-solid" data-action="confirm-clear-kb" type="button">确认清空</button>` +
+                `<button class="ptx-btn" data-action="cancel-clear-kb" type="button">取消</button>` +
+              `</div>`
+            : `<button class="ptx-btn is-danger" data-action="clear-kb" type="button">${organicIcon('trash', 13)}<span>清空全部词条</span></button>`) +
+        `</div>`) +
+      `<div class="ptx-settings-note">面板行为与轮播设置保存在本机浏览器，独立页与 Console 内嵌面板共用同一份配置；触发器门限按群聊保存在服务端并即时热生效；系统提示词保存在服务端 .patchouli/custom-prompt.txt，保存即热生效且重启不丢失。数据刷新统一收在底栏核心按钮。</div>` +
+      `</div></div></div>`;
+}
+
+// BEGIN GENERATED TRAFFIC RUNTIME
+function buildTrafficPath(points, width, height, startTime, endTime, maxCount) {
+    const pad = 4; // 绘图区上下留白，与图内网格线 4 / height - 4 对齐
+    const sampleMs = 5000; // 采样桶固定 5 秒（后端 TRAFFIC_SAMPLE_MS）；函数体自包含故写字面量
+    const span = endTime - startTime;
+    const scale = Number.isFinite(maxCount) && maxCount > 0 ? maxCount : 1;
+    const baseY = height - pad;
+    const usable = Math.max(1, height - pad * 2);
+    // 投影成若干段连续折线（扁平存储 [x0, y0, x1, y1, ...]）。
+    const runs = [];
+    let run = [];
+    let previous = Number.NaN;
+    for (let i = 0; i < points.length; i += 1) {
+        const point = points[i];
+        const at = point.timestamp;
+        const count = point.count;
+        // 窗口外的采样（滚动出窗的过期点、超前于窗口的点）与时间戳 / 条数非有限的
+        // 采样一律视为未监测：直接跳过，既不绘制也不压到边界上堆积。
+        if (!Number.isFinite(at) || !Number.isFinite(count) || at < startTime || at > endTime)
+            continue;
+        // 相邻采样必须正好相隔一个采样周期，否则中间存在未监测的桶 → 断开子路径。
+        if (Number.isFinite(previous) && (at - previous <= 0 || at - previous > sampleMs)) {
+            if (run.length > 0)
+                runs.push(run);
+            run = [];
+        }
+        const ratio = span > 0 ? (at - startTime) / span : 0;
+        const value = Math.min(1, Math.max(0, count / scale));
+        const x = Math.round(ratio * width * 100) / 100;
+        const y = Math.round((baseY - value * usable) * 100) / 100;
+        run.push(x, y);
+        previous = at;
+    }
+    if (run.length > 0)
+        runs.push(run);
+    // 单点段画短横线（半宽 3 用户单位），避免只剩一个孤立 moveto 而不可见。
+    const tick = 3;
+    let d = '';
+    for (let i = 0; i < runs.length; i += 1) {
+        const segment = runs[i];
+        if (segment.length === 2) {
+            const from = Math.max(0, Math.round((segment[0] - tick) * 100) / 100);
+            const to = Math.min(width, Math.round((segment[0] + tick) * 100) / 100);
+            d += 'M' + from + ' ' + segment[1] + ' L' + to + ' ' + segment[1];
+            continue;
+        }
+        d += 'M' + segment[0] + ' ' + segment[1];
+        for (let k = 2; k < segment.length; k += 2)
+            d += ' L' + segment[k] + ' ' + segment[k + 1];
+    }
+    return d;
+}
+function monitorViewport() { return viewportEl; }
+
+  var trafficFrame = 0;
+  var trafficAnchor = 0;
+  var trafficReceived = 0;
+  var trafficPoints = [];
+  var trafficScale = 10;
+  var trafficChannel = "";
+
+  var trafficLastFrame = 0;
+  var trafficLastSecond = -1;
+  function renderMetrics() {
+    return renderHead("消息监控", "") +
+      '<div class="ptx-monitor-status" role="status"></div>' +
+      '<div class="ptx-panel"><div class="ptx-panel-h"><strong>消息流量</strong><span data-traffic-summary></span></div>' +
+      '<div class="ptx-traffic-chart"><div class="ptx-traffic-y"><span data-traffic-max>10</span><span data-traffic-mid>5</span><span>0 条</span></div>' +
+      '<svg class="ptx-ecg" viewBox="0 0 516 120" preserveAspectRatio="none" role="img" aria-label="最近5分钟每5秒收到的消息数">' +
+      '<path class="ptx-ecg-base" d="M0 4 H516 M0 60 H516 M0 116 H516"></path>' +
+      '<path class="ptx-ecg-line" d=""></path></svg></div>' +
+      '<div class="ptx-traffic-times"><span data-traffic-time="0"></span><span data-traffic-time="1"></span><span data-traffic-time="2"></span></div>' +
+      '<div class="ptx-ecg-note" data-traffic-note></div></div>' +
+      '<section class="ptx-message-preview" aria-label="当前群最新消息"><div class="ptx-message-head"><strong>最新消息</strong><span data-message-author></span><time data-message-time></time></div><div class="ptx-message-body" data-message-body>等待当前群的新消息</div></section>' +
+      '<div class="ptx-tiles">' +
+      ['瞬时速率', '日常基线', '突发倍率', '讨论缓存'].map(function (label, index) {
+        return '<div class="ptx-tile"><div class="ptx-tile-l">' + label + '</div><div class="ptx-tile-v" data-metric="' + index + '">—</div></div>';
+      }).join('') + '</div>';
+  }
+
+  function trafficText(selector, value) {
+    var node = monitorViewport().querySelector(selector);
+    if (node && node.textContent !== String(value)) node.textContent = value;
+  }
+
+  function trafficTime(timestamp) {
+    return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function updateMetrics() {
+    var root = monitorViewport();
+    if (!root || !root.querySelector('[data-traffic-summary]')) return;
+    var status = state.status;
+    if (!status) {
+      if (trafficChannel && trafficChannel !== channelScopeId()) {
+        trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
+        trafficText('[data-message-author]', '');
+        trafficText('[data-message-time]', '');
+        resetLatestMessage();
+        for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+      }
+      trafficText('.ptx-monitor-status', state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务');
+      return;
+    }
+    var channel = String(status.channelId || channelScopeId());
+    trafficChannel = channel;
+    trafficAnchor = num(status.serverTime, Date.now());
+    trafficReceived = performance.now();
+    trafficLastSecond = -1;
+    trafficPoints = Array.isArray(status.traffic) ? status.traffic : [];
+    var peak = trafficPoints.reduce(function (max, point) { return Math.max(max, num(point.count)); }, 0);
+    trafficScale = Math.max(10, Math.ceil(peak * 1.2 / 2) * 2);
+    trafficText('.ptx-vhead-sub', '群聊 ' + channel);
+    trafficText('.ptx-monitor-status', '');
+    trafficText('[data-metric="0"]', fixed(num(status.currentRate), 2) + ' 条/分');
+    trafficText('[data-metric="1"]', fixed(num(status.baselineRate), 2) + ' 条/分');
+    trafficText('[data-metric="2"]', fixed(num(status.burstRatio), 2) + ' 倍');
+    trafficText('[data-metric="3"]', num(status.bufferedCount) + ' 条');
+    trafficText('[data-traffic-summary]', '每5秒消息数 · 峰值 ' + peak + ' 条');
+    trafficText('[data-traffic-max]', trafficScale + ' 条');
+    trafficText('[data-traffic-mid]', trafficScale / 2 + ' 条');
+    trafficText('[data-traffic-note]', trafficPoints.length ? '最近5分钟 · 5秒分桶汇总 · 实时被动监听' : '等待第一个完整的5秒分桶汇总');
+    var message = status.latestMessage;
+    trafficText('[data-message-author]', message ? message.userName || '群成员' : '');
+    trafficText('[data-message-time]', message ? trafficTime(message.timestamp) : '');
+    /* 只在新消息（id / elements 指纹变化）时重建预览：图片、播放与展开状态不被轮询打断。 */
+    renderLatestMessage(message);
+    var panel = root.querySelector('.ptx-panel');
+    panel.classList.toggle('is-burst', status.phase === 'BURSTING');
+    drawTraffic();
+    if (!trafficFrame && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) trafficFrame = requestAnimationFrame(animateTraffic);
+  }
+
+  function drawTraffic() {
+    var root = monitorViewport();
+    if (!root) return;
+    var line = root.querySelector('.ptx-ecg-line');
+    if (!line || !trafficAnchor) return;
+    var end = trafficAnchor + Math.max(0, performance.now() - trafficReceived);
+    var start = end - 300000;
+    line.setAttribute('d', buildTrafficPath(trafficPoints, 516, 120, start, end, trafficScale));
+    var second = Math.floor(end / 1000);
+    if (second !== trafficLastSecond) {
+      trafficLastSecond = second;
+      trafficText('[data-traffic-time="0"]', trafficTime(start));
+      trafficText('[data-traffic-time="1"]', trafficTime(end - 150000));
+      trafficText('[data-traffic-time="2"]', trafficTime(end));
+    }
+  }
+
+  function animateTraffic(now) {
+    trafficFrame = 0;
+    var root = monitorViewport();
+    if (!root || !root.isConnected || state.stage !== 'metrics' || state.collapsed || document.hidden) return;
+    if (now - trafficLastFrame >= 33) { drawTraffic(); trafficLastFrame = now; }
+    trafficFrame = requestAnimationFrame(animateTraffic);
+  }
+
+  function resumeTraffic() {
+    var root = monitorViewport();
+    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed) return;
+    loadStatus().then(function () { refreshPhase(); updateMetrics(); });
+  }
+  document.addEventListener('visibilitychange', resumeTraffic);
+
+  /* 合并转发递归深度上限：超过即降级为折叠摘要，杜绝恶意深层嵌套拖垮渲染。 */
+  var RICH_FORWARD_DEPTH = 3;
+  /* 单个合并转发最多就地渲染的条目数（其余只报数量，不展开）。 */
+  var RICH_FORWARD_ITEMS = 20;
+  /* 单次渲染的元素上限（与后端顶层 elements 上限 60 一致）：任何一层都不允许超量 AST 膨胀成等量 DOM。 */
+  var RICH_ELEMENT_LIMIT = 60;
+
+  function richText(value) {
+    if (typeof value === "string") return value;
+    if (value === null || value === undefined) return "";
+    return String(value);
+  }
+
+  /* URL 白名单：只放行 http / https；相对路径按当前页面解析后同样归入 http(s)。 */
+  function richUrl(raw) {
+    var text = typeof raw === "string" ? raw.trim() : "";
+    if (!text) return "";
+    try {
+      var url = new URL(text, window.location.href);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+      return url.href;
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function richLabel(element, fallback) {
+    var text = richText(element && element.text).trim();
+    if (text) return text;
+    var title = richText(element && element.title).trim();
+    return title || fallback;
+  }
+
+  function richCreate(tag, className) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    return node;
+  }
+
+  function richSpan(className, text) {
+    var node = richCreate("span", className);
+    node.textContent = text;
+    return node;
+  }
+
+  function richLink(href, className, text) {
+    var node = richCreate("a", className);
+    node.setAttribute("href", href);
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noopener noreferrer");
+    node.textContent = text;
+    return node;
+  }
+
+  function richImage(url, className, alt) {
+    var image = document.createElement("img");
+    if (className) image.className = className;
+    image.setAttribute("src", url);
+    image.setAttribute("alt", alt || "");
+    image.setAttribute("loading", "lazy");
+    image.setAttribute("decoding", "async");
+    image.setAttribute("referrerpolicy", "no-referrer");
+    return image;
+  }
+
+  /* 图片 / 视频 / 语音加载失败（直链失效、代理 404「媒体已过期」）→ 可见文本，绝不留空白。 */
+  function richFail(node, label) {
+    if (node && node.parentNode) node.parentNode.replaceChild(richSpan("ptx-rich-text ptx-rich-failed", label), node);
+  }
+
+  /* 把失败兜底挂到真正抛 error 的节点（media 的 error 事件不冒泡），替换掉 target。 */
+  function richGuard(node, target, label) {
+    node.addEventListener("error", function () {
+      richFail(target || node, label);
+    });
+    return node;
+  }
+
+  /* 语音时长：秒 → m:ss；非正数 / 非数字返回空串（不占位）。 */
+  function richClock(seconds) {
+    var total = Math.round(Number(seconds));
+    if (!isFinite(total) || total <= 0) return "";
+    var minutes = Math.floor(total / 60);
+    var rest = total - minutes * 60;
+    return minutes + ":" + (rest < 10 ? "0" + rest : String(rest));
+  }
+
+  /* ---------------- 图片放大：原生 dialog（Esc / 点空白关闭） ---------------- */
+
+  /* 弹窗宿主：dialog 必须挂在有机根容器上，绝不能留在 .ptx-viewport 里。
+     版心规则（.ptx-viewport > :not(dialog)）虽然已排除 dialog，但只要它还留在视窗内，
+     就会继续被视窗的内容流、裁剪上下文与背景层包住，任何一条宿主继承下来的宽容规则
+     （宽度 / 外边距）都能改写它的几何，全屏居中无从谈起。挂到根容器后它与窗口同级，
+     尺寸与位置完全由自己的 fixed + inset: 0 + margin: auto 决定。 */
+  function richLightboxHost() {
+    var root = document.getElementById("patchouli-organic-root");
+    if (root) return root;
+    /* 内嵌面板 / 独立页没有这个 id：沿视窗向上取挂在 body 下的最外层有机容器
+       （内嵌面板即 #ptxDockRoot），dialog 既脱出版心，又留在样式令牌与
+       .ptx-rich-lightbox 规则的作用域内——直接挂 body 会丢掉全部令牌。 */
+    var origin = monitorViewport();
+    var node = origin;
+    while (node && node.parentElement && node.parentElement !== document.body) node = node.parentElement;
+    if (!node || node === origin || !node.parentElement) return document.body;
+    return node;
+  }
+
+  function richLightbox() {
+    var host = richLightboxHost();
+    var dialog = host.querySelector("dialog.ptx-rich-lightbox");
+    if (dialog) return dialog;
+    dialog = document.createElement("dialog");
+    dialog.className = "ptx-rich-lightbox";
+    dialog.setAttribute("aria-label", "图片预览");
+    var image = document.createElement("img");
+    image.setAttribute("alt", "图片预览");
+    image.setAttribute("decoding", "async");
+    image.setAttribute("referrerpolicy", "no-referrer");
+    dialog.appendChild(image);
+    dialog.addEventListener("click", function (event) {
+      if (event.target === dialog && dialog.open) dialog.close();
+    });
+    host.appendChild(dialog);
+    return dialog;
+  }
+
+  function richOpenImage(url) {
+    if (!url) return;
+    var dialog = richLightbox();
+    var image = dialog.querySelector("img");
+    if (image && image.getAttribute("src") !== url) image.setAttribute("src", url);
+    if (typeof dialog.showModal === "function") {
+      if (!dialog.open) dialog.showModal();
+      return;
+    }
+    dialog.setAttribute("open", "open");
+  }
+
+  /* ---------------- 单元素渲染 ---------------- */
+
+  function richTextNode(element) {
+    var text = richText(element.text);
+    if (!text) return null;
+    return richSpan("ptx-rich-text", text);
+  }
+
+  function richFaceNode(element) {
+    var emoji = richUrl(element.emojiUrl);
+    var label = richText(element.text).trim() || "表情";
+    if (!emoji) return richSpan("ptx-rich-text", label);
+    var image = richImage(emoji, "ptx-rich-face", label);
+    image.setAttribute("loading", "eager");
+    return richGuard(image, image, label);
+  }
+
+  function richImageNode(element) {
+    var url = richUrl(element.url);
+    if (!url) return richSpan("ptx-rich-text", richLabel(element, "[图片]"));
+    var button = richCreate("button", "ptx-rich-image");
+    button.setAttribute("type", "button");
+    button.setAttribute("aria-label", "查看大图");
+    /* 后端把 image 元素的 text 归一成人读标签（如「[图片]」），有 url 时用作 alt，无 url 时才是正文。 */
+    button.appendChild(richGuard(richImage(url, "", richText(element.text).trim() || "图片"), button, "图片加载失败"));
+    button.addEventListener("click", function () {
+      richOpenImage(url);
+    });
+    return button;
+  }
+
+  /* 视频：封面（有直链时直接当 poster）+ 标题 + 合法外链 + 原生 controls，绝不自动播放。 */
+  function richVideoNode(element) {
+    var url = richUrl(element.url);
+    var poster = richUrl(element.imageUrl);
+    var title = richText(element.title).trim() || richText(element.text).trim();
+    if (!url) {
+      if (!poster) return richSpan("ptx-rich-text", richLabel(element, "[视频]"));
+      var coverOnly = richCreate("div", "ptx-rich-media-card");
+      coverOnly.appendChild(richGuard(richImage(poster, "ptx-rich-cover", title || richText(element.text).trim() || "视频封面"), null, "封面加载失败"));
+      if (title) coverOnly.appendChild(richSpan("ptx-rich-media-title", title));
+      return coverOnly;
+    }
+    var card = richCreate("div", "ptx-rich-media-card");
+    if (title) card.appendChild(richSpan("ptx-rich-media-title", title));
+    var player = document.createElement("video");
+    player.className = "ptx-rich-video-player";
+    player.setAttribute("controls", "controls");
+    player.setAttribute("preload", "metadata");
+    player.setAttribute("playsinline", "playsinline");
+    player.setAttribute("referrerpolicy", "no-referrer");
+    player.setAttribute("src", url);
+    if (poster) {
+      player.setAttribute("poster", poster);
+      /* 封面失效时摘掉 poster，让原生播放器回落到首帧，而不是留一块空白海报位。 */
+      var probe = new Image();
+      probe.addEventListener("error", function () {
+        player.removeAttribute("poster");
+      });
+      probe.src = poster;
+    }
+    richGuard(player, player, "视频加载失败（可能已失效或未登记）");
+    card.appendChild(player);
+    card.appendChild(richLink(url, "ptx-rich-link", "在新窗口打开视频"));
+    return card;
+  }
+
+  function richCardNode(element) {
+    var url = richUrl(element.url);
+    var cover = richUrl(element.imageUrl);
+    var title = richText(element.title).trim();
+    var text = richText(element.text).trim();
+    var source = richText(element.source).trim();
+    if (!cover && !title && !text && !source) return richSpan("ptx-rich-text", "[卡片消息]");
+    var node = richCreate(url ? "a" : "div", "ptx-rich-card");
+    if (url) {
+      node.setAttribute("href", url);
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
+    }
+    if (cover) node.appendChild(richGuard(richImage(cover, "ptx-rich-cover", title || richText(element.text).trim() || "卡片封面"), null, "封面加载失败"));
+    var body = richCreate("div", "ptx-rich-card-body");
+    if (title) body.appendChild(richSpan("ptx-rich-card-title", title));
+    if (text) body.appendChild(richSpan("ptx-rich-card-text", text));
+    if (source) body.appendChild(richSpan("ptx-rich-card-source", source));
+    node.appendChild(body);
+    return node;
+  }
+
+  function richQuoteNode(element) {
+    var node = richCreate("div", "ptx-rich-quote");
+    var title = richText(element.title).trim();
+    if (title) node.appendChild(richSpan("ptx-rich-quote-title", title));
+    node.appendChild(richSpan("ptx-rich-quote-text", richText(element.text).trim() || "[引用消息]"));
+    var target = richText(element.targetMessageId).trim();
+    if (target) node.setAttribute("data-target-message", target);
+    return node;
+  }
+
+  function richForwardItem(item, depth) {
+    var node = richCreate("div", "ptx-rich-forward-item");
+    var title = richText(item && item.title).trim();
+    if (title) node.appendChild(richSpan("ptx-rich-forward-author", title));
+    var line = richCreate("div", "ptx-rich-line");
+    richAppendChildren(line, item && item.elements, depth);
+    if (!line.firstChild) line.textContent = "[空消息]";
+    node.appendChild(line);
+    return node;
+  }
+
+  /* 合并转发：折叠态只报标题与条数，展开后就地推挤但内部细滚动，绝不撑满监控视窗。 */
+  function richForwardNode(element, depth) {
+    var items = Array.isArray(element.items) ? element.items : [];
+    var title = richText(element.title).trim() || "合并转发";
+    if (!items.length || depth >= RICH_FORWARD_DEPTH) {
+      var flat = richCreate("div", "ptx-rich-quote");
+      flat.appendChild(richSpan("ptx-rich-quote-title", title));
+      flat.appendChild(richSpan("ptx-rich-quote-text", richText(element.text).trim() || "[合并转发]"));
+      return flat;
+    }
+    var details = richCreate("details", "ptx-rich-forward");
+    var summary = richCreate("summary", "ptx-rich-forward-summary");
+    summary.appendChild(richSpan("ptx-rich-forward-title", title));
+    summary.appendChild(richSpan("ptx-rich-forward-count", "共 " + items.length + " 条"));
+    details.appendChild(summary);
+    var body = richCreate("div", "ptx-rich-forward-body");
+    var limit = Math.min(items.length, RICH_FORWARD_ITEMS);
+    for (var index = 0; index < limit; index += 1) body.appendChild(richForwardItem(items[index], depth + 1));
+    if (items.length > limit) body.appendChild(richSpan("ptx-rich-forward-more", "另有 " + (items.length - limit) + " 条未展开"));
+    details.appendChild(body);
+    return details;
+  }
+
+  function richFileNode(element) {
+    var url = richUrl(element.url);
+    var name = richText(element.title).trim() || richText(element.text).trim() || "文件";
+    var node = richCreate("div", "ptx-rich-file");
+    node.appendChild(richSpan("ptx-rich-file-name", name));
+    if (url) {
+      var link = richLink(url, "ptx-rich-link", "下载 / 打开");
+      link.setAttribute("download", "");
+      node.appendChild(link);
+    }
+    return node;
+  }
+
+  function richRecordNode(element) {
+    var url = richUrl(element.url);
+    var node = richCreate("div", "ptx-rich-record");
+    if (url) {
+      var audio = document.createElement("audio");
+      audio.className = "ptx-rich-audio";
+      audio.setAttribute("controls", "controls");
+      audio.setAttribute("preload", "none");
+      audio.setAttribute("referrerpolicy", "no-referrer");
+      audio.setAttribute("src", url);
+      node.appendChild(richGuard(audio, audio, "语音加载失败（可能已失效或未登记）"));
+    }
+    node.appendChild(richSpan("ptx-rich-record-label", richClock(element.duration) || richText(element.text).trim() || "语音"));
+    return node;
+  }
+
+  function richElementNode(element, depth) {
+    if (!element || typeof element !== "object") return null;
+    var type = richText(element.type);
+    if (type === "text") return richTextNode(element);
+    if (type === "face") return richFaceNode(element);
+    if (type === "image") return richImageNode(element);
+    if (type === "video") return richVideoNode(element);
+    if (type === "card") return richCardNode(element);
+    if (type === "quote") return richQuoteNode(element);
+    if (type === "forward") return richForwardNode(element, depth);
+    if (type === "file") return richFileNode(element);
+    if (type === "record") return richRecordNode(element);
+    return richSpan("ptx-rich-text", richLabel(element, "[未知消息]"));
+  }
+
+  /* 元素数量硬上限：超出部分只留一句可见提示，绝不逐条建 DOM（防恶意超量 AST）。 */
+  function richAppendChildren(container, elements, depth) {
+    if (!Array.isArray(elements)) return;
+    var limit = Math.min(elements.length, RICH_ELEMENT_LIMIT);
+    for (var index = 0; index < limit; index += 1) {
+      var node = richElementNode(elements[index], depth);
+      if (node) container.appendChild(node);
+    }
+    if (elements.length > limit) {
+      container.appendChild(richSpan("ptx-rich-text", "另有 " + (elements.length - limit) + " 段内容未展开"));
+    }
+  }
+
+  /* ---------------- 最新消息横条：指纹不变则一个节点都不动 ---------------- */
+
+  /* 指纹与渲染上限严格对齐：凡是不参与渲染的元素也不必参与比对，凡是渲染出来的内容变化必须被看见。 */
+  function richElementsKey(elements, depth) {
+    if (!Array.isArray(elements)) return "";
+    var parts = [];
+    var limit = Math.min(elements.length, RICH_ELEMENT_LIMIT);
+    for (var index = 0; index < limit; index += 1) {
+      var element = elements[index] && typeof elements[index] === "object" ? elements[index] : {};
+      var items = Array.isArray(element.items) ? element.items : [];
+      var nested = "";
+      if (items.length && depth < 2) {
+        var nestedParts = [];
+        var nestedLimit = Math.min(items.length, RICH_FORWARD_ITEMS);
+        for (var inner = 0; inner < nestedLimit; inner += 1) {
+          nestedParts.push(richElementsKey(items[inner] && items[inner].elements, depth + 1));
+        }
+        nested = nestedParts.join("/");
+      }
+      parts.push([element.type, element.text, element.title, element.url, element.imageUrl, element.emojiUrl, element.source, element.targetMessageId, element.duration, items.length, nested].join("\u0001"));
+    }
+    return parts.length + "|" + parts.join("\u0002");
+  }
+
+  function richMessageKey(message) {
+    if (!message) return "none";
+    var elements = Array.isArray(message.elements) ? message.elements : null;
+    return richText(message.id) + "#" + richElementsKey(elements, 0) + "#" + richText(message.content).length;
+  }
+
+  /**
+   * 渲染当前群最新消息。
+   *
+   * 指纹（id + elements 结构 + 文本长度）与容器上记录的一致时**直接返回**：正在播放的语音 /
+   * 视频、已展开的合并转发、已放大或正在加载的图片都不会被 5 秒轮询重建。只有新消息到达
+   * （指纹变化）或视图被重新渲染（新容器没有指纹）时才替换内容。
+   */
+  function renderLatestMessage(message) {
+    var root = monitorViewport();
+    var body = root ? root.querySelector("[data-message-body]") : null;
+    if (!body) return;
+    var key = richMessageKey(message);
+    if (body.dataset.richKey === key) return;
+    body.dataset.richKey = key;
+    while (body.firstChild) body.removeChild(body.firstChild);
+    if (!message) {
+      body.textContent = "等待当前群的新消息";
+      return;
+    }
+    richAppendChildren(body, message.elements, 0);
+    if (!body.firstChild) body.textContent = richText(message.content).trim() || "[无文本内容]";
+  }
+
+  /* 切换群聊 / 连接中断：清掉指纹并回到空态，避免把上一个群的消息留在横条上。 */
+  function resetLatestMessage() {
+    var root = monitorViewport();
+    var body = root ? root.querySelector("[data-message-body]") : null;
+    if (body) body.dataset.richKey = "";
+    renderLatestMessage(null);
+  }
+
+// END GENERATED TRAFFIC RUNTIME
+
+/* ---------------- 词条操作（修正 / 删除 · 危险动作走二次确认） ----------------
+ * 操作栏放在正文标题与元信息之下：修正进入就地编辑态，删除先切换为确认条，
+ * 两条路径都不离开当前视窗，也不产生任何模态浮层。 */
+function renderEntryActions() {
+  if (state.deleteArmed) {
+    return `<div class="ptx-acts is-confirm">` +
+      `<span class="ptx-act-ask">确定删除此词条？</span>` +
+      `<button class="ptx-btn is-danger-solid" data-action="confirm-delete-entry" type="button">确认删除</button>` +
+      `<button class="ptx-btn" data-action="cancel-delete-entry" type="button">取消</button>` +
+    `</div>`;
+  }
+  return `<div class="ptx-acts">` +
+    `<button class="ptx-btn" data-action="edit-entry" ${tip('修正标题、状态、标签、摘要与正文')} type="button">${organicIcon('pencil', 13)}<span>修正</span></button>` +
+    `<button class="ptx-btn is-danger" data-action="delete-entry" ${tip('删除该词条与其原始会话', 'top')} type="button">${organicIcon('trash', 13)}<span>删除</span></button>` +
+  `</div>`;
+}
+
+/* 可改状态：与后端 PUT 契约一致，只放 verified / tentative / open 三态 */
+const EDITOR_STATUSES = ['verified', 'tentative', 'open'];
+const EDITOR_MAX_HEIGHT = 340;
+
+function renderEditor(detail) {
+  let current = entryStatusKey(detail.status);
+  if (!EDITOR_STATUSES.includes(current)) current = 'open';
+  const options = EDITOR_STATUSES.map((key) =>
+    `<option value="${key}"${key === current ? ' selected' : ''}>${escapeHtml(ENTRY_STATUS[key])}</option>`).join('');
+  const tags = Array.isArray(detail.tags) ? detail.tags.join(', ') : '';
+  return `<div class="ptx-editor" data-role="entry-editor">` +
+    `<label class="ptx-editor-field">` +
+      `<span class="ptx-editor-label">标题</span>` +
+      `<input class="ptx-input" data-role="entry-title" type="text" maxlength="200" value="${escapeHtml(detail.title || '')}" aria-label="词条标题">` +
+    `</label>` +
+    `<div class="ptx-editor-row">` +
+      `<label class="ptx-editor-field is-narrow">` +
+        `<span class="ptx-editor-label">状态</span>` +
+        `<select class="ptx-input" data-role="entry-status" aria-label="词条状态">${options}</select>` +
+      `</label>` +
+      `<label class="ptx-editor-field">` +
+        `<span class="ptx-editor-label">标签（逗号分隔）</span>` +
+        `<input class="ptx-input" data-role="entry-tags" type="text" value="${escapeHtml(tags)}" aria-label="词条标签">` +
+      `</label>` +
+    `</div>` +
+    `<label class="ptx-editor-field">` +
+      `<span class="ptx-editor-label">摘要</span>` +
+      `<textarea class="ptx-input ptx-editor-area" data-role="entry-summary" rows="3" aria-label="词条摘要">${escapeHtml(detail.summary || '')}</textarea>` +
+    `</label>` +
+    `<label class="ptx-editor-field">` +
+      `<span class="ptx-editor-label">正文 Markdown</span>` +
+      `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-role="entry-markdown" spellcheck="false" aria-label="词条正文 Markdown">${escapeHtml(detail.markdown || '')}</textarea>` +
+    `</label>` +
+    `<div class="ptx-editor-foot">` +
+      `<button class="ptx-btn is-primary" data-action="save-entry" type="button">${organicIcon('check', 13)}<span>保存修正</span></button>` +
+      `<button class="ptx-btn" data-action="cancel-edit-entry" type="button">取消</button>` +
+      `<span class="ptx-editor-hint">正文为 llmwiki Markdown，保存后立即重写词条与索引</span>` +
+    `</div>` +
+  `</div>`;
+}
+
+/* 正文 / 摘要会随内容增高，到 CSS 上限后转为内部滚动 */
+function growField(field) {
+  if (!field || field.tagName !== 'TEXTAREA') return;
+  field.style.height = 'auto';
+  field.style.height = `${Math.min(field.scrollHeight, EDITOR_MAX_HEIGHT)}px`;
+}
+
+function growEditor() {
+  if (!viewportEl) return;
+  for (const field of viewportEl.querySelectorAll('[data-role="entry-summary"], [data-role="entry-markdown"]')) growField(field);
+}
+
+/* 讨论脉络正文：段落各自成 <p>；昵称变内联胶囊，「…」原话保持低调高亮。 */
+function renderNarrative(text, mentionNames) {
+  if (typeof text !== 'string' || !text.trim()) return '';
+  const paragraphs = text.split(/\n\s*\n|\r\n\s*\r\n/).map((p) => p.trim()).filter(Boolean);
+  return `<div class="ptx-narrative">${paragraphs.map((p) =>
+    `<p>${mentionize(p, mentionNames)}</p>`,
+  ).join('')}</div>`;
+}
+
+function renderGloss(items, mentionNames) {
+  if (!Array.isArray(items) || !items.length) return '';
+  return `<dl class="ptx-gloss">${items.map((item) =>
+    `<div class="ptx-gloss-row"><dt>${escapeHtml((item && item.term) || '')}</dt><dd>${mentionize((item && item.note) || '', mentionNames)}</dd></div>`,
+  ).join('')}</dl>`;
+}
+
+/* 相关线索：命中索引的渲染为可点击行（序号 + 标题 + 一行摘要 + 箭头），
+   未命中的降级为「未入索引」条目；超过 8 条折叠进「其余 N 条」。 */
+function renderRelatedItem(text, hit, index) {
+  const no = (index + 1 < 10 ? '0' : '') + (index + 1);
+  if (hit) {
+    return `<button type="button" class="ptx-link" data-act="select" data-id="${escapeHtml(hit.id)}" title="${escapeHtml(text)}">` +
+      `<span class="ptx-link-no">${no}</span>` +
+      `<span class="ptx-link-main">` +
+        `<span class="ptx-link-title">${escapeHtml(text)}</span>` +
+        `<span class="ptx-link-sum">${escapeHtml(clip(hit.summary || '', 72))}</span>` +
+      `</span>` +
+      `<span class="ptx-link-go">${organicIcon('chevron', 12)}</span>` +
+      `</button>`;
+  }
+  return `<div class="ptx-link is-missing" title="${escapeHtml(text)}">` +
+    `<span class="ptx-link-no">${no}</span>` +
+    `<span class="ptx-link-main"><span class="ptx-link-title">${escapeHtml(text)}</span></span>` +
+    `<span class="ptx-link-flag">未入索引</span>` +
+    `</div>`;
+}
+
+function renderRelated(titles, entryId) {
+  if (!Array.isArray(titles) || !titles.length) return '';
+  const rows = titles.map((title, index) => {
+    const text = String(title == null ? '' : title).trim();
+    if (!text) return '';
+    /* 相关词条查找扫全量索引（state.entries 永为全量，页签过滤只影响列表渲染） */
+    const hit = state.entries.find((entry) => entry && entry.title === text);
+    return renderRelatedItem(text, hit, index);
+  }).filter(Boolean);
+  if (!rows.length) return '';
+  let html = `<div class="ptx-related">${rows.slice(0, 8).join('')}</div>`;
+  const tail = rows.slice(8);
+  if (tail.length) {
+    const key = `relmore:${entryId || ''}`;
+    html += `<details class="ptx-related-more"${foldOpen(key, false) ? ' open' : ''} data-fold="${escapeHtml(key)}">` +
+      `<summary>其余 ${tail.length} 条</summary><div class="ptx-related">${tail.join('')}</div></details>`;
+  }
+  return html;
+}
+
+/* 落点：已收敛 / 仍悬而未决 两列一栏；两列皆空则整栏隐藏。 */
+function renderOutcome(detail, mentionNames) {
+  const consensus = Array.isArray(detail.consensus) ? detail.consensus : [];
+  const openQuestions = Array.isArray(detail.openQuestions) ? detail.openQuestions : [];
+  if (!consensus.length && !openQuestions.length) return '';
+  const left = consensus.length
+    ? `<div class="ptx-outcome-col is-consensus"><span class="ptx-outcome-l">已收敛</span>${mentionBullets(consensus, mentionNames)}</div>` : '';
+  const right = openQuestions.length
+    ? `<div class="ptx-outcome-col is-open"><span class="ptx-outcome-l">仍悬而未决</span>${mentionBullets(openQuestions, mentionNames)}</div>` : '';
+  return `<div class="ptx-outcome">${left}${right}</div>`;
+}
+
+/* 附录：争点对照 + 摘句 收进同一个折叠区，摘要行列出内含物；两者皆空则整区消失。
+   旧词条没有讨论脉络时默认展开（否则主体内容被藏进折叠区）。 */
+function renderAppendix(detail, mentionNames) {
+  const points = Array.isArray(detail.debateMatrix) ? detail.debateMatrix : [];
+  const quotes = Array.isArray(detail.keyQuotes) ? detail.keyQuotes : [];
+  if (!points.length && !quotes.length) return '';
+  const parts = [];
+  if (points.length) parts.push(`争点对照 ${points.length} 个立场`);
+  if (quotes.length) parts.push(`摘句 ${quotes.length} 条`);
+  const hasNarrative = typeof detail.narrative === 'string' && detail.narrative.trim() !== '';
+  const key = `appendix:${detail.id || ''}`;
+  const inner =
+    (points.length ? `<div class="ptx-app-h">争点对照</div>${renderMatrixBody(detail, mentionNames)}` : '') +
+    (quotes.length ? `<div class="ptx-app-h">摘句</div>${renderQuotesBody(detail.keyQuotes)}` : '');
+  return `<details class="ptx-appendix"${foldOpen(key, !hasNarrative) ? ' open' : ''} data-fold="${escapeHtml(key)}">` +
+    `<summary>附录 · ${parts.join(' · ')}</summary>${inner}</details>`;
+}
+
+/* 主题时间轴：左侧一条发丝竖线 + 节点圆点，每条来源词条一行——
+   等宽日期 / 可点击标题（走 data-act=select）/ 一句贡献（缺省回退该条摘要）。
+   没有 timeline 时回退「相关线索」列表，但小节标题仍写「时间轴」。 */
+function renderTimeline(detail, mentionNames) {
+  const items = Array.isArray(detail.timeline) ? detail.timeline : [];
+  if (!items.length) {
+    const related = Array.isArray(detail.related) ? detail.related : [];
+    if (!related.length) return `<div class="ptx-text">这条主题还没有累积来源词条。</div>`;
+    return renderRelated(related, detail.id);
+  }
+  const rows = items.map((item) => {
+    const entryId = String((item && item.entryId) || '').trim();
+    const title = String((item && item.title) || '未命名来源词条');
+    const date = String((item && item.date) || '--');
+    const note = String((item && (item.contribution || item.summary)) || '');
+    const titleHtml = entryId
+      ? `<button type="button" class="ptx-tl-title" data-act="select" data-id="${escapeHtml(entryId)}" ${tip('阅读来源词条')}>${escapeHtml(title)}</button>`
+      : `<span class="ptx-tl-title is-static">${escapeHtml(title)}</span>`;
+    return `<li class="ptx-tl">` +
+      `<span class="ptx-tl-dot" aria-hidden="true"></span>` +
+      `<div class="ptx-tl-main">` +
+        `<span class="ptx-tl-date">${escapeHtml(date)}</span>` +
+        titleHtml +
+        (note ? `<p class="ptx-tl-note">${mentionize(note, mentionNames)}</p>` : '') +
+      `</div>` +
+    `</li>`;
+  }).join('');
+  return `<ol class="ptx-timeline">${rows}</ol>`;
+}
+
+function renderPanorama() {
+  const backLabel = state.listStage === 'topics' ? '返回主题' : '返回词条索引';
+  const back = `<button class="ptx-back" data-act="stage" data-stage="${escapeHtml(state.listStage || 'entries')}" ${tip(backLabel)} aria-label="${escapeHtml(backLabel)}">${organicIcon('back', 13)}</button>`;
+  if (state.detailLoading) {
+    return renderHead('词条正文', '正在载入', back) + renderDormant('正在载入', '正在读取词条正文并解析导语、脉络与结构字段。');
+  }
+  const detail = state.detail;
+  if (!detail) {
+    if (state.detailError) {
+      return renderHead('词条正文', '读取失败', back) + renderDormant('词条读取失败', `无法读取该词条正文（${state.detailError}）。可返回索引重试，或点击底栏核心按钮刷新数据。`);
+    }
+    return renderHead('词条正文', '未选择词条', back) + renderDormant('未选择词条', '请先在词条索引中选择一条词条，正文会在这里展开。');
+  }
+  const tags = Array.isArray(detail.tags) && detail.tags.length
+    ? `<div class="ptx-tags">${detail.tags.map((tag) => `<span class="ptx-tag">${escapeHtml(tag)}</span>`).join('')}</div>`
+    : '';
+  const metadata = detail.metadata || {};
+  const metaStatus = isTopicEntry(detail) ? '主题' : entryStatusLabel(detail.status);
+  const metaRow = `<div class="ptx-meta">` +
+    `<span>日期<b>${escapeHtml(detail.date || '--')}</b></span>` +
+    `<span>状态<b>${escapeHtml(metaStatus)}</b></span>` +
+    `<span>群聊<b>${escapeHtml(detail.channelId || CHANNEL_ID)}</b></span>` +
+    `<span>消息<b>${num(metadata.messageCount)} 条</b></span>` +
+    `<span>发言人<b>${num(metadata.participantCount)} 人</b></span></div>`;
+  const rawBackground = extractMarkdownSection(detail.markdown, ['背景', 'background']);
+  /* 占位行（`_（无额外背景信息）_`）不是内容：主题 / 旧词条都不该在详情里显示这句空话 */
+  const background = /^_?（[^）]*）_?$/u.test(rawBackground.replace(/\s+/g, ' ').trim()) ? '' : rawBackground;
+
+  if (state.editingEntryId && state.editingEntryId === detail.id) {
+    return renderHead('修正词条', detail.date || '就地编辑', back) + renderEditor(detail);
+  }
+
+  const isTopic = isTopicEntry(detail);
+  const narrative = typeof detail.narrative === 'string' ? detail.narrative : '';
+  const glossary = Array.isArray(detail.glossary) ? detail.glossary : [];
+  const mentionNames = speakersOf(detail);
+
+  /* 导语：summary 作导语；有脉络时起因收成一行小字，无脉络（旧词条）背景保留为独立小节。 */
+  const lead = `<div class="ptx-sec">` +
+    `<div class="ptx-lead">${escapeHtml(detail.summary || '该词条未包含摘要')}</div>` +
+    (narrative.trim() && background
+      ? `<div class="ptx-cause"><span class="ptx-cause-l">起因</span>${mentionize(background, mentionNames)}</div>`
+      : '') +
+  `</div>`;
+
+  let body = lead;
+  if (!narrative.trim() && background) {
+    body += renderSection('背景', `<div class="ptx-text">${mentionize(background, mentionNames)}</div>`);
+  }
+  if (narrative.trim()) {
+    body += renderSection(isTopic ? '主题综述' : '讨论脉络', renderNarrative(narrative, mentionNames));
+  }
+  if (isTopic) {
+    body += renderSection('时间轴', renderTimeline(detail, mentionNames));
+  }
+  const outcome = renderOutcome(detail, mentionNames);
+  if (outcome) body += renderSection('落点', outcome);
+  if (glossary.length) {
+    body += renderSection('名词注', renderGloss(glossary, mentionNames));
+  }
+  const appendix = renderAppendix(detail, mentionNames);
+  if (appendix) body += `<div class="ptx-sec">${appendix}</div>`;
+
+  return renderHead('词条正文', detail.date || '无日期', back) +
+    `<div class="ptx-r-title">${escapeHtml(detail.title || '未命名词条')}</div>` +
+    metaRow + tags +
+    renderEntryActions() +
+    renderSpeakers(speakersOf(detail)) +
+    body;
+}
+
+function renderStage() {
+  if (!viewportEl) return;
+  if (state.stage === 'metrics' && viewportEl.querySelector('[data-traffic-summary]')) { updateMetrics(); syncTabs(); return; }
+  let html;
+  if (state.stage === 'panorama') {
+    html = renderPanorama();
+  } else if (state.stage === 'metrics') {
+    html = renderMetrics();
+  } else if (state.stage === 'settings') {
+    html = renderSettings();
+  } else {
+    const isTopicList = state.stage === 'topics';
+    html = renderHead(isTopicList ? '主题' : '词条索引',
+      `共 ${listEntries().length} ${isTopicList ? '个主题' : '条'}`,
+      renderViewToggle()) + renderSpores();
+  }
+
+  const key = state.stage + '|' + (state.activeId || '');
+  viewportEl.innerHTML = html;
+  if (state.stage === 'settings') decorateSettings();
+  if (state.stage === 'metrics') updateMetrics();
+  if (state.editingEntryId) growEditor();
+  if (key !== state.lastView) {
+    viewportEl.scrollTop = 0;
+    state.lastView = key;
+  }
+  syncTabs();
+}
+
+function syncTabs() {
+  if (!rootEl) return;
+  const active = state.stage === 'panorama' ? state.listStage : state.stage;
+  for (const button of rootEl.querySelectorAll('.ptx-tab')) {
+    button.classList.toggle('is-active', button.getAttribute('data-stage') === active);
+  }
+  /* 设置页签独立于两个核心页签：进入设置时主页签全部非激活，齿轮独占激活态 */
+  if (gearBtnEl) gearBtnEl.classList.toggle('is-active', active === 'settings');
+}
+
+/* 底栏轮播：数据源是独立的 /api/latest（按最新时间排序），与词条索引的搜索 / 群聊筛选
+ * 完全解耦；显示条数与换行间隔由面板设置驱动，改动即时生效。
+ * 结构是双槽位交替滑入：容器内恒定只有一个 .ptx-trow.is-active，步进时下一节点从下方
+ * 滑入、旧节点向上滑出后 400ms 直接移除——没有长轨道，也就没有首尾循环时的反向倒退
+ * 回滚；Tab 焦点永远只落在当前唯一可见的那一条上，跳不进任何幽灵节点。 */
+function tickerWindow() {
+  return Math.max(1, Math.min(state.latestEntries.length, state.settings.tickerCount));
+}
+
+/* 单条节点：有词条时是可直接激活的 <button>，无词条时降级为只读提示行（不带 data-act） */
+function tickerRow(entry) {
+  const row = entry ? document.createElement('button') : document.createElement('div');
+  row.className = 'ptx-trow';
+  if (entry) {
+    row.setAttribute('type', 'button');
+    row.setAttribute('data-act', 'select');
+    row.setAttribute('data-id', String(entry.id));
+  }
+  const dot = document.createElement('span');
+  dot.className = 'ptx-tdot';
+  const title = document.createElement('span');
+  title.className = 'ptx-ttitle';
+  /* 无词条时的只读提示：失败 → 空 → 加载中，三者共用同一个槽位 */
+  title.textContent = entry
+    ? clip(entry.title || '未命名词条', 44)
+    : state.latestError ? '最新词条读取失败' : state.latestLoaded ? '暂无最新词条' : '正在加载最新词条';
+  row.appendChild(dot);
+  row.appendChild(title);
+  if (entry) {
+    const date = document.createElement('span');
+    date.className = 'ptx-tdate';
+    date.textContent = entry.date || '--';
+    row.appendChild(date);
+  }
+  return row;
+}
+
+function tickerEntry(index) {
+  const list = state.latestEntries.slice(0, state.settings.tickerCount);
+  return list.length ? list[index % list.length] : null;
+}
+
+/* 重建：清空容器并落地唯一激活行（首次加载 / 数据刷新 / 设置变更 / 删除词条后调用） */
+function refreshTicker() {
+  clearTimeout(state.tickerSwap);
+  state.tickerSwap = null;
+  if (!tickerEl) return;
+  tickerEl.innerHTML = '';
+  state.tickerIndex = state.latestEntries.length ? state.tickerIndex % tickerWindow() : 0;
+  const row = tickerRow(tickerEntry(state.tickerIndex));
+  row.classList.add('is-active');
+  tickerEl.appendChild(row);
+}
+
+/* 步进：新节点以 .is-entering（下方 100%）追加 → 下一帧旧节点转 .is-leaving、新节点转
+ * .is-active → 400ms 后旧节点直接移出 DOM。构建与动画状态之间强制读一次几何，
+ * 初始 Transform 才会成为过渡起点，滑入不会被浏览器合并成瞬间换位。 */
+function stepTicker() {
+  if (!tickerEl || !state.latestEntries.length) return;
+  const count = tickerWindow();
+  if (count <= 1) return;
+  /* 自愈：上一帧被系统吞掉（后台标签页暂停 rAF）时清掉残留的进场 / 离场节点，
+   * 容器先回到"只有一个激活行"的不变量，再做下一次步进。 */
+  for (const leftover of Array.from(tickerEl.querySelectorAll('.ptx-trow:not(.is-active)'))) {
+    leftover.remove();
+  }
+  const current = tickerEl.querySelector('.ptx-trow.is-active');
+  if (!current) {
+    refreshTicker();
+    return;
+  }
+  clearTimeout(state.tickerSwap);
+  state.tickerSwap = null;
+  state.tickerIndex = (state.tickerIndex + 1) % count;
+  const incoming = tickerRow(tickerEntry(state.tickerIndex));
+  incoming.classList.add('is-entering');
+  tickerEl.appendChild(incoming);
+  void incoming.offsetHeight;
+  requestAnimationFrame(() => {
+    if (!tickerEl || !tickerEl.contains(incoming)) return;
+    current.classList.remove('is-active');
+    current.classList.add('is-leaving');
+    /* 离场节点退出 Tab 序列：过渡期间按 Tab 也绝不落进正在淡出的幽灵行 */
+    current.setAttribute('tabindex', '-1');
+    incoming.classList.remove('is-entering');
+    incoming.classList.add('is-active');
+    state.tickerSwap = setTimeout(() => {
+      state.tickerSwap = null;
+      const active = tickerEl ? tickerEl.querySelector('.ptx-trow.is-active') : null;
+      if (current === document.activeElement && active) {
+        try { active.focus({ preventScroll: true }); } catch (err) { active.focus(); }
+      }
+      if (current.parentNode) current.parentNode.removeChild(current);
+    }, TICKER_SWAP_MS);
+  });
+}
+
+function startTicker() {
+  clearInterval(state.tickerTimer);
+  state.tickerTimer = setInterval(() => {
+    if (!state.visible || state.collapsed) return;
+    stepTicker();
+  }, Math.max(TICKER_INTERVAL_MIN, state.settings.tickerInterval) * 1000);
+}
+
+function refreshPhase() {
+  const phase = state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING');
+  if (frameEl) frameEl.setAttribute('data-phase', phase);
+  if (!phaseEl) return;
+  phaseEl.setAttribute('data-phase', phase);
+  phaseEl.setAttribute('data-tip', PHASE_TIPS[String(phase).toUpperCase()] || '状态未知');
+  phaseEl.innerHTML = `<i></i><span>${escapeHtml(phaseLabel(phase))}</span>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * 7. 数据层
+ * ------------------------------------------------------------------ */
+
+function channelScopeId() {
+  if (state.channel && state.channel !== 'all') return state.channel;
+  // 「全部」按单群读取时取频道列表首个；没有列表才落到兜底常量
+  return (state.channels && state.channels.length > 0 ? state.channels[0] : '') || CHANNEL_ID;
+}
+
+function entriesUrl() {
+  const params = new URLSearchParams();
+  if (state.channel !== 'all') params.set('channelId', state.channel);
+  if (state.keyword) params.set('keyword', state.keyword);
+  const query = params.toString();
+  return `${API_BASE}/api/entries${query ? `?${query}` : ''}`;
+}
+
+function applyEntries(list) {
+  state.entries = Array.isArray(list) ? list : [];
+  if (state.activeId && !state.entries.some((item) => item && item.id === state.activeId)) {
+    state.activeId = null;
+    state.detail = null;
+    state.detailError = '';
+    state.editingEntryId = null;
+    state.deleteArmed = false;
+  }
+  if (!state.activeId && state.entries.length) state.activeId = state.entries[0].id;
+}
+
+function loadChannels() {
+  return requestJson(`${API_BASE}/api/channels`)
+    .then((data) => {
+      const list = data && Array.isArray(data.channels) ? data.channels : [];
+      state.channels = list.length ? list : DEFAULT_CHANNELS.slice();
+      if (state.channel !== 'all' && !state.channels.includes(state.channel)) {
+        /* 记忆里的群已不存在：回落"全部"并把记忆一并纠正，避免继续用失效范围请求词条 */
+        state.channel = 'all';
+        setChannelScope('all');
+        renderChannelMenu();
+        return loadEntries();
+      }
+      renderChannelMenu();
+    })
+    .catch(() => renderChannelMenu());
+}
+
+function channelItems() {
+  return channelMenu ? Array.from(channelMenu.querySelectorAll('.ptx-menu-item')) : [];
+}
+
+function renderChannelMenu() {
+  if (!channelToggle || !channelMenu) return;
+  const label = channelToggle.querySelector('.ptx-selectbtn-label');
+  if (label) label.textContent = state.channel === 'all' ? '全部' : `#${state.channel}`;
+  const options = [{ value: 'all', text: '全部' }].concat(state.channels.map((id) => ({ value: String(id), text: `#${id}` })));
+  channelMenu.innerHTML = options.map((option) =>
+    `<button type="button" class="ptx-menu-item" role="option" data-act="channel-pick" data-value="${escapeHtml(option.value)}" aria-selected="${option.value === state.channel ? 'true' : 'false'}">${escapeHtml(option.text)}</button>`
+  ).join('');
+}
+
+/* 高亮 = 键盘当前位置：移动高亮同时把焦点交给该项（面板里每一项都是 <button>），
+   Enter / 空格由原生 button 激活，不额外拦截。 */
+function highlightChannelItem(index) {
+  const items = channelItems();
+  if (!items.length) return;
+  const next = ((index % items.length) + items.length) % items.length;
+  items.forEach((item, i) => item.classList.toggle('is-active', i === next));
+  const item = items[next];
+  if (item.scrollIntoView) item.scrollIntoView({ block: 'nearest' });
+  try { item.focus({ preventScroll: true }); } catch (err) { item.focus(); }
+}
+
+function openChannelMenu() {
+  if (!channelToggle || !channelMenu) return;
+  renderChannelMenu();
+  channelMenu.hidden = false;
+  channelToggle.setAttribute('aria-expanded', 'true');
+  if (channelChip) channelChip.classList.add('is-open');
+  /* 高亮落在当前值上（'all' 恒为首项），打开即可用方向键接管 */
+  highlightChannelItem(state.channel === 'all' ? 0 : state.channels.indexOf(state.channel) + 1);
+}
+
+function closeChannelMenu(focusToggle) {
+  if (!channelMenu || channelMenu.hidden) return;
+  channelMenu.hidden = true;
+  if (channelChip) channelChip.classList.remove('is-open');
+  if (channelToggle) {
+    channelToggle.setAttribute('aria-expanded', 'false');
+    if (focusToggle) channelToggle.focus();
+  }
+  const active = channelMenu.querySelector('.ptx-menu-item.is-active');
+  if (active) active.classList.remove('is-active');
+}
+
+/* 选中：写入 state.channel 与本地记忆后沿用原 change 事件里的重新加载逻辑 */
+function pickChannel(value) {
+  const next = value || 'all';
+  closeChannelMenu(true);
+  if (next === state.channel) return;
+  /* 引擎草稿按频道隔离：A 群没保存的切换选择绝不能随频道切到 B 群被误保存。 */
+  engineDraft = null;
+  tuneDraft = {};
+  autotuneDraft = null;
+  state.channel = next;
+  setChannelScope(next);
+  renderChannelMenu();
+  state.status = null;
+  trafficPoints = [];
+  trafficAnchor = 0;
+  const line = viewportEl.querySelector('.ptx-ecg-line');
+  if (line) line.setAttribute('d', '');
+  Promise.all([loadEntries(), loadStatus()]).then(() => {
+    refreshPhase();
+    renderStage();
+  });
+  resetIdleTimer();
+}
+
+/* 群聊面板的全局键盘 / 外部点击：只在首次挂载时绑定一次。
+   Console 会在路由间反复 mount / unmount，若每次都往 document 上挂一份，
+   ↑↓ 在第二次挂载后会一步跨两行；channelMenu 为空时这些处理器自动不做任何事。 */
+let menuGlobalsBound = false;
+
+function bindMenuGlobals() {
+  if (menuGlobalsBound) return;
+  menuGlobalsBound = true;
+
+  /* Esc 收起并交还焦点 / ↑↓ 移动高亮 / Tab 离开即收起；
+     其余按键照旧只负责重置静置计时。Enter 与空格由面板内的原生 button 自行激活。 */
+  document.addEventListener('keydown', (event) => {
+    if (!channelMenu || channelMenu.hidden) {
+      resetIdleTimer();
+      return;
+    }
+    const key = event.key;
+    if (key === 'Escape') {
+      event.preventDefault();
+      closeChannelMenu(true);
+      return;
+    }
+    if (key === 'Tab') {
+      closeChannelMenu(false);
+      resetIdleTimer();
+      return;
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      event.preventDefault();
+      let at = channelItems().indexOf(channelMenu.querySelector('.ptx-menu-item.is-active'));
+      if (at < 0) at = key === 'ArrowDown' ? -1 : 0;
+      highlightChannelItem(key === 'ArrowDown' ? at + 1 : at - 1);
+    }
+    resetIdleTimer();
+  });
+
+  /* 点击面板外部收起：chip 内部的点击留给开合与选中处理器，不在这里抢 */
+  document.addEventListener('pointerdown', (event) => {
+    if (!channelMenu || channelMenu.hidden) return;
+    if (channelChip && channelChip.contains(event.target)) return;
+    closeChannelMenu(false);
+  });
+}
+
+function loadEntries() {
+  // 请求代号：切群 / 连续输入关键词时，先发后到的响应不得覆盖后发的。
+  const token = (state.entriesRequest = (state.entriesRequest || 0) + 1);
+  return requestJson(entriesUrl())
+    .then((data) => {
+      if (token !== state.entriesRequest) return;
+      applyEntries(data);
+      state.entriesLoaded = true;
+      state.entriesError = '';
+      state.entriesFetchedAt = Date.now();
+    })
+    .catch((err) => {
+      if (token !== state.entriesRequest) return;
+      // 失败保留「最后已知良好」的列表：把未知物化成空列表会让用户以为词条被删了。
+      state.entriesError = err && err.message ? err.message : '网络错误';
+      toast(`词条索引读取失败：${state.entriesError}`);
+    });
+}
+
+/* 列表轮询：后台沉淀 / 另一管理员改名删除后，本页最多 60s 内看见（无需手动刷新）。 */
+const ENTRIES_POLL_MS = 60_000;
+function pollEntriesIfStale() {
+  if (!state.visible || state.stage !== 'entries') return;
+  if (Date.now() - (state.entriesFetchedAt || 0) < ENTRIES_POLL_MS) return;
+  loadEntries();
+}
+
+/* 底栏轮播的独立数据源：只取最新时间序列，不带群聊 / 关键词参数。
+ * 失败时保留上一次序列，不打断轮播；不触发任何视图重绘（监控曲线不受影响）。 */
+function loadLatest() {
+  return requestJson(`${API_BASE}/api/latest?limit=${LATEST_LIMIT}`)
+    .then((data) => {
+      if (!Array.isArray(data)) throw new Error('最新词条响应格式错误');
+      state.latestEntries = data;
+      state.latestError = false;
+      state.latestLoaded = true;
+    })
+    .catch(() => { state.latestLoaded = true; state.latestError = true; });
+}
+
+let statusRequest = 0;
+function loadStatus() {
+  const request = ++statusRequest;
+  const channel = channelScopeId();
+  return requestJson(`${API_BASE}/api/status?channelId=${encodeURIComponent(channel)}`)
+    .then((data) => { if (request === statusRequest && channel === channelScopeId()) { state.status = data; state.statusChecked = true; } })
+    .catch(() => { if (request === statusRequest && channel === channelScopeId()) { state.status = null; state.statusChecked = true; } });
+}
+
+/* 状态轮询：监控页 5 秒（跟随后端 5 秒采样），其余阶段 15 秒；
+ * 自调度以便阶段切换即时换挡，收回胶囊期间暂停取数但不丢链。 */
+function scheduleStatusPoll() {
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = null;
+  if (!state.visible) return;
+  state.refreshTimer = setTimeout(() => {
+    state.refreshTimer = null;
+    if (!state.visible) return;
+    if (state.collapsed) {
+      scheduleStatusPoll();
+      return;
+    }
+    loadStatus().then(() => {
+      refreshPhase();
+      if (state.stage === 'metrics') updateMetrics();
+      pollEntriesIfStale();
+      scheduleStatusPoll();
+    });
+  }, state.stage === 'metrics' ? STATUS_POLL_MS : STATUS_IDLE_POLL_MS);
+}
+
+function loadDetail(id) {
+  if (!id) return Promise.resolve();
+  const token = (state.detailRequest = (state.detailRequest || 0) + 1);
+  state.detailLoading = true;
+  renderStage();
+  return requestJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`)
+    .then((data) => {
+      // 代号 + 主键双重复核：慢/快倒挂时正文不得落到别的 activeId 名下。
+      if (token !== state.detailRequest || !data || data.id !== id) return;
+      state.detail = data;
+      state.detailError = '';
+    })
+    .catch((err) => {
+      if (token !== state.detailRequest) return;
+      state.detail = null;
+      state.detailError = err && err.message ? err.message : '网络错误';
+    })
+    .then(() => { if (token === state.detailRequest) state.detailLoading = false; });
+}
+
+function ensureDetail() {
+  if (!state.activeId) return Promise.resolve();
+  if (state.detail && state.detail.id === state.activeId) return Promise.resolve();
+  return loadDetail(state.activeId);
+}
+
+/* ------------------------------------------------------------------ *
+ * 8. 轻提示
+ * ------------------------------------------------------------------ */
+
+let toastTimer = null;
+
+function toast(text) {
+  if (!toastEl) return;
+  toastEl.innerHTML = `${organicIcon('check', 11)}<span>${escapeHtml(text)}</span>`;
+  toastEl.classList.add('is-visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('is-visible'), 2400);
+}
+
+/* ------------------------------------------------------------------ *
+ * 9. 壳层构建
+ * ------------------------------------------------------------------ */
+
+function buildShell() {
+  const keys = STAGES.map((stage) => `
+      <button class="ptx-tab" data-act="stage" data-stage="${stage.key}" ${tip(stage.tip, 'right')} aria-label="${escapeHtml(stage.label)}">
+        ${organicIcon(stage.icon, 17)}
+      </button>`).join('');
+
+  const el = document.createElement('div');
+  el.id = ROOT_ID;
+  el.className = 'ptx-hidden';
+  el.innerHTML = `
+    <section class="ptx-window" role="region" aria-label="LLMWiki 知识阅读器" data-phase="LOADING">
+      <div class="ptx-shell">
+      <aside class="ptx-rail">
+        <div class="ptx-rail-brand" ${tip('LLMWiki 知识阅读器', 'right')}>${organicIcon('nucleus', 19)}</div>
+        <nav class="ptx-keys">${keys}</nav>
+        <div class="ptx-rail-foot">
+          <button class="ptx-tool ptx-theme" data-act="theme" ${tip('切换夜间主题', 'right')} aria-label="切换夜间主题" aria-pressed="false"><span class="ptx-ico-sun">${organicIcon('sun', 15)}</span><span class="ptx-ico-moon">${organicIcon('moon', 15)}</span></button>
+          <button class="ptx-tool ptx-gear" data-act="stage" data-stage="settings" ${tip('面板设置', 'right')} aria-label="面板设置">${organicIcon('settings', 15)}</button>
+        </div>
+      </aside>
+
+      <section class="ptx-body">
+        <header class="ptx-topbar" data-drag="1">
+          <div class="ptx-id">
+            <span class="ptx-id-glyph">${organicIcon('pulse', 14)}</span>
+            <span class="ptx-id-code">LLMWIKI</span>
+            <span class="ptx-id-sep"></span>
+            <button type="button" class="ptx-phase" data-phase="LOADING" data-act="stage" data-stage="metrics" ${tip('正在连接服务')}><i></i><span>正在连接</span></button>
+          </div>
+          <div class="ptx-tools">
+            <div class="ptx-filter">
+              <div class="ptx-chip ptx-channel" ${tip('按群聊筛选')}>
+                ${organicIcon('scope', 12)}
+                <button type="button" class="ptx-selectbtn" data-act="channel-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="群聊范围">
+                  <span class="ptx-selectbtn-label">全部</span>${organicIcon('chevronDown', 11)}
+                </button>
+                <div class="ptx-menu" role="listbox" aria-label="群聊范围" hidden></div>
+              </div>
+              <label class="ptx-chip" ${tip('搜索标题与正文')}>
+                ${organicIcon('find', 12)}
+                <input class="ptx-find" data-role="search" type="search" placeholder="检索" aria-label="检索词条" autocomplete="off">
+              </label>
+            </div>
+            <div class="ptx-winctl">
+              <button class="ptx-winctl-btn" data-act="maximize" ${tip('最大化')} aria-label="最大化" aria-pressed="false"><span class="ptx-ico-max">${organicIcon('maximize', 13)}</span><span class="ptx-ico-restore">${organicIcon('restore', 13)}</span></button>
+              <button class="ptx-winctl-btn" data-act="minimize" ${tip('最小化')} aria-label="最小化">${organicIcon('minimize', 13)}</button>
+              <button class="ptx-winctl-btn is-close" data-act="close" ${tip('关闭')} aria-label="关闭">${organicIcon('close', 13)}</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="ptx-viewport" id="ptxViewport"></div>
+
+        <footer class="ptx-foot">
+          <div class="ptx-ticker" id="ptxTicker" ${tip('最新词条，点击直接阅读')}></div>
+          <div class="ptx-foot-acts">
+            <button class="ptx-foot-btn is-core" data-act="refresh" ${tip('刷新数据', 'top')} aria-label="刷新数据">${organicIcon('sync', 13)}</button>
+          </div>
+        </footer>
+      </section>
+      </div>
+
+      ${resizeLayerMarkup()}
+    </section>
+
+    <button class="ptx-pill" data-act="expand" ${tip('点击展开阅读器', 'top')} aria-label="展开 LLMWiki 知识阅读器">
+      <span class="ptx-pill-core">${organicIcon('nucleus', 15)}</span>
+      <span class="ptx-pill-txt">
+        <span class="ptx-pill-name">LLMWiki 知识库</span>
+        <span class="ptx-pill-id">知识阅读器</span>
+      </span>
+    </button>
+
+    <div class="ptx-toast"></div>
+  `;
+
+  return el;
+}
+
+/* ------------------------------------------------------------------ *
+ * 10. 拖拽（视口钳制 + rAF 合并写入）
+ * ------------------------------------------------------------------ */
+
+const drag = { active: false, pointerId: 0, startX: 0, startY: 0, originLeft: 0, originTop: 0, dx: 0, dy: 0 };
+const resize = { active: false, node: null, dir: '', pointerId: 0, startX: 0, startY: 0, left: 0, top: 0, width: 0, height: 0 };
+/* 8 向鼠标光标：手势期间钉在 <html> 上，边缘尚在追帧时也不会退回箭头 */
+const RESIZE_CURSORS = { n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', ne: 'nesw-resize', sw: 'nesw-resize', nw: 'nwse-resize', se: 'nwse-resize' };
+let resizeBound = false;
+/* 拖拽的 document 级兜底监听同样只注册一次（rootEl 每次 mount 都是新节点） */
+let dragBound = false;
+
+const PILL_DRAG_THRESHOLD = 5;
+const pillDrag = {
+  active: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  originLeft: 0,
+  originTop: 0,
+  left: 0,
+  top: 0,
+  width: 0,
+  height: 0,
+  moved: false,
+  custom: false,
+  rafId: 0,
+  pending: null,
+  suppressClick: false,
+};
+let pillBound = false;
+
+function clampPosition(left, top) {
+  if (!frameEl) return { left, top };
+  const width = frameEl.offsetWidth;
+  const height = frameEl.offsetHeight;
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN);
+  const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - height - VIEWPORT_MARGIN);
+  return {
+    left: Math.min(Math.max(VIEWPORT_MARGIN, left), maxLeft),
+    top: Math.min(Math.max(VIEWPORT_MARGIN, top), maxTop),
+  };
+}
+
+/* 尺寸区间：下限 min(480 / 360, 视口 - 2×VIEWPORT_MARGIN)，上限即视口内缩后的可用面积。
+ * 视口比下限还小时上下限重合，窗口被压进视口——绝不抖动、绝不越界。 */
+function sizeBounds() {
+  const minWidth = Math.min(MIN_WIDTH, window.innerWidth - VIEWPORT_MARGIN * 2);
+  const minHeight = Math.min(MIN_HEIGHT, window.innerHeight - VIEWPORT_MARGIN * 2);
+  return {
+    minWidth,
+    minHeight,
+    maxWidth: Math.max(minWidth, window.innerWidth - VIEWPORT_MARGIN * 2),
+    maxHeight: Math.max(minHeight, window.innerHeight - VIEWPORT_MARGIN * 2),
+  };
+}
+
+function clampGeometry(left, top, width, height) {
+  const bounds = sizeBounds();
+  const nextWidth = Math.min(Math.max(width, bounds.minWidth), bounds.maxWidth);
+  const nextHeight = Math.min(Math.max(height, bounds.minHeight), bounds.maxHeight);
+  return {
+    left: Math.min(Math.max(VIEWPORT_MARGIN, left), Math.max(VIEWPORT_MARGIN, window.innerWidth - nextWidth - VIEWPORT_MARGIN)),
+    top: Math.min(Math.max(VIEWPORT_MARGIN, top), Math.max(VIEWPORT_MARGIN, window.innerHeight - nextHeight - VIEWPORT_MARGIN)),
+    width: nextWidth,
+    height: nextHeight,
+  };
+}
+
+/* 窗口排版档位：宽度 ≤ 782 / ≤ 562 时挂 is-narrow / is-compact。
+   这两处阈值以前由 @container 求值，容器查询会让窗口每次尺寸变化都重算整窗条件。
+   现在档位只跟窗口真实宽度走：ResizeObserver 是唯一真源（隐藏 → 可见、@media 改宽都会
+   触发，回调里读的是已经布局好的 offsetWidth，不强制回流；档位类不改宽度，不会自我触发），
+   另在 applyGeometry（拖动缩放）、最大化 / 还原、视口 resize、重新可见处补显式调用。
+   w <= 0 一律直接返回：display:none 的宿主读不到宽度，此时保留上一次档位、绝不清档。 */
+const NARROW_MAX = 782;
+const COMPACT_MAX = 562;
+let tierObserver = null;
+
+function syncResponsiveTier(width) {
+  if (!frameEl) return;
+  const w = width == null ? frameEl.offsetWidth : width;
+  if (!(w > 0)) return;
+  frameEl.classList.toggle('is-narrow', w <= NARROW_MAX);
+  frameEl.classList.toggle('is-compact', w <= COMPACT_MAX);
+}
+
+/* 设备像素对齐：窗口几何必须落在整设备像素网格上。
+   125% / 150% 缩放下 1 CSS px = 1.25 / 1.5 设备 px，取整到 CSS px 之后边框每移动一格都会
+   在"1 行实线"与"两行各半"之间切换；合成层的 translate3d 落在半个设备像素上更会被双线性
+   重采样，整窗发虚。统一对齐到 1 / dpr 网格后，静置、拖动起手、拖动落定只有一种像素形态。 */
+function snapPx(value) {
+  const dpr = window.devicePixelRatio || 1;
+  return Math.round(value * dpr) / dpr;
+}
+
+/* 布局位置（保留分数像素）：offsetLeft / offsetTop 会被取整成整数，而我们写入的 left / top
+   是设备像素对齐后的分数值（如 1214.4px = 1518 整设备像素）。拿取整值当拖拽起点，位移就带上
+   0.4px 偏差，合成层停在半个设备像素上被重采样：整窗发虚，紧贴宿主的顶边/竖边最先显出"撕裂"。
+   computedStyle 读的是使用值，分数像素不丢；未定位（auto）时回退 offsetLeft。 */
+function layoutOffset(el) {
+  try {
+    const cs = window.getComputedStyle(el);
+    const left = parseFloat(cs.left);
+    const top = parseFloat(cs.top);
+    if (Number.isFinite(left) && Number.isFinite(top)) return { left, top };
+  } catch (err) { /* 读不到计算样式时回退整数盒 */ }
+  return { left: el.offsetLeft, top: el.offsetTop };
+}
+
+function placeFrame(left, top) {
+  if (!frameEl) return;
+  const next = clampPosition(snapPx(left), snapPx(top));
+  frameEl.style.left = `${snapPx(next.left)}px`;
+  frameEl.style.top = `${snapPx(next.top)}px`;
+}
+
+/* 尺寸 + 位置一次性写入：几何成对更新，不会出现半途越界的中间态 */
+function applyGeometry(left, top, width, height) {
+  if (!frameEl) return;
+  const next = clampGeometry(snapPx(left), snapPx(top), snapPx(width), snapPx(height));
+  const nextWidth = snapPx(next.width);
+  frameEl.style.width = `${nextWidth}px`;
+  frameEl.style.height = `${snapPx(next.height)}px`;
+  frameEl.style.left = `${snapPx(next.left)}px`;
+  frameEl.style.top = `${snapPx(next.top)}px`;
+  /* 同一处提交宽度与档位：布局换挡赶在同一帧完成，缩放过程不会出现“先窄后宽”的抖动 */
+  syncResponsiveTier(nextWidth);
+}
+
+function commitGeometry(next) {
+  if (next.width == null) placeFrame(next.left, next.top);
+  else applyGeometry(next.left, next.top, next.width, next.height);
+}
+
+/* 拖拽帧：只写 transform，绝不碰 left / top。
+   目标位置先钳制到视口内再减起手位置，最后对齐设备像素——合成层因此永远落在整像素上，
+   拖动全程零布局、零重绘，边缘的 1px 发丝线不会逐帧重算抗锯齿。 */
+function applyDrag(left, top) {
+  if (!frameEl) return;
+  const next = clampPosition(left, top);
+  drag.dx = snapPx(next.left - drag.originLeft);
+  drag.dy = snapPx(next.top - drag.originTop);
+  frameEl.style.transform = `translate3d(${drag.dx}px, ${drag.dy}px, 0)`;
+}
+
+function flushPending() {
+  state.rafId = 0;
+  const next = state.pending;
+  state.pending = null;
+  if (!next) return;
+  if (next.translate) applyDrag(next.left, next.top);
+  else commitGeometry(next);
+}
+
+/* 拖拽终结：先把最终 left / top 落定，再在同一帧摘掉 transform。
+   此刻 .is-dragging 仍然挂着（transition: none），两条几何写入合并成一次样式计算，
+   画面直接停在终点；随后摘类只是恢复过渡，不会补间出“先回原位”的跳变。 */
+function settleDrag(final) {
+  if (state.rafId) {
+    window.cancelAnimationFrame(state.rafId);
+    state.rafId = 0;
+  }
+  const next = final || state.pending;
+  state.pending = null;
+  placeFrame(next ? next.left : drag.originLeft + drag.dx, next ? next.top : drag.originTop + drag.dy);
+  if (frameEl) frameEl.style.transform = '';
+  drag.dx = 0;
+  drag.dy = 0;
+}
+
+/* 手势终结：先撤销排队中的帧，再用终止坐标同步落定最终几何。调用方随后才摘除
+   is-dragging / is-resizing —— 材质恢复的那一帧拿到的就是最终几何，绝不会出现
+   “旧 rAF 在模糊恢复后才回放上一帧尺寸”的二次跳变。 */
+function settleGesture(final) {
+  if (state.rafId) {
+    window.cancelAnimationFrame(state.rafId);
+    state.rafId = 0;
+  }
+  const next = final || state.pending;
+  state.pending = null;
+  if (next) commitGeometry(next);
+}
+
+function schedulePlace(left, top) {
+  /* translate: 手上有拖拽时本帧走合成层搬运（applyDrag），否则是普通位置提交 */
+  state.pending = { left, top, width: null, height: null, translate: drag.active };
+  if (state.rafId) return;
+  state.rafId = window.requestAnimationFrame(flushPending);
+}
+
+function scheduleGeometry(left, top, width, height) {
+  state.pending = { left, top, width, height };
+  if (state.rafId) return;
+  state.rafId = window.requestAnimationFrame(flushPending);
+}
+
+function defaultPosition() {
+  if (!frameEl) return { left: 24, top: 24 };
+  const width = frameEl.offsetWidth || Math.min(820, Math.max(0, window.innerWidth - 48));
+  const height = frameEl.offsetHeight || Math.min(560, Math.max(0, window.innerHeight - 120));
+  return clampPosition(
+    window.innerWidth - width - 24,
+    window.innerHeight - height - 24,
+  );
+}
+
+function bindDrag() {
+  if (!frameEl) return;
+
+  rootEl.addEventListener('pointerdown', (event) => {
+    const handle = event.target.closest ? event.target.closest('[data-drag="1"]') : null;
+    if (!handle) return;
+    /* 最大化时窗口由视口接管，拖拽整体禁用 */
+    if (state.maximized) return;
+    if (event.target.closest('button, input, select, textarea, a')) return;
+    if (event.button != null && event.button !== 0) return;
+    drag.active = true;
+    drag.pointerId = event.pointerId;
+    drag.startX = event.clientX;
+    drag.startY = event.clientY;
+    const origin = layoutOffset(frameEl);
+    drag.originLeft = origin.left;
+    drag.originTop = origin.top;
+    drag.dx = 0;
+    drag.dy = 0;
+    frameEl.classList.add('is-dragging');
+    /* 起手只挂类（will-change: transform 在本类上，提升已经生效），绝不在这里写 transform：
+       窗口可能正处在收回 / 展开的弹性过渡中（0.56s，transform-origin 100% 100%），此刻写
+       translate3d 会把弹簧中途打断成一次硬跳。位移一律从第一帧 pointermove 才写，落点由
+       settleDrag 落定。 */
+    try { handle.setPointerCapture(event.pointerId); } catch (err) { /* 指针捕获不可用时静默降级 */ }
+    resetIdleTimer();
+    event.preventDefault();
+  });
+
+  /* 文档级兜底监听只注册一次：unmount / 重新 mount 绝不重复挂载。
+     指针捕获是主通道（捕获后事件照样冒泡到 document，因此这里每条分支都先判
+     drag.active 与 pointerId，绝不会双发）；捕获被浏览器拒绝时，这两条 document
+     监听仍然接得住，is-dragging 不会卡死。 */
+  if (dragBound) return;
+  dragBound = true;
+
+  document.addEventListener('pointermove', (event) => {
+    if (!drag.active || event.pointerId !== drag.pointerId) return;
+    schedulePlace(
+      drag.originLeft + (event.clientX - drag.startX),
+      drag.originTop + (event.clientY - drag.startY),
+    );
+    resetIdleTimer();
+  });
+
+  /* 先落定最终几何（left / top）并在同一帧摘掉 transform，再摘除手势类。只有 pointerup
+     的坐标可信，pointercancel 直接提交最后一帧待写几何。 */
+  const finishDrag = (event) => {
+    if (!drag.active) return;
+    if (event && event.pointerId != null && event.pointerId !== drag.pointerId) return;
+    const final = event && event.type === 'pointerup'
+      ? {
+        left: drag.originLeft + (event.clientX - drag.startX),
+        top: drag.originTop + (event.clientY - drag.startY),
+        width: null,
+        height: null,
+      }
+      : null;
+    drag.active = false;
+    settleDrag(final);
+    /* 摘类推到下一帧：settleDrag 把 transform 归零时 .is-dragging 还在（transition: none），
+       这一帧的样式计算落定后过渡才恢复。若在同一帧里连 transform 一起改并摘类，浏览器会
+       把刚清掉的 translate3d 当成过渡起点，窗口在落点处再补间滑一下——看起来像"回弹"。 */
+    if (frameEl) {
+      const node = frameEl;
+      window.requestAnimationFrame(() => {
+        if (!drag.active && node.isConnected) node.classList.remove('is-dragging');
+      });
+    }
+    resetIdleTimer();
+  };
+
+  document.addEventListener('pointerup', finishDrag);
+  document.addEventListener('pointercancel', finishDrag);
+}
+
+/* ------------------------------------------------------------------ *
+ * 10b. 边缘 / 四角缩放（8 向，Pointer Events + 指针捕获 + rAF 合并写入）
+ *
+ * 8 向手柄全部内嵌在窗口内部（向内 8px / 四角 16×16，z-index 60），容器保持
+ * overflow: hidden；命中之后立刻 setPointerCapture 锁定指针，指针甩出热区甚至
+ * 甩出窗口也照样跟随，所以内嵌方案不需要任何外溢补偿。几何始终被钳制在
+ * [最小尺寸, 视口内缩 VIEWPORT_MARGIN]，缩到下限只停止更新，绝不抖动、
+ * 绝不改变边框厚度与圆角。手势结束在 pointerup / pointercancel /
+ * lostpointercapture 三处统一释放，绝不残留捕获或 is-resizing。
+ * 手势态不触碰任何材质属性（background / backdrop-filter / box-shadow / display）。
+ * ------------------------------------------------------------------ */
+
+function finishResize(pointerId, final) {
+  if (!resize.active) return;
+  resize.active = false;
+  const node = resize.node;
+  resize.node = null;
+  /* 与拖拽同序：先撤销排队帧并同步落定最终几何，再摘除轻量表面 —— 恢复材质的那一帧
+     尺寸已经就位，不会出现“模糊回来了而窗口还差一帧”的断裂感。 */
+  settleGesture(final);
+  if (frameEl) frameEl.classList.remove('is-resizing');
+  document.documentElement.style.cursor = '';
+  if (node && pointerId != null) {
+    try { node.releasePointerCapture(pointerId); } catch (err) { /* 忽略 */ }
+  }
+  resetIdleTimer();
+}
+
+/* 缩放目标几何：pointermove 与 pointerup 共用同一套增量，终止帧不会停在倒数第二帧的
+   尺寸上。西 / 北向以对边为锚：尺寸被钳制时对边保持不动，窗口不会整体漂移。 */
+function resizeTarget(clientX, clientY) {
+  const dir = resize.dir;
+  const dx = clientX - resize.startX;
+  const dy = clientY - resize.startY;
+  const bounds = sizeBounds();
+  const width = dir.includes('e') ? resize.width + dx : (dir.includes('w') ? resize.width - dx : resize.width);
+  const height = dir.includes('s') ? resize.height + dy : (dir.includes('n') ? resize.height - dy : resize.height);
+  const nextWidth = Math.min(Math.max(width, bounds.minWidth), bounds.maxWidth);
+  const nextHeight = Math.min(Math.max(height, bounds.minHeight), bounds.maxHeight);
+  return {
+    left: dir.includes('w') ? resize.left + (resize.width - nextWidth) : resize.left,
+    top: dir.includes('n') ? resize.top + (resize.height - nextHeight) : resize.top,
+    width: nextWidth,
+    height: nextHeight,
+  };
+}
+
+function bindResize() {
+  if (!frameEl) return;
+
+  frameEl.addEventListener('pointerdown', (event) => {
+    const node = event.target.closest ? event.target.closest('[data-resize]') : null;
+    if (!node) return;
+    /* 最大化时窗口由视口接管，缩放整体禁用；收回态手柄已退场，这里再兜一层 */
+    if (state.maximized || state.collapsed) return;
+    if (event.button != null && event.button !== 0) return;
+    resize.active = true;
+    resize.node = node;
+    resize.dir = node.getAttribute('data-resize') || '';
+    resize.pointerId = event.pointerId;
+    resize.startX = event.clientX;
+    resize.startY = event.clientY;
+    const origin = layoutOffset(frameEl);
+    resize.left = origin.left;
+    resize.top = origin.top;
+    resize.width = frameEl.offsetWidth;
+    resize.height = frameEl.offsetHeight;
+    state.sized = true;
+    frameEl.classList.add('is-resizing');
+    /* 几何每帧才追上一次指针，指针会短时落在手柄热区之外；把缩放光标钉在整页上，
+       避免光标在缩放方向与箭头之间闪动（视觉上像边缘在抖）。 */
+    document.documentElement.style.cursor = RESIZE_CURSORS[resize.dir] || 'nwse-resize';
+    try { node.setPointerCapture(event.pointerId); } catch (err) { /* 指针捕获不可用时静默降级 */ }
+    resetIdleTimer();
+    event.preventDefault();
+  });
+
+  /* 文档级监听只注册一次：unmount / 重新 mount 绝不重复挂载 */
+  if (resizeBound) return;
+  resizeBound = true;
+
+  document.addEventListener('pointermove', (event) => {
+    if (!resize.active || event.pointerId !== resize.pointerId) return;
+    const next = resizeTarget(event.clientX, event.clientY);
+    scheduleGeometry(next.left, next.top, next.width, next.height);
+    resetIdleTimer();
+  });
+
+  document.addEventListener('pointerup', (event) => {
+    if (!resize.active || event.pointerId !== resize.pointerId) return;
+    finishResize(resize.pointerId, resizeTarget(event.clientX, event.clientY));
+  });
+  document.addEventListener('pointercancel', (event) => {
+    if (!resize.active || event.pointerId !== resize.pointerId) return;
+    finishResize(resize.pointerId, null);
+  });
+  document.addEventListener('lostpointercapture', () => finishResize(null, null));
+
+  window.addEventListener('resize', () => {
+    if (state.maximized || !frameEl) return;
+    /* 拖拽进行中：位置归合成层（inline transform）所有，这里写 left / top 会与位移叠加 */
+    if (drag.active) return;
+    /* 未定尺寸（宽度仍由 CSS 决定）时只钳位置；已定尺寸才夹紧视口 */
+    const at = layoutOffset(frameEl);
+    if (!state.sized) { placeFrame(at.left, at.top); syncResponsiveTier(); return; }
+    applyGeometry(at.left, at.top, frameEl.offsetWidth, frameEl.offsetHeight);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * 10c. 悬浮胶囊拖动（Pointer Events + 指针捕获 + rAF 合并写入）
+ *
+ * 胶囊默认由 CSS 锚定 right / bottom；第一次越过 5px 阈值时把当前位置换算成
+ * left / top（right / bottom 置 auto），此后位置完全由行内 left / top 驱动，只在
+ * 当前会话保留，不落任何本地存储。拖动只切换 .is-dragging（无过渡、无 transform
+ * 形变），四边均按 viewport 内缩 VIEWPORT_MARGIN（14px）夹紧并把胶囊自身宽高计入。
+ * 越过阈值后的那一次 click 在 window 捕获阶段被吞掉：不展开面板、不冒泡到宿主
+ * 委托；普通点击与键盘 Enter / Space 照常展开。胶囊只在收回态可见，拖动期间绝不
+ * 自动收回。pointercancel / lostpointercapture 与原生气势结束时统一清理状态。
+ * ------------------------------------------------------------------ */
+
+function pillPlace(left, top) {
+  if (!pillEl) return;
+  /* 宽高取拖动开始时的布局盒缓存：resize 与每帧写入都不再触发强制重排 */
+  if (!pillDrag.width) pillDrag.width = pillEl.offsetWidth;
+  if (!pillDrag.height) pillDrag.height = pillEl.offsetHeight;
+  /* 四边夹紧：四周内缩 VIEWPORT_MARGIN，胶囊自身宽高计入；视口更小则贴住左上边，绝不越界 */
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - pillDrag.width - VIEWPORT_MARGIN);
+  const maxTop = Math.max(VIEWPORT_MARGIN, window.innerHeight - pillDrag.height - VIEWPORT_MARGIN);
+  const nextLeft = Math.round(Math.min(Math.max(VIEWPORT_MARGIN, left), maxLeft));
+  const nextTop = Math.round(Math.min(Math.max(VIEWPORT_MARGIN, top), maxTop));
+  pillEl.style.left = `${nextLeft}px`;
+  pillEl.style.top = `${nextTop}px`;
+  pillEl.style.right = 'auto';
+  pillEl.style.bottom = 'auto';
+  pillDrag.left = nextLeft;
+  pillDrag.top = nextTop;
+  pillDrag.custom = true;
+}
+
+function pillFlush() {
+  pillDrag.rafId = 0;
+  const next = pillDrag.pending;
+  pillDrag.pending = null;
+  if (next) pillPlace(next.left, next.top);
+}
+
+function pillSchedulePlace(left, top) {
+  pillDrag.pending = { left, top };
+  if (pillDrag.rafId) return;
+  pillDrag.rafId = window.requestAnimationFrame(pillFlush);
+}
+
+function endPillDrag(keepSuppress) {
+  if (!pillDrag.active) return;
+  pillDrag.active = false;
+  const pending = pillDrag.pending;
+  pillDrag.pending = null;
+  if (pillDrag.rafId) {
+    window.cancelAnimationFrame(pillDrag.rafId);
+    pillDrag.rafId = 0;
+  }
+  /* 先落下最后一帧再释放捕获：pointerup 与最后一次 pointermove 之间的位移绝不丢失 */
+  if (pillDrag.moved && pending) pillPlace(pending.left, pending.top);
+  if (pillEl) pillEl.classList.remove('is-dragging');
+  const pointerId = pillDrag.pointerId;
+  pillDrag.pointerId = null;
+  if (pillEl && pointerId != null) {
+    try { pillEl.releasePointerCapture(pointerId); } catch (err) { /* 忽略 */ }
+  }
+  if (!keepSuppress) pillDrag.suppressClick = false;
+  resetIdleTimer();
+}
+
+function bindPill() {
+  /* 重挂载：上一次手势的残留一律作废，文档 / window 级监听只注册一次 */
+  pillDrag.active = false;
+  pillDrag.pointerId = null;
+  pillDrag.moved = false;
+  pillDrag.pending = null;
+  pillDrag.suppressClick = false;
+  if (pillDrag.rafId) {
+    window.cancelAnimationFrame(pillDrag.rafId);
+    pillDrag.rafId = 0;
+  }
+  if (!pillEl) return;
+
+  pillEl.addEventListener('pointerdown', (event) => {
+    /* 新手势开始：上一次拖动遗留的抑制标记一律作废，下一次点击绝不失灵 */
+    pillDrag.suppressClick = false;
+    if (event.button != null && event.button !== 0) return;
+    if (event.isPrimary === false) return;
+    pillDrag.active = true;
+    pillDrag.pointerId = event.pointerId;
+    pillDrag.startX = event.clientX;
+    pillDrag.startY = event.clientY;
+    pillDrag.moved = false;
+    try { pillEl.setPointerCapture(event.pointerId); } catch (err) { /* 指针捕获不可用时静默降级 */ }
+    /* 只拦冒泡（窗口拖拽 / 路由不得接管胶囊手势），不 preventDefault：保留按钮原生焦点与键盘激活 */
+    event.stopPropagation();
+  });
+
+  pillEl.addEventListener('pointermove', (event) => {
+    if (!pillDrag.active || event.pointerId !== pillDrag.pointerId) return;
+    const dx = event.clientX - pillDrag.startX;
+    const dy = event.clientY - pillDrag.startY;
+    if (!pillDrag.moved) {
+      /* 阈值内一律仍按点击处理：1–4px 的抖动不把点击变成拖动 */
+      if (dx * dx + dy * dy < PILL_DRAG_THRESHOLD * PILL_DRAG_THRESHOLD) return;
+      pillDrag.moved = true;
+      /* 这一次手势之后的 click 必须被吞掉，绝不展开面板 */
+      pillDrag.suppressClick = true;
+      pillEl.classList.add('is-dragging');
+      /* .is-dragging 已把入场动画残留的 transform 收掉，此刻读到的是真实布局盒：
+         起点不从 pointerdown 的视觉矩形取，胶囊在缩放动画中被抓住也不会跳一格 */
+      const box = pillEl.getBoundingClientRect();
+      pillDrag.originLeft = box.left;
+      pillDrag.originTop = box.top;
+      pillDrag.left = Math.round(box.left);
+      pillDrag.top = Math.round(box.top);
+      pillDrag.width = box.width;
+      pillDrag.height = box.height;
+    }
+    event.stopPropagation();
+    pillSchedulePlace(pillDrag.originLeft + dx, pillDrag.originTop + dy);
+    resetIdleTimer();
+  });
+
+  pillEl.addEventListener('pointerup', () => endPillDrag(true));
+  pillEl.addEventListener('pointercancel', () => endPillDrag(false));
+  pillEl.addEventListener('lostpointercapture', () => endPillDrag(false));
+
+  if (pillBound) return;
+  pillBound = true;
+
+  /* 捕获失效（元素被移出文档 / 浏览器异常）时的兜底：手势必须在文档级收尾 */
+  document.addEventListener('pointerup', () => { if (pillDrag.active) endPillDrag(true); });
+  document.addEventListener('pointercancel', () => { if (pillDrag.active) endPillDrag(false); });
+
+  /* 拖动后的那一次 click：window 捕获阶段吞掉，既不展开也不冒泡到宿主委托 */
+  window.addEventListener('click', (event) => {
+    if (!pillDrag.suppressClick) return;
+    const target = event.target;
+    const onPill = !!pillEl && (target === pillEl || pillEl.contains(target));
+    /* 键盘 Enter / Space 触发的 click（detail 为 0）永不抑制；标记只对紧接拖动的指针 click 生效 */
+    if (!onPill || event.detail === 0) { pillDrag.suppressClick = false; return; }
+    pillDrag.suppressClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+
+  /* 浏览器尺寸变化：自定义位置重新夹紧（默认 right / bottom 锚定由 CSS 自行负责） */
+  window.addEventListener('resize', () => {
+    if (!pillDrag.custom || pillDrag.active) return;
+    pillPlace(pillDrag.left, pillDrag.top);
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * 11. 自动收回（静置 5 秒弹性收回为呼吸胶囊）
+ * ------------------------------------------------------------------ */
+
+function clearIdleTimer() {
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+}
+
+function resetIdleTimer() {
+  clearIdleTimer();
+  /* 拖拽 / 缩放 / 胶囊拖动进行中绝不启动收回计时：手势未结束就收回会打断用户操作 */
+  if (drag.active || resize.active || pillDrag.active) return;
+  if (!state.settings.autoDock || state.collapsed || !state.visible) return;
+  state.idleTimer = setTimeout(collapsePanel, IDLE_COLLAPSE_MS);
+}
+
+/* 唯一收回出口：右上角 × 与最小化、静置自动收纳都走这里。
+   窗口播放缩放过渡后退场，右下的悬浮球随后接替为唯一入口。 */
+function collapsePanel() {
+  if (!frameEl || state.collapsed) return;
+  clearIdleTimer();
+  closeChannelMenu(false);
+  state.collapsed = true;
+  frameEl.classList.remove('is-docked');
+  frameEl.classList.add('is-collapsed');
+  setTimeout(() => {
+    if (state.collapsed && pillEl) pillEl.classList.add('is-visible');
+  }, 180);
+  // 折叠过渡结束后再彻底隐藏（摘除 blur 层）；JS 驱动，不依赖 CSS 过渡时序
+  setTimeout(() => {
+    if (state.collapsed && frameEl) frameEl.classList.add('is-docked');
+  }, 470);
+}
+
+function expandPanel() {
+  if (!frameEl) return;
+  clearIdleTimer();
+  state.collapsed = false;
+  if (pillEl) pillEl.classList.remove('is-visible');
+  // 先摘除 docked 让面板立即可见，再撤销折叠态播放展开过渡
+  frameEl.classList.remove('is-docked');
+  frameEl.classList.remove('is-collapsed');
+  /* visibility:hidden 期间宽度读不到，重新可见的这一帧补一次档位判定 */
+  syncResponsiveTier();
+  setTimeout(resetIdleTimer, 80);
+  loadStatus().then(() => { refreshPhase(); if (state.stage === 'metrics') updateMetrics(); });
+}
+
+function toggleAutoDock() {
+  const next = !state.settings.autoDock;
+  applySettings({ autoDock: next });
+  if (next) {
+    resetIdleTimer();
+    toast('自动收纳：已启用');
+  } else {
+    clearIdleTimer();
+    toast('自动收纳：已停用');
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 11b. 窗口状态：最大化 / 还原、最小化、关闭
+ * ------------------------------------------------------------------ */
+
+function syncMaxButton() {
+  if (!frameEl) return;
+  const button = frameEl.querySelector('.ptx-topbar [data-act="maximize"]');
+  if (!button) return;
+  const label = state.maximized ? '还原' : '最大化';
+  button.setAttribute('aria-label', label);
+  button.setAttribute('data-tip', label);
+  button.setAttribute('aria-pressed', state.maximized ? 'true' : 'false');
+}
+
+/* 最大化：几何整体交给 is-maximized，进入前把行内样式整串存下，还原时原样写回。 */
+function maximizePanel() {
+  if (!frameEl || state.maximized || state.collapsed) return;
+  state.restoreStyle = frameEl.getAttribute('style') || '';
+  state.maximized = true;
+  frameEl.removeAttribute('style');
+  frameEl.classList.add('is-maximized');
+  /* 最大化后宽度由视口接管（inset 12px），档位随新宽度重新判定 */
+  syncResponsiveTier();
+  syncMaxButton();
+  clearIdleTimer();
+}
+
+function restorePanel() {
+  if (!frameEl || !state.maximized) return;
+  state.maximized = false;
+  frameEl.classList.remove('is-maximized');
+  if (state.restoreStyle) frameEl.setAttribute('style', state.restoreStyle);
+  else frameEl.removeAttribute('style');
+  state.restoreStyle = '';
+  syncMaxButton();
+  /* 自定义尺寸原样回写；若期间视口变小，只做视口内缩钳制（尺寸仍尽可能保留） */
+  if (state.sized) {
+    const at = layoutOffset(frameEl);
+    applyGeometry(at.left, at.top, frameEl.offsetWidth, frameEl.offsetHeight);
+  } else syncResponsiveTier();
+  resetIdleTimer();
+}
+
+function toggleMaximize() {
+  if (state.maximized) restorePanel();
+  else maximizePanel();
+}
+
+/* ------------------------------------------------------------------ *
+ * 11c. 设置页（侧栏底部齿轮，与两个核心页签平级）
+ * ------------------------------------------------------------------ */
+
+/* 设置页控件回写：落库后显示值与生效值永远一致（切换页签回来也会重新渲染） */
+function decorateSettings() {
+  if (!viewportEl || state.stage !== 'settings') return;
+  const shell = viewportEl.querySelector('.ptx-settings-shell');
+  if (!shell) return;
+  const outline = shell.querySelector('.ptx-settings-outline');
+  const main = shell.querySelector('.ptx-settings-main');
+  if (!outline || !main) return;
+  const sections = Array.from(main.children).filter((node) => node.classList && node.classList.contains('ptx-sec'));
+  outline.innerHTML = '<div class="ptx-outline-h">大纲</div>';
+  sections.forEach((sec, index) => {
+    const head = sec.querySelector('.ptx-sec-h');
+    if (!head) return;
+    const id = `set-sec-${index}`;
+    sec.setAttribute('data-sec', id);
+    const collapsed = state.settings.collapsedSections[id] === true;
+    sec.classList.toggle('is-collapsed', collapsed);
+    head.setAttribute('data-action', 'toggle-section');
+    head.setAttribute('data-target', id);
+    head.setAttribute('role', 'button');
+    head.setAttribute('tabindex', '0');
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'ptx-outline-item';
+    item.setAttribute('data-action', 'jump-section');
+    item.setAttribute('data-target', id);
+    item.textContent = (head.textContent || '').trim();
+    outline.appendChild(item);
+  });
+}
+
+function syncSettingsUI() {
+  if (!viewportEl) return;
+  const toggle = viewportEl.querySelector('[data-act="autodock"]');
+  if (toggle) {
+    toggle.classList.toggle('is-on', state.settings.autoDock);
+    toggle.setAttribute('aria-checked', state.settings.autoDock ? 'true' : 'false');
+  }
+  const count = viewportEl.querySelector('[data-role="ticker-count"]');
+  if (count) count.value = String(state.settings.tickerCount);
+  const interval = viewportEl.querySelector('[data-role="ticker-interval"]');
+  if (interval) interval.value = String(state.settings.tickerInterval);
+}
+
+/* 设置落库 + 即时生效：轮播条数 / 间隔改动立刻重排并换挡，无需刷新页面 */
+function applySettings(patch) {
+  const settings = state.settings;
+  if (patch.autoDock !== undefined) settings.autoDock = !!patch.autoDock;
+  if (patch.tickerCount !== undefined) settings.tickerCount = clampInt(patch.tickerCount, TICKER_COUNT_MIN, TICKER_COUNT_MAX, settings.tickerCount);
+  if (patch.tickerInterval !== undefined) settings.tickerInterval = clampInt(patch.tickerInterval, TICKER_INTERVAL_MIN, TICKER_INTERVAL_MAX, settings.tickerInterval);
+  saveSettings();
+  if (patch.tickerCount !== undefined || patch.tickerInterval !== undefined) {
+    refreshTicker();
+    startTicker();
+  }
+  syncSettingsUI();
+}
+
+/* ------------------------------------------------------------------ *
+ * 12. 交互
+ * ------------------------------------------------------------------ */
+
+function selectEntry(id) {
+  if (!id) return Promise.resolve();
+  state.activeId = id;
+  state.stage = 'panorama';
+  state.editingEntryId = null;
+  state.deleteArmed = false;
+  state.clearArmed = false;
+  state.folds = {};
+  return loadDetail(id).then(() => renderStage());
+}
+
+/* ---------------- 词条修正 / 删除 / 知识库清空 ----------------
+ * 所有写操作都只走 REST（PUT / DELETE / POST /api/clear），成功后先回读列表再重绘，
+ * 因此列表、底栏轮播与详情三处显示值永远来自同一份服务端真值。 */
+function editorValue(role) {
+  const field = viewportEl ? viewportEl.querySelector(`[data-role="${role}"]`) : null;
+  return field ? String(field.value == null ? '' : field.value) : '';
+}
+
+function splitTags(raw) {
+  const out = [];
+  for (const part of String(raw == null ? '' : raw).split(/[,，]/)) {
+    const tag = part.trim();
+    if (tag && !out.includes(tag)) out.push(tag);
+  }
+  return out;
+}
+
+function startEdit() {
+  if (!state.detail) return;
+  state.deleteArmed = false;
+  state.editingEntryId = state.detail.id;
+  renderStage();
+}
+
+function saveEntry() {
+  const id = state.editingEntryId;
+  if (!id) return Promise.resolve();
+  const title = editorValue('entry-title').trim();
+  if (!title) { toast('标题不能为空'); return Promise.resolve(); }
+  const markdown = editorValue('entry-markdown');
+  if (!markdown.trim()) { toast('正文不能为空'); return Promise.resolve(); }
+  let status = editorValue('entry-status').trim();
+  if (!EDITOR_STATUSES.includes(status)) status = 'open';
+  const button = viewportEl ? viewportEl.querySelector('[data-action="save-entry"]') : null;
+  if (button) button.classList.add('is-busy');
+  return requestJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title,
+      status,
+      tags: splitTags(editorValue('entry-tags')),
+      summary: editorValue('entry-summary').trim(),
+      markdown,
+    }),
+  })
+    .then((data) => {
+      if (data && typeof data === 'object') state.detail = data;
+      state.editingEntryId = null;
+      state.deleteArmed = false;
+      return Promise.all([loadEntries(), loadLatest()]);
+    })
+    .then(() => {
+      refreshTicker();
+      renderStage();
+      toast('词条已更新');
+    })
+    .catch((err) => {
+      if (button) button.classList.remove('is-busy');
+      toast(`词条更新失败：${err && err.message ? err.message : '未知错误'}`);
+    });
+}
+
+function removeEntry() {
+  const id = state.activeId;
+  if (!id) return Promise.resolve();
+  const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-delete-entry"]') : null;
+  if (button) button.classList.add('is-busy');
+  return requestJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    .then(() => {
+      state.activeId = null;
+      state.detail = null;
+      state.detailError = '';
+      state.editingEntryId = null;
+      state.deleteArmed = false;
+      state.stage = 'entries';
+      return Promise.all([loadEntries(), loadLatest()]);
+    })
+    .then(() => {
+      /* 删除后回到索引并保持空选中：不让首条词条被自动顶替成新的当前条目 */
+      state.activeId = null;
+      state.detail = null;
+      refreshTicker();
+      renderStage();
+      toast('词条已删除');
+    })
+    .catch((err) => {
+      if (button) button.classList.remove('is-busy');
+      toast(`删除失败：${err && err.message ? err.message : '未知错误'}`);
+    });
+}
+
+function clearKnowledgeBase() {
+  const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-clear-kb"]') : null;
+  if (button) button.classList.add('is-busy');
+  return requestJson(`${API_BASE}/api/clear`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+    .then(() => {
+      state.entries = [];
+      state.entriesLoaded = true;
+      state.entriesError = '';
+      state.latestEntries = [];
+      state.latestLoaded = true;
+      state.latestError = false;
+      state.tickerIndex = 0;
+      state.activeId = null;
+      state.detail = null;
+      state.detailError = '';
+      state.editingEntryId = null;
+      state.deleteArmed = false;
+      state.clearArmed = false;
+      return Promise.all([loadEntries(), loadLatest()]);
+    })
+    .then(() => {
+      refreshTicker();
+      renderStage();
+      toast('知识库已清空，保留默认骨架');
+    })
+    .catch((err) => {
+      if (button) button.classList.remove('is-busy');
+      toast(`清空失败：${err && err.message ? err.message : '未知错误'}`);
+    });
+}
+
+/* 就地切换阶段：轮询随阶段换挡；设置页就位后立刻拉取服务端提示词真值 */
+function enterStage(next) {
+  state.stage = next;
+  /* 进入列表页签时记住来源：正文返回键与页签高亮都靠它指路 */
+  if (next === 'entries' || next === 'topics') state.listStage = next;
+  if (next !== 'panorama') { state.editingEntryId = null; state.deleteArmed = false; }
+  if (next !== 'settings') state.clearArmed = false;
+  scheduleStatusPoll();
+  resetIdleTimer();
+  renderStage();
+  if (next === 'settings') { loadPrompt(); loadTopicSettings(); loadCardSettings(); }
+}
+
+function handleAction(action, node) {
+  if (action === 'edit-entry') startEdit();
+  else if (action === 'delete-entry') { state.deleteArmed = true; renderStage(); }
+  else if (action === 'cancel-delete-entry') { state.deleteArmed = false; renderStage(); }
+  else if (action === 'confirm-delete-entry') removeEntry().then(() => resetIdleTimer());
+  else if (action === 'save-entry') saveEntry().then(() => resetIdleTimer());
+  else if (action === 'cancel-edit-entry') { state.editingEntryId = null; renderStage(); }
+  else if (action === 'clear-kb') { state.clearArmed = true; renderStage(); }
+  else if (action === 'cancel-clear-kb') { state.clearArmed = false; renderStage(); }
+  else if (action === 'confirm-clear-kb') clearKnowledgeBase().then(() => resetIdleTimer());
+  else if (action === 'save-prompt') savePrompt().then(() => resetIdleTimer());
+  else if (action === 'reset-prompt') resetPrompt().then(() => resetIdleTimer());
+  else if (action === 'save-topic-prompt') saveTopicPrompt().then(() => resetIdleTimer());
+  else if (action === 'reset-topic-prompt') resetTopicPrompt().then(() => resetIdleTimer());
+  else if (action === 'save-topic-settings') saveTopicSettings().then(() => resetIdleTimer());
+  else if (action === 'toggle-card-mask') toggleCardMask(node).then(() => resetIdleTimer());
+  else if (action === 'toggle-section') {
+    const target = node && node.getAttribute('data-target');
+    if (target) {
+      state.settings.collapsedSections[target] = state.settings.collapsedSections[target] !== true;
+      saveSettings();
+      decorateSettings();
+    }
+  }
+  else if (action === 'jump-section') {
+    const target = node && node.getAttribute('data-target');
+    const section = target && viewportEl ? viewportEl.querySelector(`[data-sec="${target}"]`) : null;
+    if (section) section.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+  else if (action === 'toggle-topic-enabled') {
+    const topic = state.topicSettings.data;
+    if (topic && topic.settings) topic.settings.enabled = topic.settings.enabled === false;
+    renderStage();
+  }
+}
+
+function snapshotTuneDraft() {
+  if (!viewportEl) return;
+  const fields = viewportEl.querySelectorAll('[data-role^="tune-"]');
+  for (const node of fields) {
+    const role = node.getAttribute('data-role');
+    if (role) tuneDraft[role] = node.value;
+  }
+}
+
+function tune(options) {
+  if (!viewportEl) return Promise.resolve();
+  /* 快照没到手就没有权威初值：此时输入框里只是渲染兜底值，直接提交会用兜底值
+     覆盖服务端真实门限，因此宁可拒绝也不猜。 */
+  if (!state.status) {
+    toast('尚未取得服务端门限，暂不能校准');
+    return Promise.resolve();
+  }
+  /* 引擎参数统一按 data-role → 服务端键收集；页面上没有的字段（模式切换后隐藏的分组）
+     一律跳过，服务端保留原值。只发当前渲染出的字段，切换模式不会把旧组覆盖回去。 */
+  const TUNE_FIELDS = {
+    'tune-burst': 'burstMultiplier',
+    'tune-quiet': 'quiescenceSeconds',
+    'tune-min-messages': 'minDiscussionMessages',
+    'tune-min-rate': 'minBurstRate',
+    'tune-theta': 'thetaMin',
+    'tune-rho': 'rhoMin',
+    'tune-density-mult': 'densityMultiplier',
+    'tune-peak-cool': 'peakCoolFraction',
+    'tune-dispatch-margin': 'dispatchMargin',
+  };
+  const tuned = {};
+  let invalid = false;
+  for (const role of Object.keys(TUNE_FIELDS)) {
+    const input = viewportEl.querySelector(`[data-role="${role}"]`);
+    if (!input && tuneDraft[role] === undefined) continue;
+    /* 草稿优先：模式切换重渲染后 DOM 里的是初值，另一模式下敲过的数以草稿为准。 */
+    const raw = tuneDraft[role] !== undefined ? tuneDraft[role] : input.value;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) { invalid = true; break; }
+    tuned[TUNE_FIELDS[role]] = value;
+  }
+  if (invalid || Object.keys(tuned).length === 0) {
+    toast('参数格式无效');
+    return Promise.resolve();
+  }
+  /* 引擎切换：草稿模式随参数一起下发；没动过就不发（保持服务端现状）。 */
+  const tuneOptions = (state.status && state.status.options) || {};
+  const modeNow = tuneOptions.triggerMode === 'potential' || tuneOptions.triggerMode === 'shadow' ? tuneOptions.triggerMode : 'rate';
+  if (engineDraft && engineDraft !== modeNow) tuned.triggerMode = engineDraft;
+  /* 双判据同步调参开关只在 shadow 分组渲染，存在即收集。 */
+  if (autotuneDraft !== null) {
+    tuned.potentialAutoTuning = autotuneDraft;
+  } else {
+    const autoTune = viewportEl.querySelector('[data-act="toggle-engine-autotune"]');
+    if (autoTune) tuned.potentialAutoTuning = autoTune.classList.contains('is-on');
+  }
+  if (options && options.button) options.button.classList.add('is-busy');
+  return requestJson(`${API_BASE}/api/tune`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channelId: channelScopeId(), options: tuned }),
+  })
+    .then(() => {
+      engineDraft = null;
+      tuneDraft = {};
+      autotuneDraft = null;
+      return loadStatus();
+    })
+    .then(() => {
+      refreshPhase();
+      renderStage();
+      toast('触发器参数已校准');
+    })
+    .catch((err) => {
+      toast(`参数校准失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then(() => {
+      if (options && options.button) options.button.classList.remove('is-busy');
+    });
+}
+
+/* 唯一刷新入口：底栏核心按钮（data-act="refresh" 仅此一处）。
+   按钮常驻不随视图重绘，故 is-busy 必须自己收尾，否则刷新一次就永久转圈。 */
+function refreshAll() {
+  const button = frameEl ? frameEl.querySelector('[data-act="refresh"]') : null;
+  if (button) button.classList.add('is-busy');
+  return Promise.all([loadEntries(), loadStatus(), loadLatest()]).then(() => {
+    refreshTicker();
+    refreshPhase();
+    renderStage();
+    toast('词条索引与监控数据已刷新');
+    if (button) button.classList.remove('is-busy');
+  });
+}
+
+function bindActions() {
+  if (!rootEl) return;
+
+  rootEl.addEventListener('click', (event) => {
+    const node = event.target.closest ? event.target.closest('[data-act], [data-stage], [data-action]') : null;
+    if (!node) return;
+    const action = node.getAttribute('data-action');
+    if (action) {
+      handleAction(action, node);
+      return;
+    }
+    const act = node.getAttribute('data-act');
+    const stage = node.getAttribute('data-stage');
+
+    if (act === 'stage') {
+      /* 页签按键与状态胶囊共用同一入口；设置页会在就位后拉取服务端提示词真值 */
+      enterStage(stage && node.classList.contains('ptx-tab') ? stage : stage || 'entries');
+      return;
+    }
+
+    if (act === 'select') {
+      selectEntry(node.getAttribute('data-id')).then(() => resetIdleTimer());
+      return;
+    }
+
+    if (act === 'refresh') {
+      refreshAll().then(() => resetIdleTimer());
+      return;
+    }
+
+    if (act === 'channel-toggle') {
+      if (channelMenu && !channelMenu.hidden) closeChannelMenu(false);
+      else openChannelMenu();
+      resetIdleTimer();
+      return;
+    }
+
+    if (act === 'channel-pick') {
+      pickChannel(node.getAttribute('data-value'));
+      return;
+    }
+
+    if (act === 'autodock') {
+      toggleAutoDock();
+      return;
+    }
+
+    if (act === 'view-mode') {
+      setViewMode(node.getAttribute('data-mode'));
+      renderStage();
+      resetIdleTimer();
+      return;
+    }
+
+    if (act === 'theme') {
+      toggleTheme();
+      resetIdleTimer();
+      return;
+    }
+
+    if (act === 'maximize') {
+      toggleMaximize();
+      return;
+    }
+
+    if (act === 'minimize' || act === 'close') {
+      /* × 与最小化同义：都只把窗口收回成悬浮球，绝不销毁阅读状态 */
+      collapsePanel();
+      return;
+    }
+
+    if (act === 'expand') {
+      expandPanel();
+      return;
+    }
+
+    if (act === 'tune') {
+      tune({ button: node }).then(() => resetIdleTimer());
+      return;
+    }
+
+    if (act === 'engine-mode') {
+      engineDraft = node.getAttribute('data-mode');
+      snapshotTuneDraft();
+      renderStage();
+      return;
+    }
+
+    if (act === 'toggle-engine-autotune') {
+      const nextOn = !node.classList.contains('is-on');
+      autotuneDraft = nextOn;
+      node.classList.toggle('is-on', nextOn);
+      node.setAttribute('aria-checked', nextOn ? 'true' : 'false');
+      return;
+    }
+  });
+
+  /* 设置页里的数值输入：change 即落库并立刻作用于底栏轮播 */
+  rootEl.addEventListener('change', (event) => {
+    const field = event.target.closest ? event.target.closest('[data-role]') : null;
+    if (!field) return;
+    const role = field.getAttribute('data-role');
+    if (role === 'ticker-count') applySettings({ tickerCount: field.value });
+    else if (role === 'ticker-interval') applySettings({ tickerInterval: field.value });
+  });
+
+  /* <details> 的 toggle 不冒泡，捕获阶段监听即可把开合态记回 state.folds，
+   * 下次整页重绘时用 data-fold 键恢复，不被刷新弹回默认态。 */
+  rootEl.addEventListener('toggle', (event) => {
+    const node = event.target;
+    if (node && node.getAttribute && node.getAttribute('data-fold')) {
+      state.folds[node.getAttribute('data-fold')] = !!node.open;
+    }
+  }, true);
+
+  /* 修正页的摘要 / 正文随输入增高（到上限后由 CSS 接管内部滚动） */
+  rootEl.addEventListener('input', (event) => {
+    const node = event.target;
+    if (!node || node.tagName !== 'TEXTAREA') return;
+    const role = node.getAttribute('data-role');
+    if (role === 'entry-summary' || role === 'entry-markdown') growField(node);
+  });
+
+  channelChip = rootEl.querySelector('.ptx-channel');
+  channelToggle = channelChip ? channelChip.querySelector('.ptx-selectbtn') : null;
+  channelMenu = channelChip ? channelChip.querySelector('.ptx-menu') : null;
+  searchInput = rootEl.querySelector('[data-role="search"]');
+
+  if (searchInput) {
+    let searchDebounce = null;
+    searchInput.addEventListener('input', () => {
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => {
+        state.keyword = searchInput.value.trim();
+        loadEntries().then(() => renderStage());
+      }, 180);
+      resetIdleTimer();
+    });
+  }
+
+  rootEl.addEventListener('pointermove', (event) => {
+    if (drag.active) return;
+    if (event.target.closest && event.target.closest('.ptx-window')) resetIdleTimer();
+  });
+
+  rootEl.addEventListener('wheel', () => resetIdleTimer(), { passive: true });
+  bindMenuGlobals();
+
+  if (frameEl) {
+    frameEl.addEventListener('mouseenter', clearIdleTimer);
+    frameEl.addEventListener('mouseleave', () => {
+      if (!drag.active) resetIdleTimer();
+    });
+  }
+
+  /* 胶囊仅响应显式点击展开（data-act="expand" 委派），hover 不擅自弹出，把控制权交还用户。 */
+}
+
+/* ------------------------------------------------------------------ *
+ * 13. 挂载 / 路由感应 / 生命周期
+ * ------------------------------------------------------------------ */
+
+function ensureStyles() {
+  if (document.getElementById(STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = STYLE_ID;
+  style.textContent = ORGANIC_STYLES;
+  document.head.appendChild(style);
+}
+
+// BEGIN GENERATED AUTH GATE
+(() => {
+  const base = "/patchouli";
+  const SESSION_KEY = "patchouli.session";
+  const EXPIRY_KEY = "patchouli.expires";
+  const OVERLAY_ID = 'ptx-auth-gate';
+  const read = (key) => { try { return window.localStorage.getItem(key); } catch { return null; } };
+  const write = (key, value) => { try { window.localStorage.setItem(key, value); } catch {} };
+  const clear = () => { try { window.localStorage.removeItem(SESSION_KEY); window.localStorage.removeItem(EXPIRY_KEY); } catch {} };
+
+  const session = () => {
+    const sid = read(SESSION_KEY);
+    const exp = Number(read(EXPIRY_KEY) || '0');
+    if (!sid) return null;
+    if (!Number.isFinite(exp) || exp <= Date.now() + 30000) return null;
+    return sid;
+  };
+  const saveSession = (payload) => {
+    write(SESSION_KEY, payload.session);
+    write(EXPIRY_KEY, String(payload.expiresAt || 0));
+  };
+
+  const rawFetch = window.fetch.bind(window);
+  let overlayOpen = false;
+
+  const shell = (inner) => {
+    const root = document.createElement('div');
+    root.id = OVERLAY_ID;
+    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
+    const card = document.createElement('form');
+    card.setAttribute('style', 'width:min(440px,88vw);padding:26px 24px;border-radius:16px;background:rgba(19,25,40,.97);border:1px solid rgba(255,255,255,.13);box-shadow:0 24px 70px rgba(0,0,0,.55)');
+    card.innerHTML = inner;
+    root.appendChild(card);
+    return { root, card };
+  };
+
+  const mountOverlay = (root) => {
+    if (overlayOpen) return false;
+    overlayOpen = true;
+    document.body.appendChild(root);
+    return true;
+  };
+
+  const finish = () => {
+    overlayOpen = false;
+    const node = document.getElementById(OVERLAY_ID);
+    if (node) node.remove();
+  };
+
+  /* 普通登录：粘贴已保存的密钥。 */
+  const showLogin = (message) => {
+    const { root, card } = shell(
+      '<div style="font-size:15px;font-weight:600;letter-spacing:.02em">需要访问密钥</div>' +
+      '<div style="margin-top:8px;font-size:12px;line-height:1.85;color:rgba(232,237,247,.62)">管理面已启用鉴权。填入首次初始化时保存的密钥；' +
+      '服务器上的副本在 <code>&lt;知识库&gt;/.patchouli/api-token.txt</code>。</div>' +
+      '<input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="管理密钥" ' +
+      'style="margin-top:14px;width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#e8edf7;font:13px/1.4 ui-monospace,monospace;outline:none">' +
+      '<div data-err style="margin-top:8px;font-size:12px;color:#f08a7a;min-height:16px">' + (message || '') + '</div>' +
+      '<button type="submit" style="margin-top:6px;width:100%;padding:10px;border-radius:10px;border:0;background:#3f9d78;color:#06120d;font-size:13px;font-weight:600;cursor:pointer">进入</button>'
+    );
+    if (!mountOverlay(root)) return;
+    const input = card.querySelector('input');
+    const err = card.querySelector('[data-err]');
+    if (input) input.focus();
+    card.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const value = (input && input.value || '').trim();
+      if (value === '') return;
+      const response = await rawFetch(base + '/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ token: value }),
+      }).catch(() => null);
+      if (response === null || !response.ok) {
+        if (err) err.textContent = '密钥无效（服务器返回 ' + (response ? response.status : '网络错误') + '）';
+        return;
+      }
+      const payload = await response.json().catch(() => null);
+      if (!payload || !payload.session) {
+        if (err) err.textContent = '登录响应缺少会话票据';
+        return;
+      }
+      saveSession(payload);
+      finish();
+      window.dispatchEvent(new CustomEvent('patchouli:auth'));
+      window.location.reload();
+    });
+  };
+
+  /* 首次初始化：留空自动生成，成功后一次性展示密钥。 */
+  const showInit = () => {
+    const { root, card } = shell(
+      '<div style="font-size:15px;font-weight:600;letter-spacing:.02em">首次初始化</div>' +
+      '<div style="margin-top:8px;font-size:12px;line-height:1.85;color:rgba(232,237,247,.62)">还没有管理密钥。可以留空由服务端生成，' +
+      '也可以自己填一个（至少 16 个字符）。密钥会写入 <code>&lt;知识库&gt;/.patchoulI/api-token.txt</code>，之后每次打开面板用它登录。</div>'
+        .replace('.patchoulI', '.patchouli') +
+      '<input name="token" type="text" autocomplete="off" spellcheck="false" placeholder="留空 = 自动生成" ' +
+      'style="margin-top:14px;width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);color:#e8edf7;font:13px/1.4 ui-monospace,monospace;outline:none">' +
+      '<div data-err style="margin-top:8px;font-size:12px;color:#f08a7a;min-height:16px"></div>' +
+      '<button type="submit" style="margin-top:6px;width:100%;padding:10px;border-radius:10px;border:0;background:#3f9d78;color:#06120d;font-size:13px;font-weight:600;cursor:pointer">生成并进入</button>'
+    );
+    if (!mountOverlay(root)) return;
+    const input = card.querySelector('input');
+    const err = card.querySelector('[data-err]');
+    card.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const value = (input && input.value || '').trim();
+      const response = await rawFetch(base + '/bootstrap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(value === '' ? {} : { token: value }),
+      }).catch(() => null);
+      if (response === null) {
+        if (err) err.textContent = '网络错误，请重试';
+        return;
+      }
+      if (response.status === 409) {
+        finish();
+        showLogin('已完成初始化，请输入管理密钥。');
+        return;
+      }
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        if (err) err.textContent = (payload && payload.message) || ('初始化失败（' + response.status + '）');
+        return;
+      }
+      const payload = await response.json().catch(() => null);
+      if (!payload || !payload.token || !payload.session) {
+        if (err) err.textContent = '初始化响应不完整';
+        return;
+      }
+      saveSession(payload);
+      card.innerHTML =
+        '<div style="font-size:15px;font-weight:600">初始化完成</div>' +
+        '<div style="margin-top:8px;font-size:12px;line-height:1.85;color:rgba(232,237,247,.62)">这是管理密钥，只显示这一次；已写入 <code>' +
+        String(payload.tokenPath || '').replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</code>。请复制保存，之后打开面板用它登录。</div>' +
+        '<div style="margin-top:12px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);font:12px/1.6 ui-monospace,monospace;word-break:break-all;user-select:all">' +
+        String(payload.token).replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>' +
+        '<button type="button" data-enter style="margin-top:12px;width:100%;padding:10px;border-radius:10px;border:0;background:#3f9d78;color:#06120d;font-size:13px;font-weight:600;cursor:pointer">我已保存，进入</button>';
+      const enter = card.querySelector('[data-enter]');
+      if (enter) enter.addEventListener('click', () => {
+        finish();
+        window.dispatchEvent(new CustomEvent('patchouli:auth'));
+        window.location.reload();
+      });
+    });
+  };
+
+  /* 每个 /api 请求自动带会话票据；401 视为过期/吊销，重新门禁。 */
+  window.fetch = (input, init) => {
+    const target = typeof input === 'string' ? input : (input && input.url) || '';
+    const isApi = target.includes(base + '/api/');
+    const sid = session();
+    if (sid && isApi) {
+      const headers = new Headers((init && init.headers) || (typeof input === 'string' ? undefined : input.headers));
+      if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + sid);
+      init = Object.assign({}, init, { headers });
+    }
+    const pending = rawFetch(input, init);
+    if (!isApi) return pending;
+    return pending.then((response) => {
+      if (response.status === 401) {
+        clear();
+        gate('会话已过期，请重新输入。');
+      }
+      return response;
+    });
+  };
+
+  /**
+   * 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
+   * 独立页面在加载时调用，Console 组件在打开悬浮窗时调用；重复调用幂等。
+   */
+  const gate = (message) => {
+    if (overlayOpen) return;
+    if (!session()) {
+      rawFetch(base + '/session', { credentials: 'same-origin' })
+        .then((response) => response.json())
+        .then((state) => {
+          if (state && state.authenticated === true) return;
+          if (state && state.bootstrapRequired === true) showInit();
+          else showLogin(message || '');
+        })
+        .catch(() => showLogin(message || '网络错误'));
+      return;
+    }
+    rawFetch(base + '/session', {
+      headers: { Authorization: 'Bearer ' + session() },
+      credentials: 'same-origin',
+    })
+      .then((response) => response.json())
+      .then((state) => {
+        if (state && state.authenticated === true) {
+          if (state.expiresAt) write(EXPIRY_KEY, String(state.expiresAt));
+          return;
+        }
+        clear();
+        if (state && state.bootstrapRequired === true) showInit();
+        else showLogin('会话已失效，请重新输入。');
+      })
+      .catch(() => undefined);
+  };
+
+  window.__ptxAuth = { gate, hasSession: () => session() !== null };
+})();
+// END GENERATED AUTH GATE
+
+function mount() {
+  if (state.mounted) return;
+  document.addEventListener('visibilitychange', resumeTraffic);
+  ensureStyles();
+
+  rootEl = buildShell();
+  document.body.appendChild(rootEl);
+
+  /* 打开即门禁：没有有效会话就先盖模态（Console 组件由客户端产物自行渲染，
+     这里的 gate() 与独立页面共用同一份 src/web/auth-bootstrap.ts 生成物）。 */
+  try {
+    if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
+  } catch {}
+
+  frameEl = rootEl.querySelector('.ptx-window');
+  pillEl = rootEl.querySelector('.ptx-pill');
+  viewportEl = rootEl.querySelector('#ptxViewport');
+  tickerEl = rootEl.querySelector('#ptxTicker');
+  phaseEl = rootEl.querySelector('.ptx-phase');
+  toastEl = rootEl.querySelector('.ptx-toast');
+  gearBtnEl = rootEl.querySelector('.ptx-gear');
+
+  const home = defaultPosition();
+  placeFrame(home.left, home.top);
+  /* 档位类不在这里判定：mount 时宿主还挂着 ptx-hidden（display:none，宽度读到 0），
+     等 checkRoute 摘掉隐藏态、窗口真正有了布局盒之后再同步（见 checkRoute）。 */
+
+  /* 宿主暗色跟随：先按宿主当前底色定主题（此刻壳层已挂进 body，读得到宿主底色），
+     再挂观察器；用户手动切换过（localStorage 有记录）时以记忆为准，宿主换肤不覆盖。 */
+  syncHostTheme();
+  watchHostTheme();
+  syncSettingsUI();
+
+  bindDrag();
+  bindResize();
+  bindPill();
+  bindActions();
+
+  /* 档位唯一真源：窗口盒真的变了才回调（隐藏 → 可见、@media 改宽都会触发）；
+     回调里读的是已经布局好的 offsetWidth，不强制回流，档位类不改宽度也不会自我触发。 */
+  if (typeof ResizeObserver === 'function' && frameEl) {
+    if (tierObserver) tierObserver.disconnect();
+    tierObserver = new ResizeObserver(() => syncResponsiveTier());
+    tierObserver.observe(frameEl);
+  }
+  startTicker();
+  clearInterval(latestTimer);
+  latestTimer = setInterval(() => {
+    if (!state.visible) return;
+    loadLatest().then(refreshTicker);
+  }, LATEST_POLL_MS);
+
+  state.mounted = true;
+  state.stage = 'entries';
+
+  /* 首次绘制前先把选项落地（loadChannels 回来后覆盖一次），下拉不存在空面板帧 */
+  renderChannelMenu();
+  renderStage();
+  resetIdleTimer();
+  refreshPhase();
+
+  Promise.all([loadChannels(), loadEntries(), loadStatus(), loadLatest()]).then(() => {
+    refreshTicker();
+    refreshPhase();
+    renderStage();
+    ensureDetail().then(() => {
+      if (state.stage !== 'entries') renderStage();
+    });
+  });
+}
+
+function unmount() {
+  if (!state.mounted || !rootEl) return;
+  ++statusRequest;
+  cancelAnimationFrame(trafficFrame);
+  trafficFrame = 0;
+  /* 观察器必须摘掉：它持有即将被丢弃的窗口节点 */
+  if (tierObserver) { tierObserver.disconnect(); tierObserver = null; }
+  document.removeEventListener('visibilitychange', resumeTraffic);
+  clearIdleTimer();
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = null;
+  clearInterval(state.tickerTimer);
+  state.tickerTimer = null;
+  clearTimeout(state.tickerSwap);
+  state.tickerSwap = null;
+  clearInterval(latestTimer);
+  latestTimer = null;
+  clearInterval(state.routeTimer);
+  state.routeTimer = null;
+  /* 胶囊手势随壳层一起作废：取消未落地的帧，清掉抑制标记与自定义位置 */
+  pillDrag.active = false;
+  pillDrag.pointerId = null;
+  pillDrag.moved = false;
+  pillDrag.pending = null;
+  pillDrag.suppressClick = false;
+  pillDrag.custom = false;
+  if (pillDrag.rafId) {
+    cancelAnimationFrame(pillDrag.rafId);
+    pillDrag.rafId = 0;
+  }
+  rootEl.remove();
+  rootEl = null;
+  frameEl = null;
+  pillEl = null;
+  viewportEl = null;
+  tickerEl = null;
+  phaseEl = null;
+  toastEl = null;
+  gearBtnEl = null;
+  channelChip = null;
+  channelToggle = null;
+  channelMenu = null;
+  searchInput = null;
+  state.mounted = false;
+  state.visible = false;
+  state.collapsed = false;
+  state.maximized = false;
+  state.sized = false;
+  state.restoreStyle = '';
+}
+
+function routeMatches() {
+  const path = (window.location.pathname || '').toLowerCase();
+  const hash = (window.location.hash || '').toLowerCase();
+  const target = `${path}${hash}`;
+  if (!target.includes('/plugins')) return false;
+  return ROUTE_KEYS.some((key) => target.includes(key));
+}
+
+function checkRoute() {
+  const match = routeMatches();
+
+  if (!match) {
+    if (state.visible) {
+      if (rootEl) rootEl.classList.add('ptx-hidden');
+      state.visible = false;
+      clearIdleTimer();
+      clearTimeout(state.refreshTimer);
+      state.refreshTimer = null;
+    }
+    return;
+  }
+
+  if (!state.mounted) mount();
+  if (rootEl) rootEl.classList.remove('ptx-hidden');
+
+  if (!state.visible) {
+    state.visible = true;
+    const home = defaultPosition();
+    const at = frameEl ? layoutOffset(frameEl) : home;
+    placeFrame(at.left, at.top);
+    /* 此刻宿主刚摘掉 ptx-hidden，窗口才真正有了布局盒：首帧就把档位定下来，
+       不必等第一次拖拽 / 缩放才换挡（收回态 visibility:hidden 时读不到宽度）。 */
+    if (frameEl) syncResponsiveTier();
+    /* 收回态不随路由自动展开：悬浮球是收回态下的唯一入口，
+       否则 × 收回的面板会在切走再回来时被弹开。 */
+    resetIdleTimer();
+    if (!state.refreshTimer) scheduleStatusPoll();
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 14. Console 插件入口
+ * ------------------------------------------------------------------ */
+
+export default function applyPatchouliWikiReader(ctx) {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.__patchouliWikiReader) return;
+  window.__patchouliWikiReader = true;
+
+  if (ctx && typeof ctx.on === 'function') {
+    ctx.on('dispose', () => {
+      unmount();
+      window.__patchouliWikiReader = false;
+    });
+  }
+
+  const boot = () => {
+    checkRoute();
+    state.routeTimer = setInterval(checkRoute, 700);
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+lib/
+tmp/
+*.log
+.DS_Store
+*.tgz
+*.tsbuildinfo
+.gemini-designer/
