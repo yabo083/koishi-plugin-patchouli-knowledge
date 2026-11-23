@@ -14,6 +14,8 @@ import {
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
+import { SETTINGS_META } from '../plugin/settings-store';
+import { albumTargetValues, albumValue, loadAlbumCatalog, type AlbumCandidate } from '../plugin/albums';
 import {
   DEFAULT_TUNING_PARAMETERS,
   HIGH_QUALITY_THRESHOLD,
@@ -24,7 +26,6 @@ import { isProxyRequiredMediaUrl, mapElementMediaUrls } from '../plugin/rich-mes
 import { createEmptyTelemetrySnapshot } from '../telemetry/types';
 import { normalizeDispatcherProvider, resolveDispatcherModels } from '../dispatcher/dispatcher';
 import { createMediaProxyHandler, type MediaFetchLike } from './media-proxy';
-import { renderLibraryHtml } from './ui';
 import { readFileSync } from 'node:fs';
 import {
   TokenAuthority,
@@ -34,10 +35,27 @@ import {
   handleLogout,
   handleSession,
 } from './auth';
-import { renderTacticalDockComponent } from './tactical-dock';
 import { renderEntryCard } from '../plugin/card-pipeline';
 import { plainText } from '../wiki/plain-text';
-export { renderLibraryHtml, renderTacticalDockComponent };
+
+/**
+ * 包版本（面板底栏只读行展示）。
+ *
+ * 从包根 `package.json` 读一次：编译产物在 `lib/web/` 下，`../../package.json`
+ * 正好是包根（npm 安装形态同样成立）。读取失败只影响展示，不影响路由。
+ */
+const PLUGIN_VERSION: string = (() => {
+  try {
+    const pkg: unknown = JSON.parse(readFileSync(nodePath.resolve(__dirname, '../../package.json'), 'utf8'));
+    if (typeof pkg === 'object' && pkg !== null && 'version' in pkg) {
+      const version = pkg.version;
+      if (typeof version === 'string' && version.length > 0) return version;
+    }
+  } catch {
+    /* 忽略：版本号只用于展示 */
+  }
+  return 'unknown';
+})();
 
 type RouteHandler = (ctx: KoishiKoaContext) => Promise<void> | void;
 
@@ -75,6 +93,13 @@ export interface WebUiOptions {
   mediaFetch?: MediaFetchLike;
   /** 媒体代理的 DNS 解析实现；缺省 `dns.lookup`（每个解析结果都会做公网校验）。 */
   mediaLookup?: (hostname: string) => Promise<readonly { address: string; family: number }[]>;
+  /**
+   * 相册现场探测（`apply()` 注入 bot / `miyako-delivery` 能力）。
+   *
+   * 只在相册缓存为空时调用一次：`GET /api/albums` 的冷启动路径。缺省时面板只看到缓存，
+   * 探测失败 / 抛错一律降级成空目录，绝不 500。
+   */
+  probeAlbums?: () => Promise<readonly AlbumCandidate[]>;
 }
 
 interface ParsedDebatePoint {
@@ -480,11 +505,19 @@ interface ParsedEntryBody {
 
 type EntryBodyParseResult = { ok: true; patch: ParsedEntryBody } | { ok: false; error: string };
 
+/** `PUT /api/entries/:id` 的写入上限：超限直接 400，绝不「先写进去再回读截断」。 */
+const MAX_ENTRY_TITLE_CHARS = 200;
+const MAX_ENTRY_SUMMARY_CHARS = 2000;
+/** 与读侧 `MAX_DETAIL_MARKDOWN_CHARS` 同值：写进来的正文必须能被完整读回。 */
+const MAX_ENTRY_MARKDOWN_CHARS = 200_000;
+
 /**
  * 校验 `PUT /api/entries/:id` 的请求体。
  *
  * 契约：所有字段可选，但出现即必须类型正确；`status` 收敛到 verified / tentative / open；
  * `tags` 逐项校验后去空白、去重、丢弃空串；`markdown` 非空（空正文会把词条头部一并抹掉）。
+ * 长度上限在**写入前**判定：`title ≤ 200`、`summary ≤ 2000`、`markdown ≤ 200_000` 字符，
+ * 超限即 400 —— 绝不「先落盘再在回读时截断」（那会让面板显示与磁盘内容不一致）。
  * 一个可识别字段都没给时视为客户端错误，避免「静默无操作」。
  */
 function parseEntryBody(raw: unknown): EntryBodyParseResult {
@@ -498,12 +531,22 @@ function parseEntryBody(raw: unknown): EntryBodyParseResult {
     if (typeof body.title !== 'string') return { ok: false, error: 'title 必须是字符串' };
     const title = body.title.trim();
     if (title.length === 0) return { ok: false, error: 'title 不能为空' };
+    if (title.length > MAX_ENTRY_TITLE_CHARS) {
+      return { ok: false, error: `title 不得超过 ${MAX_ENTRY_TITLE_CHARS} 个字符（收到 ${title.length}）` };
+    }
     patch.title = title;
   }
 
   if (body.summary !== undefined) {
     if (typeof body.summary !== 'string') return { ok: false, error: 'summary 必须是字符串' };
-    patch.summary = body.summary.trim();
+    const summary = body.summary.trim();
+    if (summary.length > MAX_ENTRY_SUMMARY_CHARS) {
+      return {
+        ok: false,
+        error: `summary 不得超过 ${MAX_ENTRY_SUMMARY_CHARS} 个字符（收到 ${summary.length}）`,
+      };
+    }
+    patch.summary = summary;
   }
 
   if (body.status !== undefined) {
@@ -528,6 +571,12 @@ function parseEntryBody(raw: unknown): EntryBodyParseResult {
   if (body.markdown !== undefined) {
     if (typeof body.markdown !== 'string') return { ok: false, error: 'markdown 必须是字符串' };
     if (body.markdown.trim().length === 0) return { ok: false, error: 'markdown 不能为空' };
+    if (body.markdown.length > MAX_ENTRY_MARKDOWN_CHARS) {
+      return {
+        ok: false,
+        error: `markdown 不得超过 ${MAX_ENTRY_MARKDOWN_CHARS} 个字符（收到 ${body.markdown.length}）`,
+      };
+    }
     patch.markdown = body.markdown;
   }
 
@@ -660,6 +709,14 @@ export interface PromptStatePayload {
   isTopicCustom: boolean;
 }
 
+/**
+ * 单次提交的提示词上限（UTF-8 字节，64 KiB）。
+ *
+ * 提示词会整段拼进**每一次**模型请求，必须有物理上限；超限直接 400 而不是截断
+ * （截断会静默改掉用户写的提示词）。两套提示词各自独立计。
+ */
+const MAX_PROMPT_BYTES = 64 * 1024;
+
 function dispatcherConfigOf(system: PatchouliKnowledgeSystem): DispatcherConfig | undefined {
   const config = system.config as { dispatcher?: DispatcherConfig } | undefined;
   const dispatcher = config?.dispatcher;
@@ -765,6 +822,59 @@ function warnHost(ctx: Context, message: string): void {
     return;
   }
   console.warn(message);
+}
+
+/* ------------------------------------------------------------------ *
+ * 相册目录 + 订阅表：面板「投递目标」的数据面
+ * ------------------------------------------------------------------ */
+
+/** 相册候选项的线上形状：`value` 直接写进订阅行的 `targets`，`label` 供下拉展示。 */
+export interface AlbumOption {
+  value: string;
+  groupId: string;
+  groupName: string;
+  albumId: string;
+  albumName: string;
+  label: string;
+}
+
+/** `GET /api/albums` 的响应体。 */
+export interface AlbumCatalogPayload {
+  albums: AlbumOption[];
+  /** 上次探测时刻（epoch 毫秒）；`null` = 既无缓存、本轮探测也没成功。 */
+  probedAt: number | null;
+}
+
+/** 把探测候选摊成下拉项：群名 / 相册名缺失时退回群号 / 相册ID，绝不留空标签。 */
+function toAlbumOption(candidate: AlbumCandidate): AlbumOption {
+  const groupName = candidate.groupName.trim();
+  const albumName = candidate.albumName.trim();
+  return {
+    value: albumValue(candidate),
+    groupId: candidate.groupId,
+    groupName: candidate.groupName,
+    albumId: candidate.albumId,
+    albumName: candidate.albumName,
+    label: `${groupName !== '' ? groupName : `群 ${candidate.groupId}`} / ${albumName !== '' ? albumName : candidate.albumId}`,
+  };
+}
+
+/**
+ * 读取面板用的相册目录（缓存优先，缓存为空时才用注入的 `probe` 探测一次）。
+ *
+ * 所有异常都在这里收敛成「空目录 + `probedAt: null`」：相册探测依赖外部服务
+ * （OneBot / `miyako-delivery`），它的抖动不该把面板打成 500。
+ */
+async function readAlbumCatalogFor(
+  system: PatchouliKnowledgeSystem,
+  options: WebUiOptions,
+): Promise<AlbumCatalogPayload> {
+  try {
+    const catalog = await loadAlbumCatalog(system.wikiDir, options.probeAlbums);
+    return { albums: catalog.albums.map(toAlbumOption), probedAt: catalog.probedAt };
+  } catch {
+    return { albums: [], probedAt: null };
+  }
 }
 
 export function registerWebUi(
@@ -880,16 +990,8 @@ export function registerWebUi(
     handleSession(kCtx as unknown as Parameters<typeof handleSession>[0], authority);
   });
 
-  // 1. 静态主界面 HTML
-  router.get(cleanBase, (kCtx: KoishiKoaContext) => {
-    kCtx.type = 'text/html; charset=utf-8';
-    kCtx.body = renderLibraryHtml(cleanBase);
-  });
-
-  router.get(`${cleanBase}/`, (kCtx: KoishiKoaContext) => {
-    kCtx.type = 'text/html; charset=utf-8';
-    kCtx.body = renderLibraryHtml(cleanBase);
-  });
+  // 注意：不再提供任何服务端渲染的 HTML 页面（`GET <base>` / `GET <base>/` 已删除）。
+  // 唯一的 UI 是 Console 里的「LLMWiki」浮窗（`client/dist/index.js`），它只消费下面的 `/api/*`。
 
   // 2. API: 获取词条清单（可按群聊分群筛选 + 广义关键词穿透检索）
   router.get(`${cleanBase}/api/entries`, async (kCtx: KoishiKoaContext) => {
@@ -951,6 +1053,20 @@ export function registerWebUi(
       kCtx.status = 400;
       kCtx.body = { ok: false, error: '至少提供 customPrompt 或 customTopicPrompt' };
       return;
+    }
+
+    // 物理上限先判：超限直接 400，绝不截断后落盘（用户看到的与生效的必须是同一份）。
+    for (const [field, value] of [
+      ['customPrompt', body?.customPrompt],
+      ['customTopicPrompt', body?.customTopicPrompt],
+    ] as const) {
+      if (typeof value !== 'string') continue;
+      const bytes = Buffer.byteLength(value, 'utf8');
+      if (bytes > MAX_PROMPT_BYTES) {
+        kCtx.status = 400;
+        kCtx.body = { ok: false, error: `${field} 超过 ${MAX_PROMPT_BYTES} 字节上限（收到 ${bytes}）` };
+        return;
+      }
     }
 
     // 原样保存用户输入（含换行缩进）：先原子落盘，再由 system 热更新运行时覆盖；
@@ -1029,6 +1145,114 @@ export function registerWebUi(
     } catch (err: unknown) {
       kCtx.status = 500;
       kCtx.body = { ok: false, error: errorMessage(err) };
+    }
+  });
+
+  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）
+  //
+  // GET 返回**合并后**的五段值（覆盖层 > koishi.yml > Schema 默认值）与字段元数据；
+  // POST 只接受 {section, patch}，未知键丢弃、非法值 400。写入落在
+  // `<wikiDir>/.patchouli/settings.json`，绝不改宿主 config（ADR-022）。
+  // 校验分两层且都在落盘之前：字段级 + 「合并后」跨字段（触发器的 `normalizeTriggerOptions`）。
+  // 任一层不过都是 400 且文件与运行态都不变——不会再出现「500 但坏值已落盘」。
+  router.get(`${cleanBase}/api/settings`, (kCtx: KoishiKoaContext) => {
+    kCtx.type = 'application/json';
+    kCtx.body = { sections: system.getSettingsSections(), meta: SETTINGS_META };
+  });
+
+  router.post(`${cleanBase}/api/settings`, async (kCtx: KoishiKoaContext) => {
+    const body = kCtx.request.body as { section?: unknown; patch?: unknown } | undefined;
+    if (typeof body !== 'object' || body === null) {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: 'Invalid payload' };
+      return;
+    }
+    try {
+      const result = await system.updateSettings(body.section, body.patch);
+      kCtx.type = 'application/json';
+      if (!result.ok) {
+        kCtx.status = 400;
+        kCtx.body = { ok: false, error: result.error };
+        return;
+      }
+      kCtx.body = { ok: true, value: result.value };
+    } catch (err: unknown) {
+      kCtx.status = 500;
+      kCtx.body = { ok: false, error: errorMessage(err) };
+    }
+  });
+
+  // 2i. API: 相册目录（订阅表「投递目标」的动态候选）
+  //
+  // 缓存优先：`<wikiDir>/.patchouli/albums.json` 有内容就直接回；为空才让注入的
+  // `probeAlbums` 现场探测一次并回写缓存。探测失败返回空目录 + `probedAt: null`。
+  router.get(`${cleanBase}/api/albums`, async (kCtx: KoishiKoaContext) => {
+    kCtx.type = 'application/json';
+    kCtx.body = await readAlbumCatalogFor(system, options);
+  });
+
+  // 2j. API: 订阅表读取（当前生效行 + 来源 + 相册目录）
+  //
+  // `source`：`settings` = 面板覆盖层，`config` = 宿主 yml。相册只读缓存 ——
+  // GET 是面板打开就发的请求，不能每次都触发秒级探测（保鲜由 `/api/albums` 负责）。
+  router.get(`${cleanBase}/api/subscriptions`, async (kCtx: KoishiKoaContext) => {
+    const catalog = await readAlbumCatalogFor(system, {});
+    const table = system.subscriptionTable();
+    kCtx.type = 'application/json';
+    kCtx.body = {
+      rows: table.rows,
+      source: table.source,
+      albums: catalog.albums,
+      probedAt: catalog.probedAt,
+    };
+  });
+
+  // 2k. API: 订阅表保存（写覆盖层，绝不改宿主 config —— ADR-022）
+  //
+  // 校验在 `system.updateSubscriptions` 里（纯函数 `validateSubscriptionRows`）：
+  // 行数 ≤256、单行目标 ≤16 且去重。值域 = 候选唯一名 ∪ 候选稳定地址（升级前的值）
+  // ∪ 现有值（暂时解析不了也允许原样保存）。
+  //
+  // 同一批候选还用于**保存时绑定**：名字在这里换成 `群号/相册ID` 写进 `targetBindings`，
+  // 投递期只认那张表；解析不到的名字进响应 `unresolved`（保留但不投递）。
+  router.post(`${cleanBase}/api/subscriptions`, async (kCtx: KoishiKoaContext) => {
+    const body = kCtx.request.body as { rows?: unknown } | undefined;
+    if (typeof body !== 'object' || body === null || !('rows' in body)) {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: 'Invalid payload：需要 { rows: [...] }' };
+      return;
+    }
+    try {
+      const catalog = await readAlbumCatalogFor(system, {});
+      // `AlbumOption` 带着探测到的那四个字段，重建候选即可复用 `albums.ts` 的命名规则。
+      const candidates: AlbumCandidate[] = catalog.albums.map((item) => ({
+        groupId: item.groupId,
+        groupName: item.groupName,
+        albumId: item.albumId,
+        albumName: item.albumName,
+      }));
+      const allowed = new Set(albumTargetValues(candidates));
+      // 已经生效的行里的目标一律放行：探测抖动不该让用户连「原样保存」都做不到，
+      // 相册改名 / 删除后的旧名字也要能留在表里，由投递期拒绝并提示重新选择。
+      for (const row of system.subscriptionTable().rows) {
+        for (const target of row.targets) {
+          const value = target.trim();
+          if (value !== '') allowed.add(value);
+        }
+      }
+      const result = await system.updateSubscriptions(body.rows, allowed, candidates);
+      kCtx.type = 'application/json';
+      if (!result.ok) {
+        kCtx.status = 400;
+        kCtx.body = { ok: false, error: result.error };
+        return;
+      }
+      // `unresolved`：这些名字解析不到相册（歧义 / 改名 / 删除），保留在表里但投递期停投，
+      // 面板据此提示「请重新选择」。
+      kCtx.body = { ok: true, rows: result.rows, unresolved: result.unresolved };
+    } catch (err: unknown) {
+      kCtx.status = 500;
+      kCtx.body = { ok: false, error: `订阅表保存失败：${errorMessage(err)}` };
     }
   });
 
@@ -1294,10 +1518,15 @@ export function registerWebUi(
       system.media.stats('image'),
       system.media.stats('saying'),
     ]);
+    // 合并后的素材段（覆盖层 > config）；测试替身 / 旧宿主只有 config 时回落到它。
+    const mediaSettings = typeof system.settings === 'function' ? system.settings('media') : system.config?.media;
 
     kCtx.type = 'application/json';
     kCtx.body = {
       channelId,
+      // 面板底栏只读行：包版本与解析后的知识库根目录（相对路径已按 baseDir 锚定）。
+      version: PLUGIN_VERSION,
+      wikiDir: system.wikiDir,
       ...metrics,
       traffic: system.getTraffic(channelId),
       sampleMs: TRAFFIC_SAMPLE_MS,
@@ -1315,7 +1544,7 @@ export function registerWebUi(
         image: imagePool,
         saying: sayingPool,
         counters: system.media.metrics,
-        offline: (system.config as { media?: { offline?: boolean } } | undefined)?.media?.offline === true,
+        offline: mediaSettings?.offline === true,
       },
       topics: system.lastTopicRun,
       // 判据台账落盘健康度：`failed > 0` 或 `lastWriteAt` 停滞 = 三天对照会缺数据。

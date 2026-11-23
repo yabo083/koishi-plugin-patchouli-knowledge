@@ -501,6 +501,39 @@ test('API-PROMPT-03: POST /api/prompt 缺省 customPrompt 等同清空，非法�
   await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
 });
 
+test('API-PROMPT-05: 单次提示词上限 64 KiB，超限 400 且不落盘', async () => {
+  const { routes, dispatcher } = await createPromptHost();
+  const handler = routes.get('POST /patchouli/api/prompt');
+  const LIMIT = 64 * 1024;
+
+  // 恰好 64 KiB（ASCII 一字符一字节）必须放行：上限是闭区间。
+  const exact = 'a'.repeat(LIMIT);
+  const accepted = promptCtx({ customPrompt: exact });
+  await handler(accepted);
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.ok, true);
+  assert.equal(await readPromptFile(), exact);
+
+  // 超 1 字节 → 400；磁盘与运行时都保持上一次的值。
+  const overEntry = promptCtx({ customPrompt: 'b'.repeat(LIMIT + 1) });
+  await handler(overEntry);
+  assert.equal(overEntry.status, 400);
+  assert.equal(overEntry.body.ok, false);
+  assert.match(overEntry.body.error, /customPrompt/u);
+  assert.equal(await readPromptFile(), exact, '超限不得改动已落盘提示词');
+  assert.equal(dispatcher.customSystemPromptText, exact, '超限不得写回运行时');
+
+  // 主题提示词独立计：多字节字符按 UTF-8 字节数判（21846 × 3 = 65538 > 65536）。
+  const overTopic = promptCtx({ customTopicPrompt: '啊'.repeat(21846) });
+  await handler(overTopic);
+  assert.equal(overTopic.status, 400);
+  assert.match(overTopic.body.error, /customTopicPrompt/u);
+  assert.equal(dispatcher.topicPrompt, '', '超限不得写回运行时');
+  assert.equal(await fs.readFile(TOPIC_PROMPT_FILE, 'utf8').catch(() => null), null, '超限不得落盘');
+
+  await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
+});
+
 test('API-PROMPT-04: 服务重启后自动回灌 .patchouli/custom-prompt.txt，恢复默认即删除文件', async () => {
   await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
   await fs.mkdir(PROMPT_WIKI_DIR, { recursive: true });
@@ -711,8 +744,9 @@ test('API-AUTH-01: 宿主 router 没有 use 时不注册任何 /api/* 路由（f
     assert.equal(routes.has(key), false, `${key} 在守卫挂不上时绝不能注册`);
   }
 
-  // 非 /api 入口只返回静态壳或自带鉴权，照常注册（否则面板连登录框都打不开）
-  assert.equal(routes.has('GET /patchouli'), true, '页面壳照常注册');
+  // 非 /api 入口只返回 JSON 或自带鉴权，照常注册；独立页 HTML 已删除，不再有页面壳
+  assert.equal(routes.has('GET /patchouli'), false, '独立页 HTML 路由必须删除（UI 只在 Console 浮窗）');
+  assert.equal(routes.has('GET /patchouli/'), false, '独立页根路径同样不得注册');
   assert.equal(routes.has('GET /patchouli/session'), true, '会话自检照常注册');
   assert.equal(routes.has('POST /patchouli/login'), true, '登录照常注册');
   assert.equal(routes.has('POST /patchouli/bootstrap'), true, '首次初始化照常注册');

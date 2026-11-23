@@ -41,7 +41,7 @@ export function authBootstrap(basePath: string): string {
   const shell = (inner) => {
     const root = document.createElement('div');
     root.id = OVERLAY_ID;
-    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
+    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
     const card = document.createElement('form');
     card.setAttribute('style', 'width:min(440px,88vw);padding:26px 24px;border-radius:16px;background:rgba(19,25,40,.97);border:1px solid rgba(255,255,255,.13);box-shadow:0 24px 70px rgba(0,0,0,.55)');
     card.innerHTML = inner;

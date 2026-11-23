@@ -8,10 +8,10 @@ test('QUOTE-UNAVAILABLE: 引用原消息 1200 时不告警，只给可见占位�
     {
       onebot: {
         get_msg: async () => {
-          throw new Error('Error with request get_msg, args: {"message_id":"824504937"}, retcode: 1200');
+          throw new Error('Error with request get_msg, args: {"message_id":"100000013"}, retcode: 1200');
         },
       },
-      quote: { id: '824504937', user: { name: '小蓝' } },
+      quote: { id: '100000013', user: { name: '小蓝' } },
       content: '',
     },
     { warn: (message) => warnings.push(message) },
@@ -21,7 +21,7 @@ test('QUOTE-UNAVAILABLE: 引用原消息 1200 时不告警，只给可见占位�
   assert.equal(elements[0].type, 'quote');
   assert.equal(elements[0].text, '[引用消息不可用]');
   assert.equal(elements[0].title, '小蓝', '发送者名字必须保留');
-  assert.equal(elements[0].targetMessageId, '824504937');
+  assert.equal(elements[0].targetMessageId, '100000013');
   assert.deepEqual(warnings, [], '常态的不可读引用不得写 warning');
 });
 

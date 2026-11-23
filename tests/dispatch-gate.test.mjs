@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import {
   Config,
   PatchouliKnowledgeSystem,
+  flattenConfig,
   listDiscardDumps,
   readDiscardDump,
 } from '../lib/index.js';
@@ -246,8 +247,8 @@ test('GATE-07: margin=0 与软切片会话都不受质量门影响', async () =>
   });
 
   // ③ 默认值 = 1.2（与势能默认配套：势能比速率敏感，默认就要有质量门）。
-  assert.equal(Config({}).trigger.dispatchMargin, 1.2);
-  assert.equal(Config({ trigger: { dispatchMargin: 1.3 } }).trigger.dispatchMargin, 1.3);
+  assert.equal(flattenConfig(Config({})).trigger.dispatchMargin, 1.2);
+  assert.equal(flattenConfig(Config({ trigger: { dispatchMargin: 1.3 } })).trigger.dispatchMargin, 1.3);
 
   await removeDir(offDir);
   await removeDir(sliceDir);

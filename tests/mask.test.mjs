@@ -93,29 +93,29 @@ test('MASK-03: 视图脱敏 participants / speaker / 支持者 / 质疑者且指
 test('MASK-04: @昵称 与 5–12 位号码被替换，伪号不等于原号且同号同伪号', () => {
   const masker = createMasker('number-seed');
   const alias = masker.maskName('张三');
-  const text = '@张三 你好，QQ 123456789，群 987654321，重帖 123456789。';
+  const text = '@张三 你好，QQ 100000011，群 100000012，重帖 100000011。';
   const masked = masker.maskText(text);
 
   assert.ok(masked.includes(`@${alias}`), '提及替换成同一假名');
   assert.ok(!masked.includes('@张三'));
-  assert.ok(!masked.includes('123456789'));
-  assert.ok(!masked.includes('987654321'));
+  assert.ok(!masked.includes('100000011'));
+  assert.ok(!masked.includes('100000012'));
 
   const pseudos = masked.match(/\d{5,12}/gu) ?? [];
   assert.equal(pseudos.length, 3, '三处号码都应替换为伪号');
   assert.equal(pseudos[0], pseudos[2], '同一个真实号永远得到同一伪号');
   assert.notEqual(pseudos[0], pseudos[1], '不同真实号得到不同伪号');
-  assert.ok(pseudos.every((pseudo) => pseudo !== '123456789' && pseudo !== '987654321'));
+  assert.ok(pseudos.every((pseudo) => pseudo !== '100000011' && pseudo !== '100000012'));
 
   assert.equal(masker.maskText(''), '');
   assert.equal(masker.maskText('2026-11-10'), '2026-11-10', '四位年份不是号码');
-  assert.equal(masker.maskText('编号 1234567890123'), '编号 1234567890123', '超过 12 位的长串不是独立号码');
+  assert.equal(masker.maskText('编号 1000000112345'), '编号 1000000112345', '超过 12 位的长串不是独立号码');
 });
 
 test('MASK-05: maskPublicView 不改入参（深比较不变）、短名与空串不崩', () => {
   const view = makeView({
     participants: ['张三'],
-    summary: '@张三 说 QQ 123456789 才是关键。',
+    summary: '@张三 说 QQ 100000011 才是关键。',
   });
   const snapshot = structuredClone(view);
   const masked = maskPublicView(view);
@@ -123,7 +123,7 @@ test('MASK-05: maskPublicView 不改入参（深比较不变）、短名与空�
   assert.notEqual(masked, view);
   assert.deepEqual(view, snapshot, '入参必须原样保留');
   assert.ok(!JSON.stringify(masked).includes('张三'));
-  assert.ok(!JSON.stringify(masked).includes('123456789'));
+  assert.ok(!JSON.stringify(masked).includes('100000011'));
 
   const masker = createMasker();
   assert.equal(masker.maskName(''), '');
@@ -166,17 +166,17 @@ test('MASK-07: 仅出现在参与名单、正文裸写的名字由 extraNames �
     narrative: '讨论始于群友对阵容表现的强烈不满。VMNXD 直言该阵营在高难下几乎无法取胜。',
     quotes: [],
   });
-  const masked = maskPublicView(view, createMasker('leak-seed'), ['VMNXD', 'VMNXD 1606987772', '7', 'fufuu']);
+  const masked = maskPublicView(view, createMasker('leak-seed'), ['VMNXD', 'VMNXD 100000009', '7', 'fufuu']);
 
   assert.ok(!masked.narrative.includes('VMNXD'), '正文裸写的 VMNXD 必须被替换');
   // 复合昵称与其底名共享同一个假名（maskName 归一）。
   const masker = createMasker('leak-seed');
-  assert.equal(masker.maskName('VMNXD 1606987772'), masker.maskName('VMNXD'));
+  assert.equal(masker.maskName('VMNXD 100000009'), masker.maskName('VMNXD'));
 });
 
 test('MASK-08: 短名按词边界命中——独立 `7` 换掉，`1527` 里的 7 不动', () => {
   const masker = createMasker('guard-seed');
-  masker.reserveRealNames(['7', '千聆', 'VMNXD 1606987772', '空庭流萤（B服天蓝色的海#9937）']);
+  masker.reserveRealNames(['7', '千聆', 'VMNXD 100000009', '空庭流萤（B服天蓝色的海#9937）']);
 
   const masked = masker.maskText('7 与千聆进一步拆解，黑流n16才1527，编号 7 号');
   const seven = masker.maskName('7');
@@ -197,12 +197,12 @@ test('MASK-09: 原始会话的 userName 补齐 participants 漏掉的人', () =>
     id: 'e1',
     messages: [
       { id: '1', userId: '1', userName: '7', content: 'a', timestamp: 0 },
-      { id: '2', userId: '2', userName: ' VMNXD 1606987772 ', content: 'b', timestamp: 0 },
+      { id: '2', userId: '2', userName: ' VMNXD 100000009 ', content: 'b', timestamp: 0 },
       { id: '3', userId: '1', userName: '7', content: 'c', timestamp: 0 },
       { id: '4', userId: '3', content: 'd', timestamp: 0 },
     ],
   });
-  assert.deepEqual(collectSessionNames(dump), ['7', 'VMNXD 1606987772']);
+  assert.deepEqual(collectSessionNames(dump), ['7', 'VMNXD 100000009']);
   assert.deepEqual(collectSessionNames(undefined), []);
   assert.deepEqual(collectSessionNames('{ not json'), []);
   assert.deepEqual(collectSessionNames('{"messages":"nope"}'), []);
@@ -246,7 +246,7 @@ test('MASK-11: 单字中文名在提及语境里必须替换（结构化字段�
 
 test('MASK-12: 双链内人名精确替换（单字/复合皆可，概念链不动）', () => {
   const masker = createMasker('link-seed');
-  masker.reserveRealNames(['夜', 'VMNXD', 'VMNXD 1606987772']);
+  masker.reserveRealNames(['夜', 'VMNXD', 'VMNXD 100000009']);
   const night = masker.maskName('夜');
 
   // 双链是结构信号：不需要上下文判定，单字名同样精确命中。
@@ -255,8 +255,8 @@ test('MASK-12: 双链内人名精确替换（单字/复合皆可，概念链不�
   assert.equal(masker.maskText('[[数值膨胀]] 是核心问题'), '[[数值膨胀]] 是核心问题');
   // 复合昵称与底名各自映射到同一假名族。
   assert.equal(
-    masker.maskText('[[VMNXD]] 与 [[VMNXD 1606987772]]'),
-    `[[${masker.maskName('VMNXD')}]] 与 [[${masker.maskName('VMNXD 1606987772')}]]`,
+    masker.maskText('[[VMNXD]] 与 [[VMNXD 100000009]]'),
+    `[[${masker.maskName('VMNXD')}]] 与 [[${masker.maskName('VMNXD 100000009')}]]`,
   );
 });
 
@@ -318,11 +318,11 @@ test('MASK-15: 单字名线索左右镜像——句号/问号后与句尾点名�
 test('MASK-16: 来源路径并入脱敏流——真实号码替换，普通路径原样', () => {
   const view = makeView({
     quotes: [],
-    sources: ['raw/sessions/123456789.json', 'raw/sessions/2026-11-10-mask.json'],
+    sources: ['raw/sessions/100000011.json', 'raw/sessions/2026-11-10-mask.json'],
   });
   const masked = maskPublicView(view, createMasker('source-seed'));
 
-  assert.ok(!masked.sources[0].includes('123456789'), '来源里的真实号码必须脱敏');
+  assert.ok(!masked.sources[0].includes('100000011'), '来源里的真实号码必须脱敏');
   assert.ok(/^raw\/sessions\/10\d{6}\.json$/u.test(masked.sources[0]), `伪号形态不变：${masked.sources[0]}`);
   assert.equal(masked.sources[1], 'raw/sessions/2026-11-10-mask.json', '字母与普通数字原样保留');
 });

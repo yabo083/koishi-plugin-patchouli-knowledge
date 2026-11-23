@@ -1237,7 +1237,7 @@ export class PatchouliInspector {
         lastUpdated: lastBefore ?? undefined,
       },
       readTuningSignal(rawSignal),
-      system.config.trigger,
+      system.settings('trigger'),
       lastAfter,
       { target },
     );

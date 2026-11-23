@@ -5,12 +5,12 @@ import { WikiEngine, registerWebUi } from '../lib/index.js';
 
 const ENTRY = {
   id: '2026-11-10-card-entry',
-  title: '张三的 123456789 观察',
+  title: '张三的 100000011 观察',
   channelId: 'qq-group-9001',
   date: '2026-11-10',
   status: 'tentative',
   tags: ['长图导出'],
-  summary: '@张三 提出 QQ 123456789 的疑问。',
+  summary: '@张三 提出 QQ 100000011 的疑问。',
   background: '背景。',
   participants: ['张三'],
   debateMatrix: [
@@ -130,7 +130,7 @@ test('API-CARD-03: 有 puppeteer 时出 JPEG 长图，且渲染内容已脱敏',
 
   const html = htmls[0];
   assert.ok(!html.includes('张三'), '出图前必须脱敏：真实昵称不得出现在 HTML 里');
-  assert.ok(!html.includes('123456789'), '出图前必须脱敏：真实号码不得出现');
+  assert.ok(!html.includes('100000011'), '出图前必须脱敏：真实号码不得出现');
   assert.ok(html.includes('>#1<'), '页眉显示独立自然数序号');
   assert.ok(!/<a\s|https?:\/\//u.test(html), '长图不含任何 URL / 锚点');
 });

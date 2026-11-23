@@ -93,8 +93,8 @@ test('LONGIMAGE-01: 长图 HTML 自包含，含标题、矩阵与词条 id，零
 
 test('LONGIMAGE-02: 真实昵称与号码不出现在长图，同一人多处别名一致', () => {
   const view = makeView({
-    summary: '@张三 提出 QQ 123456789 的疑问。',
-    quotes: [{ speaker: '张三', text: '我认为 987654321 这个群号才是关键。' }],
+    summary: '@张三 提出 QQ 100000011 的疑问。',
+    quotes: [{ speaker: '张三', text: '我认为 100000012 这个群号才是关键。' }],
     debate: [
       {
         viewpoint: '是否该收录',
@@ -107,7 +107,7 @@ test('LONGIMAGE-02: 真实昵称与号码不出现在长图，同一人多处别
   });
   const html = renderEntryLongImageHtml(view);
 
-  for (const secret of ['张三', '李四', '123456789', '987654321']) {
+  for (const secret of ['张三', '李四', '100000011', '100000012']) {
     assert.ok(!html.includes(secret), `${secret} 不得出现在长图里`);
   }
   const alias = createMasker().maskName('张三');
@@ -127,13 +127,13 @@ test('LONGIMAGE-03: 无 puppeteer 时返回 null 且不抛', async () => {
 
 test('LONGIMAGE-04: masked:false 时原始昵称可见', () => {
   const view = makeView({
-    summary: '@张三 提出 QQ 123456789 的疑问。',
+    summary: '@张三 提出 QQ 100000011 的疑问。',
     quotes: [{ speaker: '张三', text: '原句。' }],
   });
   const html = renderEntryLongImageHtml(view, { masked: false });
 
   assert.ok(/@<span class="nm"[^>]*>张三<\/span>/u.test(html), '正文提及保持原文（@ + chip）');
-  assert.ok(html.includes('123456789'));
+  assert.ok(html.includes('100000011'));
   assert.ok(/<figcaption><span class="nm"[^>]*>张三<\/span><\/figcaption>/u.test(html), '署名仍由 chip 包裹');
 });
 

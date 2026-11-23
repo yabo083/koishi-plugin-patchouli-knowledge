@@ -479,3 +479,39 @@ test('API-EDIT-08: POST /api/clear 优先系统层，回退引擎 + 仓储，全
 
   assert.deepEqual(messages, ['知识库已清空，保留默认骨架']);
 });
+
+test('API-EDIT-09: 超长 title / summary / markdown 在写入前 400（不是回读截断）', async (t) => {
+  const dir = await prepareDir('put-limits');
+  t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  const mdPath = enginePath(dir);
+  await fs.writeFile(mdPath, sampleMarkdown(), 'utf8');
+  const before = await fs.readFile(mdPath, 'utf8');
+
+  const { store, updateCalls, saveCalls } = createStore(createRecord({ path: mdPath }));
+  const { router, routes } = createRouter();
+  registerWebUi({ router }, { localStore: store, wikiEngine: { entryPath: (id) => enginePath(dir, id) } }, BASE);
+
+  const put = (body) => callRoute(routes, `PUT ${BASE}/api/entries/:id`, { params: { id: ENTRY_ID }, body });
+
+  const longTitle = await put({ title: '标'.repeat(201) });
+  assert.equal(longTitle.status, 400);
+  assert.match(longTitle.body.error, /title 不得超过 200/u);
+
+  const longSummary = await put({ summary: '述'.repeat(2001) });
+  assert.equal(longSummary.status, 400);
+  assert.match(longSummary.body.error, /summary 不得超过 2000/u);
+
+  const longMarkdown = await put({ markdown: `# 标题\n${'正'.repeat(200_000)}` });
+  assert.equal(longMarkdown.status, 400);
+  assert.match(longMarkdown.body.error, /markdown 不得超过 200000/u);
+
+  // 边界必须放行：恰好落在上限上的请求照常写入。
+  const atLimit = await put({ summary: '述'.repeat(2000) });
+  assert.equal(atLimit.status, 200);
+
+  assert.equal(updateCalls.length, 1, '超限请求绝不能触达存储');
+  assert.equal(updateCalls[0].patch.summary.length, 2000);
+  assert.equal(saveCalls.length, 0, '超限请求绝不能写正文');
+  assert.equal(await fs.readFile(mdPath, 'utf8'), before, '磁盘正文不得被超限请求改动');
+});

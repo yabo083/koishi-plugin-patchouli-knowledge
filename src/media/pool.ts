@@ -41,6 +41,11 @@ export interface MediaPoolConfig {
    * 只作为 `key` 查询参数拼进请求 URL，不落盘、不进日志、不进渲染产物。
    */
   apiKey?: string;
+  /**
+   * 总闸（`features.media === false`）：整池停用——`take` 直接返回 `undefined`
+   * （卡片走无图版式），`ensureFilled` 不再发任何请求。
+   */
+  disabled?: boolean;
 }
 
 /** 目录两侧的用量快照。 */
@@ -156,9 +161,25 @@ export class MediaPool {
     this.config = config;
   }
 
-  /** 素材池是否可用（目录已配置）。 */
+  /**
+   * 热更新可调参数（面板设置覆盖层）。
+   *
+   * 目录类参数不在此列：运行期换盘会让 pending / used 分落两个路径，目录变更一律等重启。
+   * 未传入（`undefined`）的键保持原值。
+   */
+  public configure(patch: Partial<MediaPoolConfig>): void {
+    if (patch.offline !== undefined) this.config.offline = patch.offline;
+    if (patch.lowWater !== undefined) this.config.lowWater = patch.lowWater;
+    if (patch.batch !== undefined) this.config.batch = patch.batch;
+    if (patch.cooldownMs !== undefined) this.config.cooldownMs = patch.cooldownMs;
+    if (patch.imageSource !== undefined) this.config.imageSource = patch.imageSource;
+    if (patch.sayingSource !== undefined) this.config.sayingSource = patch.sayingSource;
+    if (patch.apiKey !== undefined) this.config.apiKey = patch.apiKey;
+  }
+
+  /** 素材池是否可用（总闸关闭或目录未配置时不可用）。 */
   public get enabled(): boolean {
-    return this.config.dir.trim() !== '';
+    return this.config.disabled !== true && this.config.dir.trim() !== '';
   }
 
   /**

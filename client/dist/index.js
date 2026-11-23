@@ -1,5 +1,6 @@
 // Patchouli Knowledge - LLMWiki 知识阅读器下属组件 (Koishi Console Client Extension)
-// 挂载路径: /plugins/0848oh (plugin-console 静态服务以 <uiPath>/@plugin-<entry>/index.js 提供)
+// 挂载路径: /plugins/** (plugin-console 静态服务以 <uiPath>/@plugin-<entry>/index.js 提供)
+//   路由判定只看 /plugins 前缀，不绑定实例 id：换实例 / 换配置页路径都不会失去唯一入口
 // 材质：瓷白 / 葱绿 · 工具级精密质感
 //   - 外骨骼容器：固定圆角 14px + 四边同一条中性发丝线（--hairline-frame，底边不做单独覆盖）
 //     + 单层中性双层立体影（近层贴边 3px / 远层铺开 28px，无荧光泛光、无墨绿脏边）
@@ -54,7 +55,15 @@ const SETTINGS_KEY = 'patchouli.panel-settings';
 const THEME_KEY = 'patchouli-theme';
 const VIEW_KEY = 'patchouli-view-mode';
 const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
-const ROUTE_KEYS = ['0848oh', 'patchouli'];
+/* 路由前缀：console 的插件页统一挂在 /plugins 下（hash 路由也算）。只看前缀，不认实例 id：
+   实例 id 由宿主的 addEntry 生成，换实例、改配置页路径都可能变，硬编码它等于给某些实例断掉唯一入口。 */
+const ROUTE_PREFIX = '/plugins';
+/* 软校验：只在「要不要自动展开面板」上起作用，绝不参与挂载判定。命中失败最多少一次自动展开，
+   命中失败却阻止挂载才会让整个插件没有 UI。 */
+const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
+/* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
+   面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
+const IDENTITY_PROBE_TICKS = 8;
 const ROOT_ID = 'patchouli-organic-root';
 const STYLE_ID = 'patchouli-organic-style';
 const PREFIX = 'ptxClient';
@@ -710,6 +719,92 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
     letter-spacing: 0.01em;
     color: var(--bio-ink-4);
   }
+
+  /* 运行时参数：枚举下拉 / 文本字段 / 分组底部「其余参数」折叠 / 行内保存回执 */
+  #patchouli-organic-root .ptx-input.ptx-settings-select {
+    width: auto;
+    min-width: 128px;
+    height: 30px;
+    padding: 0 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  #patchouli-organic-root .ptx-input.ptx-settings-text {
+    width: 190px;
+    height: 30px;
+    padding: 0 9px;
+    font-size: 12.5px;
+  }
+  #patchouli-organic-root .ptx-cfg-fold { margin-top: 10px; }
+  #patchouli-organic-root .ptx-cfg-fold > summary {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 11px;
+    border: 1px dashed var(--hairline);
+    border-radius: var(--r-card);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--bio-ink-3);
+    cursor: pointer;
+    list-style: none;
+  }
+  #patchouli-organic-root .ptx-cfg-fold > summary::-webkit-details-marker { display: none; }
+  /* 折叠箭头：复用分区标题的 13px 尺寸，展开时顺时针转 90° */
+  #patchouli-organic-root .ptx-cfg-fold-arrow {
+    display: inline-flex;
+    flex: none;
+    color: var(--bio-ink-4);
+    transition: transform 0.16s var(--ease-organic), color 0.16s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-cfg-fold-arrow svg { display: block; }
+  #patchouli-organic-root .ptx-cfg-fold[open] > summary .ptx-cfg-fold-arrow { transform: rotate(90deg); }
+  #patchouli-organic-root .ptx-cfg-fold-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 计数徽标：等宽小号弱色，与标题之间由 gap 留白 */
+  #patchouli-organic-root .ptx-cfg-fold-count {
+    margin-left: auto;
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    line-height: 1;
+    letter-spacing: 0.01em;
+    color: var(--bio-ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+  #patchouli-organic-root .ptx-cfg-fold > summary:hover { color: var(--bio-primary-strong); border-color: rgba(14, 164, 79, 0.32); }
+  #patchouli-organic-root .ptx-cfg-fold > summary:hover .ptx-cfg-fold-arrow { color: var(--bio-primary-strong); }
+  #patchouli-organic-root .ptx-cfg-fold[open] > summary { margin-bottom: 8px; }
+  #patchouli-organic-root .ptx-cfg-foldbody > .ptx-settings-row + .ptx-settings-row { margin-top: 8px; }
+  /* 控件位：行内回执贴在控件左侧空白处，绝对定位不参与布局，保存时其它行不位移 */
+  #patchouli-organic-root .ptx-settings-ctl {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: none;
+  }
+  #patchouli-organic-root .ptx-cfg-row-msg {
+    position: absolute;
+    right: calc(100% + 10px);
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 1px 4px;
+    border-radius: var(--r-tag);
+    background: var(--surface);
+    font-family: var(--bio-mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--bio-primary-strong);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.28s var(--ease-organic);
+  }
+  #patchouli-organic-root .ptx-cfg-row-msg.is-visible { opacity: 1; }
+  #patchouli-organic-root .ptx-cfg-row-msg.is-error { color: var(--bio-danger); }
 
   /* 知识库维护：危险操作独立成卡，柔和朱红发丝线，二次确认就地展开 */
   #patchouli-organic-root .ptx-maint {
@@ -2638,7 +2733,9 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   #patchouli-organic-root.ptx-hidden { display: none; }
   #patchouli-organic-root .ptx-window,
   #patchouli-organic-root .ptx-pill,
-  #patchouli-organic-root .ptx-toast { pointer-events: auto; }`;
+  #patchouli-organic-root .ptx-toast { pointer-events: auto; }
+
+`;
 
 /* ------------------------------------------------------------------ *
  * 5. 状态与 DOM 引用
@@ -2890,8 +2987,9 @@ const state = {
   folds: {},
   /* 系统提示词：服务端真值，进入设置页时拉取；data 为 null 表示尚未读取 */
   prompt: { data: null, error: '' },
-  /* 主题校准参数：与提示词同属服务端真值，进入设置页时一并拉取 */
-  topicSettings: { data: null, error: '' },
+  /* 运行时设置（触发算法 / 主题校准 / 素材池与长图 / 本地裁判）：
+     服务端真值 + meta 字段表，进入设置页时拉取；sections 保存合并后的段值 */
+  runtimeSettings: { sections: null, meta: [], error: '', loading: false, seq: {}, draftMode: '' },
   /* 出图选项（服务端持久化）：maskNames=false 时按原昵称出图。 */
   cardSettings: { settings: { maskNames: true }, error: '' },
 };
@@ -2949,70 +3047,193 @@ function renderSection(title, inner) {
   return `<div class="ptx-sec"><div class="ptx-sec-h">${escapeHtml(title)}</div>${inner}</div>`;
 }
 
-/* 触发器引擎：模式选择 + 按模式分组的参数组。
- * 选择的草稿保存在 engineDraft（不即写服务端），点「保存并校准」才随其余参数一起
- * POST /api/tune；服务端 resolveOptions 会把 triggerMode 同步成新值并迁移基线。
- * 三档共用：突发倍率 / 平息等待 / 沉淀下限；rate 组追加 minBurstRate，
- * potential 组追加 thetaMin/rhoMin/densityMultiplier/peakCoolFraction/dispatchMargin，
- * shadow 两组并列 + potentialAutoTuning（双判据同步调参，影子期才能公平对照）。 */
-let engineDraft = null;
-/* 未保存的 tune 数值草稿（模式切换重渲染的存活载体）：键 = data-role。 */
-let tuneDraft = {};
-/* 双判据同步调参开关草稿：null=未拨动（服务端为准），true/false=用户目标态。 */
-let autotuneDraft = null;
+/* ---------------- 运行时设置（服务端真值，/api/settings） ----------------
+ * 字段清单完全由服务端 `meta` 驱动：这里只声明分组归属与「常显」键，
+ * 其余字段自动落进分组底部「其余参数」折叠——服务端新增字段不需要改前端。
+ * 保存是单字段补丁（POST {section, patch}），成功后行内回写「已保存」；
+ * 失败整行回滚到服务端现值并就地显示原因，不弹窗、不 toast。 */
+const RUNTIME_GROUPS = [
+  { id: 'trigger', title: '触发算法', sections: ['trigger'], primary: ['triggerMode', 'windowSizeSeconds', 'burstMultiplier', 'minBurstRate', 'quiescenceSeconds', 'coolingRatioThreshold', 'thetaMin', 'rhoMin', 'densityMultiplier', 'peakCoolFraction', 'dispatchMargin'] },
+  { id: 'topics', title: '主题校准', sections: ['topics'], primary: ['enabled', 'hour', 'minute', 'mergeThreshold', 'minEntries', 'lookbackDays'] },
+  { id: 'media', title: '素材池与长图', sections: ['media', 'query'], primary: ['offline', 'lowWater', 'batch', 'cooldownHours', 'cardMaxHeight'] },
+  { id: 'judge', title: '本地裁判服务', sections: ['judge'], primary: ['enabled', 'baseURL', 'model', 'timeoutMs'] },
+];
+/* 枚举显示别名：只改文案，不改提交值；未收录的值原样显示。 */
+const RUNTIME_OPTION_LABELS = { triggerMode: { potential: '势能', rate: '速率' } };
+/* 凭据类字段以密码框呈现（键名判定，不是字段白名单） */
+const RUNTIME_SECRET_KEY = /(?:apikey|token|secret)/i;
 
-function engineModeFrom(options) {
-  const raw = options && options.triggerMode;
-  return raw === 'potential' || raw === 'shadow' ? raw : 'rate';
+function runtimeMeta(section, key) {
+  for (const item of state.runtimeSettings.meta) {
+    if (item && item.section === section && item.key === key) return item;
+  }
+  return null;
 }
 
-function renderEngineSettings(tuneOptions) {
-  const mode = engineDraft || engineModeFrom(tuneOptions);
-  const current = engineModeFrom(tuneOptions);
-  const modeBtn = (value, label, desc) =>
-    `<button type="button" class="ptx-view-btn is-text${mode === value ? ' is-active' : ''}"` +
-    ` data-act="engine-mode" data-mode="${value}" aria-pressed="${mode === value ? 'true' : 'false'}"` +
-    ` ${tip(desc)} aria-label="${label}">${label}</button>`;
-  const field = (role, label, min, max, step, value, aria) =>
-    `<label class="ptx-settings-row">` +
-      `<span class="ptx-settings-label">${label}<em>${aria}</em></span>` +
-      `<input class="ptx-input ptx-settings-num" data-role="${role}" type="number"` +
-      ` min="${min}"${max === undefined ? '' : ` max="${max}"`} step="${step}" value="${value}" aria-label="${label}">` +
-    `</label>`;
-  const group = (label, inner) => `<div class="ptx-settings-note">${label}</div>${inner}`;
-  const common =
-    field('tune-burst', '突发倍率', 1, undefined, 0.1, num(tuneOptions.burstMultiplier, 2.5), '瞬时速率超过日常基线的倍数即判定为突发，下限 1。') +
-    field('tune-quiet', '平息等待', 30, undefined, 30, num(tuneOptions.quiescenceSeconds, 300), '突发结束后静默多久才回到常态判定，单位秒。') +
-    field('tune-min-messages', '沉淀下限', 6, 16, 1, num(tuneOptions.minDiscussionMessages, 12), '一轮讨论至少多少条消息才交给模型，硬限幅 6–16。');
-  const rateGroup =
-    field('tune-min-rate', '突发速底', 0, undefined, 0.5, num(tuneOptions.minBurstRate, 6), '速率判据的最低门槛（条/分），AIMD 会围绕它自动收紧/放宽。');
-  const potGroup =
-    field('tune-theta', '势能门限 Θ', 1, undefined, 1, num(tuneOptions.thetaMin, 20), '有效讨论势能 Q 的触发下限（nat），0.8.31 起线上校准值为 28。') +
-    field('tune-rho', '密度下限 ρ', 0, undefined, 0.1, num(tuneOptions.rhoMin, 1.2), '每条消息的信息密度下限（nat/条），ADR-021 后只做物理拦截。') +
-    field('tune-density-mult', '密度倍率', 0, 100, 0.1, num(tuneOptions.densityMultiplier, 1), 'ρ_eff = max(ρ_min, 倍率 × b_ρ)：0=只用固定下限，1=随本群量级浮动。') +
-    field('tune-peak-cool', '峰值冷却', 0, 1, 0.05, num(tuneOptions.peakCoolFraction, 0.5), 'Θ_cool 抬到 max(基线, 峰值×比例)，封顶 Θ_burst×0.99；0=纯基线口径。') +
-    field('tune-dispatch-margin', '质量门倍率', 0, 10, 0.1, num(tuneOptions.dispatchMargin, 0), '结算后 peakQ < Θ_burst×倍率 直接跳过云端调度；0=关闭（推荐 1.3）。');
-  const autoTuneRow =
-    `<div class="ptx-settings-row">` +
-      `<span class="ptx-settings-label">双判据同步调参<em>shadow 对照期两引擎共用同一 AIMD；关闭则势能侧只吃时间衰减，比较天然被让子。</em></span>` +
-      `<button class="ptx-switch${(autotuneDraft !== null ? autotuneDraft : tuneOptions.potentialAutoTuning === true) ? ' is-on' : ''}" data-act="toggle-engine-autotune" role="switch"` +
-      ` aria-checked="${tuneOptions.potentialAutoTuning === true ? 'true' : 'false'}" aria-label="双判据同步调参"></button>` +
-    `</div>`;
-  return `<div class="ptx-settings-note">当前生效：${current === 'rate' ? '速率引擎' : current === 'potential' ? '势能引擎' : '影子对照（rate 裁决 + 势能观测）'}` +
-    `${engineDraft && engineDraft !== current ? ` · 待保存：切换到「${engineDraft === 'potential' ? '势能' : engineDraft === 'shadow' ? '影子' : '速率'}」` : ''}</div>` +
-    `<div class="ptx-view-mode" role="group" aria-label="触发器引擎">` +
-    modeBtn('rate', '速率', '旧引擎：按消息速率与基线裁决，稳定但语义盲。') +
-    modeBtn('potential', '势能', '新引擎：按消息信息量与密度的势能裁决，θ_min=28 已校准。') +
-    modeBtn('shadow', '影子', 'rate 照常裁决 + 势能并行只观测：切换前的对照期。') +
-    `</div>` +
-    group('通用参数', common) +
-    (mode === 'rate' ? group('速率判据', rateGroup) : '') +
-    (mode === 'potential' ? group('势能判据', potGroup) : '') +
-    (mode === 'shadow' ? group('速率判据（裁决方）', rateGroup) + group('势能判据（观测方）', potGroup) + autoTuneRow : '') +
-    `<div class="ptx-settings-row">` +
-      `<span class="ptx-settings-label">保存校准<em>按当前群聊即时热生效（含引擎切换），不重启服务，也不改动已沉淀的词条。</em></span>` +
-      `<button class="ptx-btn is-primary" data-act="tune" type="button">${organicIcon('check', 13)}<span>保存并校准</span></button>` +
-    `</div>`;
+function runtimeValue(section, key) {
+  const bag = state.runtimeSettings.sections && state.runtimeSettings.sections[section];
+  return bag && typeof bag === 'object' ? bag[key] : undefined;
+}
+
+/* 判据模式：只有 trigger 段按 triggerMode 分流；未知值不过滤（宁可全显示，也不吞字段）。
+ * draftMode 是切换模式后、保存回执到达前的本地预览值：重渲染只用本地 sections，
+ * 不重新 GET。 */
+function runtimeMode() {
+  const draft = state.runtimeSettings.draftMode;
+  if (draft === 'potential' || draft === 'rate') return draft;
+  const value = runtimeValue('trigger', 'triggerMode');
+  return value === 'potential' || value === 'rate' ? value : '';
+}
+
+/* 字段的模式白名单：不写 modes = 两种判据都显示；空数组 = 两种模式都不适用（shadow 观测字段）。 */
+function runtimeFieldModes(meta) {
+  return Array.isArray(meta && meta.modes) ? meta.modes.map(String) : null;
+}
+
+/* 控件显示值：判据模式切换后、保存回执到达前，下拉先显示本地选择 */
+function runtimeDisplayValue(meta) {
+  const draft = state.runtimeSettings.draftMode;
+  if (String(meta.section) === 'trigger' && String(meta.key) === 'triggerMode' &&
+      (draft === 'potential' || draft === 'rate')) return draft;
+  return runtimeValue(String(meta.section), String(meta.key));
+}
+
+/* 范围提示只放上下限，单位已在 label 里，控制在一行内 */
+function runtimeHint(meta) {
+  if (meta.type !== 'number') return '';
+  const min = typeof meta.min === 'number' ? meta.min : null;
+  const max = typeof meta.max === 'number' ? meta.max : null;
+  if (min === null && max === null) return '';
+  return `${min === null ? '' : min}–${max === null ? '' : max}`;
+}
+
+function runtimeTextControl(meta, value, attrs, aria) {
+  const type = RUNTIME_SECRET_KEY.test(String(meta.key)) ? 'password' : 'text';
+  return `<input class="ptx-input ptx-settings-text" type="${type}"${attrs} autocomplete="off" spellcheck="false"` +
+    ` value="${escapeHtml(value == null ? '' : String(value))}"${aria}>`;
+}
+
+function runtimeControl(meta) {
+  const section = String(meta.section);
+  const key = String(meta.key);
+  const value = runtimeDisplayValue(meta);
+  const attrs = ` data-cfg-section="${escapeHtml(section)}" data-cfg-key="${escapeHtml(key)}" data-cfg-type="${escapeHtml(String(meta.type || 'string'))}"`;
+  const aria = ` aria-label="${escapeHtml(String(meta.label || key))}"`;
+  if (meta.type === 'boolean') {
+    const on = value === true;
+    return `<button type="button" class="ptx-switch${on ? ' is-on' : ''}" data-cfg-toggle="1"${attrs}` +
+      ` role="switch" aria-checked="${on ? 'true' : 'false'}"${aria}></button>`;
+  }
+  if (meta.type === 'enum') {
+    const options = Array.isArray(meta.options) ? meta.options.map((item) => String(item)) : [];
+    if (!options.length) return runtimeTextControl(meta, value, attrs, aria);
+    const alias = RUNTIME_OPTION_LABELS[key] || {};
+    const current = value == null ? options[0] : String(value);
+    const body = options.map((option) =>
+      `<option value="${escapeHtml(option)}"${option === current ? ' selected' : ''}>${escapeHtml(alias[option] || option)}</option>`).join('');
+    return `<select class="ptx-input ptx-settings-select"${attrs}${aria}>${body}</select>`;
+  }
+  if (meta.type === 'number') {
+    const step = typeof meta.step === 'number' && meta.step > 0 ? meta.step : 'any';
+    return `<input class="ptx-input ptx-settings-num" type="number"${attrs}` +
+      `${typeof meta.min === 'number' ? ` min="${meta.min}"` : ''}` +
+      `${typeof meta.max === 'number' ? ` max="${meta.max}"` : ''} step="${step}"` +
+      ` value="${escapeHtml(value == null ? '' : String(value))}"${aria}>`;
+  }
+  return runtimeTextControl(meta, value, attrs, aria);
+}
+
+function runtimeRow(meta) {
+  const label = String(meta.label || meta.key || '');
+  const hint = runtimeHint(meta);
+  const rowKey = `${String(meta.section)}.${String(meta.key)}`;
+  return `<div class="ptx-settings-row" data-cfg-row="${escapeHtml(rowKey)}">` +
+    `<span class="ptx-settings-label">${escapeHtml(label)}${hint ? `<em>${escapeHtml(hint)}</em>` : ''}</span>` +
+    `<span class="ptx-settings-ctl"><span class="ptx-cfg-row-msg" role="status" aria-live="polite"></span>` +
+      runtimeControl(meta) +
+    `</span>` +
+  `</div>`;
+}
+
+/* 折叠块：箭头 + 标题 + 计数徽标；开合态沿用 state.folds 的同一条记忆路径 */
+function runtimeFold(foldId, title, entries) {
+  return `<details class="ptx-cfg-fold" data-fold="${foldId}"${state.folds[foldId] === true ? ' open' : ''}>` +
+    `<summary><span class="ptx-cfg-fold-arrow">${organicIcon('chevron', 13)}</span>` +
+      `<span class="ptx-cfg-fold-title">${escapeHtml(title)}</span>` +
+      `<span class="ptx-cfg-fold-count">${entries.length}</span></summary>` +
+    `<div class="ptx-cfg-foldbody">${entries.map(runtimeRow).join('')}</div>` +
+  `</details>`;
+}
+
+/* 一个分区的行体：常显行 + 「其余参数」折叠（外层分区由 renderRuntimeGroup 包）
+ * 常显行的顺序跟 primary 声明走（判据模式在最前），其余字段保持服务端 meta 顺序。
+ * trigger 段按当前 triggerMode 过滤：不属于当前判据的字段直接不渲染、不计数，
+ * 也不做第二种折叠；不写 modes 的字段两种模式都出现在常显组。
+ * modes 为空数组的字段两种模式都不适用（仅 shadow 观测生效），同样不渲染。 */
+function renderRuntimeGroupBody(group) {
+  const entries = state.runtimeSettings.meta.filter((item) => item && group.sections.includes(item.section));
+  if (!entries.length) return '';
+  const mode = group.id === 'trigger' ? runtimeMode() : '';
+  const visible = [];
+  for (const entry of entries) {
+    const modes = group.id === 'trigger' ? runtimeFieldModes(entry) : null;
+    if (modes && (mode ? !modes.includes(mode) : modes.length === 0)) continue;
+    visible.push(entry);
+  }
+  const primary = [];
+  const rest = [];
+  for (const key of group.primary) {
+    const entry = visible.find((item) => String(item.key) === String(key));
+    if (entry) primary.push(entry);
+  }
+  for (const entry of visible) {
+    if (!primary.includes(entry)) rest.push(entry);
+  }
+  const rows = primary.length ? primary.map(runtimeRow).join('') : `<div class="ptx-settings-note">本分区暂无可调项</div>`;
+  const fold = rest.length ? runtimeFold(`cfg-${group.id}`, '其余参数', rest) : '';
+  return `${rows}${fold}`;
+}
+
+function renderRuntimeGroup(group) {
+  const body = renderRuntimeGroupBody(group);
+  if (!body) return '';
+  /* 组内容装进稳定容器：判据模式切换只替换这一块，设置页其它 DOM 与滚动不动 */
+  return renderSection(group.title, `<div data-cfg-group="${escapeHtml(group.id)}">${body}</div>`);
+}
+
+/* 单组局部刷新：切换判据模式后只重排该组的字段，不重绘整个设置页 */
+function refreshRuntimeGroup(groupId) {
+  if (!viewportEl) return;
+  const group = RUNTIME_GROUPS.find((item) => item.id === groupId);
+  const holder = group ? viewportEl.querySelector(`[data-cfg-group="${groupId}"]`) : null;
+  if (!holder) return;
+  holder.innerHTML = renderRuntimeGroupBody(group);
+}
+
+function renderRuntimeSettings() {
+  const runtime = state.runtimeSettings;
+  if (runtime.error) {
+    return renderSection('运行时参数',
+      `<div class="ptx-settings-note">读取失败：${escapeHtml(runtime.error)}</div>` +
+      `<div class="ptx-settings-row"><span class="ptx-settings-label">服务端设置</span>` +
+      `<button class="ptx-btn" data-act="reload-runtime" type="button">重新读取</button></div>`);
+  }
+  if (!runtime.meta.length) {
+    return renderSection('运行时参数',
+      `<div class="ptx-settings-note">${runtime.loading ? '正在读取运行时设置…' : '服务端未返回可调字段'}</div>`);
+  }
+  const known = new Set();
+  for (const group of RUNTIME_GROUPS) for (const section of group.sections) known.add(section);
+  const extraSections = [];
+  for (const item of runtime.meta) {
+    if (item && !known.has(item.section) && !extraSections.includes(item.section)) extraSections.push(item.section);
+  }
+  const groups = RUNTIME_GROUPS.map(renderRuntimeGroup).join('');
+  /* 服务端新增的段不得静默消失：兜底成「其他参数」，正常配置下不会出现 */
+  const extra = extraSections.length
+    ? renderRuntimeGroup({ id: 'extra', title: '其他参数', sections: extraSections, primary: runtime.meta.filter((item) => item && extraSections.includes(item.section)).map((item) => String(item.key)) })
+    : '';
+  return groups + extra;
 }
 
 function renderBullets(items, fallback) {
@@ -3287,24 +3508,165 @@ function loadPrompt() {
     });
 }
 
-function loadTopicSettings() {
-  return requestJson(`${API_BASE}/api/topics/settings`)
+/* ---------------- 运行时设置读写（/api/settings） ----------------
+ * 读：一次拿到合并后的五段值与字段表；字段表决定渲染，段值决定初值。
+ * 写：单字段补丁；服务端回写整段合并值，直接作为该段新真值，不做二次读文件。 */
+function loadRuntimeSettings() {
+  state.runtimeSettings.loading = true;
+  return requestJson(`${API_BASE}/api/settings`)
     .then((data) => {
-      if (data && typeof data === 'object') state.topicSettings.data = data;
-      state.topicSettings.error = '';
-      if (state.stage === 'settings') renderStage();
+      const payload = data && typeof data === 'object' ? data : {};
+      state.runtimeSettings.sections = payload.sections && typeof payload.sections === 'object' ? payload.sections : {};
+      state.runtimeSettings.meta = Array.isArray(payload.meta) ? payload.meta : [];
+      state.runtimeSettings.draftMode = '';
+      state.runtimeSettings.error = '';
     }, (err) => {
-      state.topicSettings.error = err && err.message ? err.message : '未知错误';
+      state.runtimeSettings.error = err && err.message ? err.message : '未知错误';
+    })
+    .then(() => {
+      state.runtimeSettings.loading = false;
       if (state.stage === 'settings') renderStage();
     });
 }
 
-function postTopicSettings(payload) {
-  return requestJson(`${API_BASE}/api/topics/settings`, {
+/* 失败要显示服务端给的原因（HTTP 400 的 body），因此不用只抛出状态码的 requestJson */
+function postRuntimeSettings(section, patch) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetch(`${API_BASE}/api/settings`, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ section, patch }),
+    signal: controller.signal,
+  }).then((res) => {
+    clearTimeout(timer);
+    return res.json().catch(() => null).then((data) => {
+      if (!res.ok || (data && data.ok === false)) {
+        throw new Error(data && data.error ? String(data.error) : `HTTP ${res.status}`);
+      }
+      return data;
+    });
+  }, (err) => {
+    clearTimeout(timer);
+    throw err;
   });
+}
+
+/* 服务端值写回控件：保存后归一化与失败回滚共用同一条路径 */
+function applyRuntimeField(node, meta, value) {
+  if (!node) return;
+  if (meta.type === 'boolean') {
+    const on = value === true;
+    node.classList.toggle('is-on', on);
+    node.setAttribute('aria-checked', on ? 'true' : 'false');
+    return;
+  }
+  node.value = value == null ? '' : String(value);
+}
+
+/* 行内回执：保持在 2 秒后淡出（与 CSS 的 0.28s 过渡配套），只写目标行的提示节点 */
+const CFG_NOTICE_HOLD_MS = 2000;
+const CFG_NOTICE_FADE_MS = 300;
+const cfgNoticeTimers = new WeakMap();
+
+function runtimeRowNotice(rowKey, text, isError) {
+  if (!viewportEl) return;
+  const row = viewportEl.querySelector(`[data-cfg-row="${rowKey}"]`);
+  const node = row ? row.querySelector('.ptx-cfg-row-msg') : null;
+  if (!node) return;
+  const timers = cfgNoticeTimers.get(node);
+  if (timers) {
+    clearTimeout(timers.hold);
+    clearTimeout(timers.clear);
+    cfgNoticeTimers.delete(node);
+  }
+  if (!text) {
+    node.textContent = '';
+    node.classList.remove('is-visible');
+    node.classList.remove('is-error');
+    return;
+  }
+  node.textContent = text;
+  node.classList.toggle('is-error', Boolean(isError));
+  node.classList.add('is-visible');
+  const hold = setTimeout(() => {
+    node.classList.remove('is-visible');
+    const clear = setTimeout(() => {
+      cfgNoticeTimers.delete(node);
+      node.textContent = '';
+    }, CFG_NOTICE_FADE_MS);
+    cfgNoticeTimers.set(node, { hold: 0, clear });
+  }, CFG_NOTICE_HOLD_MS);
+  cfgNoticeTimers.set(node, { hold, clear: 0 });
+}
+
+/* 单字段保存：只提交动过的那一个键；成功只回写该行，绝不重绘设置页。
+ * 同字段连点时只有最后一次响应能改 UI（seq 令牌），不同字段互不打断。 */
+function saveRuntimeField(node) {
+  const section = node ? node.getAttribute('data-cfg-section') : '';
+  const key = node ? node.getAttribute('data-cfg-key') : '';
+  const meta = section && key ? runtimeMeta(section, key) : null;
+  if (!meta) return Promise.resolve();
+  const rowKey = `${section}.${key}`;
+  const modeSwitch = section === 'trigger' && key === 'triggerMode';
+  const before = runtimeValue(section, key);
+  let next;
+  if (meta.type === 'boolean') next = node.classList.contains('is-on');
+  else if (meta.type === 'number') {
+    /* 空框不等于 0：直接回滚并提示，避免把「没填」静默写成某个值 */
+    const raw = String(node.value == null ? '' : node.value).trim();
+    const parsed = raw === '' ? NaN : Number(raw);
+    if (!Number.isFinite(parsed)) {
+      applyRuntimeField(node, meta, before);
+      runtimeRowNotice(rowKey, '请输入有效数字', true);
+      return Promise.resolve();
+    }
+    next = parsed;
+  } else next = String(node.value == null ? '' : node.value);
+  if (next === before) {
+    if (modeSwitch) state.runtimeSettings.draftMode = '';
+    runtimeRowNotice(rowKey, '', false);
+    return Promise.resolve();
+  }
+  const tokenKey = section + '/' + key;
+  const token = (state.runtimeSettings.seq[tokenKey] || 0) + 1;
+  state.runtimeSettings.seq[tokenKey] = token;
+  runtimeRowNotice(rowKey, '保存中…', false);
+  return postRuntimeSettings(section, { [key]: next })
+    .then((data) => {
+      if (state.runtimeSettings.seq[tokenKey] !== token) return;
+      const value = data && data.value && typeof data.value === 'object' ? data.value : null;
+      /* 只并入本次写入的键：同段其它字段的并发响应可能更旧，整段覆盖会把它冲掉 */
+      if (value) {
+        const sections = state.runtimeSettings.sections || {};
+        sections[section] = Object.assign({}, sections[section], {
+          [key]: Object.prototype.hasOwnProperty.call(value, key) ? value[key] : next,
+        });
+        state.runtimeSettings.sections = sections;
+      }
+      if (modeSwitch) {
+        /* 判据模式决定可见字段集：只替换 trigger 组容器（用本地 sections 重算，不重新 GET） */
+        state.runtimeSettings.draftMode = '';
+        refreshRuntimeGroup('trigger');
+        runtimeRowNotice(rowKey, '已保存', false);
+        return;
+      }
+      applyRuntimeField(node, meta, runtimeValue(section, key));
+      runtimeRowNotice(rowKey, '已保存', false);
+    }, (err) => {
+      if (state.runtimeSettings.seq[tokenKey] !== token) return;
+      const reason = `保存失败：${err && err.message ? err.message : '未知错误'}`;
+      if (modeSwitch) {
+        /* 保存失败：丢弃预览，按服务端现值重排 trigger 组，控件与字段集一起回滚 */
+        state.runtimeSettings.draftMode = '';
+        refreshRuntimeGroup('trigger');
+        runtimeRowNotice(rowKey, reason, true);
+        return;
+      }
+      applyRuntimeField(node, meta, before);
+      runtimeRowNotice(rowKey, reason, true);
+    });
 }
 
 function loadCardSettings() {
@@ -3337,30 +3699,6 @@ function toggleCardMask(node) {
       toast(on ? '图片匿名化已开启' : '图片匿名化已关闭：图片将按原昵称输出');
     }, (err) => {
       toast(`图片匿名化切换失败：${err && err.message ? err.message : '未知错误'}`);
-    });
-}
-
-/* 主题校准：读当前设置页输入 → POST 直传 settings 对象 → 回写服务端真值并重绘 */
-function saveTopicSettings() {
-  const read = (role, fallback) => {
-    const el = viewportEl ? viewportEl.querySelector(`[data-role="${role}"]`) : null;
-    const value = el ? Number(el.value) : NaN;
-    return Number.isFinite(value) ? value : fallback;
-  };
-  const payload = {
-    enabled: !(state.topicSettings.data && state.topicSettings.data.settings && state.topicSettings.data.settings.enabled === false),
-    lookbackDays: read('topic-lookback', 30),
-    mergeThreshold: read('topic-threshold', 0.5),
-    minEntries: read('topic-min-entries', 1),
-  };
-  return postTopicSettings(payload)
-    .then(() => loadTopicSettings())
-    .then(() => {
-      toast('主题校准参数已保存并热生效');
-      renderStage();
-    })
-    .catch((err) => {
-      toast(`主题校准参数保存失败：${err && err.message ? err.message : '未知错误'}`);
     });
 }
 
@@ -3453,20 +3791,14 @@ function resetPrompt() {
 }
 
 /* 设置页（侧栏底部齿轮，与两个核心页签平级）
- * 只放面板自身的配置：自动收纳开关、词条索引视图模式、底栏轮播条数与间隔；
- * 触发器门限（突发倍率 / 平息等待）也从监控页收进这里——它们是配置而非观测，
- * 放在仪表盘上会让监控页既是读数区又是调参区。数据刷新只有底栏核心按钮一个入口。
+ * 本机偏好（自动收纳 / 索引视图 / 底栏轮播）存浏览器，运行时参数
+ * （触发算法 / 主题校准 / 素材池与长图 / 本地裁判）存服务端 .patchouli/settings.json，
+ * 逐字段保存并即时热生效，不重启服务。数据刷新只有底栏核心按钮一个入口。
  * 设置整块替换视窗内容，底栏轮播与状态轮询照常运行，绝不影响轮播节奏。 */
 function renderSettings() {
   const settings = state.settings;
-  /* 门限当前值取服务端最近一次状态快照；群聊切换后 loadStatus 会带回该群自己的值，
-     保存走同一个 POST /api/tune，硬限幅仍由服务端夹紧。 */
-  const tuneOptions = (state.status && state.status.options) || {};
-  const topicData = (state.topicSettings.data && state.topicSettings.data.settings) || {};
-  const topicLast = state.topicSettings.data && state.topicSettings.data.lastRun;
-  const topicDispatch = (state.topicSettings.data && state.topicSettings.data.dispatcher) || {};
   const cardMask = state.cardSettings.settings.maskNames !== false;
-  return renderHead('参数设置', '本机设置 · 服务端门限') +
+  return renderHead('参数设置', '本机偏好 · 运行时覆盖') +
     `<div class="ptx-settings-page">` +
       `<div class="ptx-settings-shell"><nav class="ptx-settings-outline" aria-label="设置大纲"></nav><div class="ptx-settings-main">` +
       renderSection('面板行为',
@@ -3493,32 +3825,7 @@ function renderSettings() {
           `<span class="ptx-settings-label">轮播间隔<em>每条轮播停留的秒数，取值 ${TICKER_INTERVAL_MIN} – ${TICKER_INTERVAL_MAX}。</em></span>` +
           `<input class="ptx-input ptx-settings-num" data-role="ticker-interval" type="number" min="${TICKER_INTERVAL_MIN}" max="${TICKER_INTERVAL_MAX}" step="1" value="${settings.tickerInterval}" aria-label="轮播间隔（秒）">` +
         `</label>`) +
-      renderSection('触发器引擎', renderEngineSettings(tuneOptions)) +
-      renderSection('主题校准',
-        `<div class="ptx-settings-note">跨时间聚合的运行时旋钮；保存后立即作用于下一轮校准，与 Console 的部署配置分开存放。</div>` +
-        `<div class="ptx-settings-row">` +
-          `<span class="ptx-settings-label">每日校准<em>固定 04:00 触发；关闭后不再自动归并。</em></span>` +
-          `<button class="ptx-switch${topicData.enabled === false ? '' : ' is-on'}" data-action="toggle-topic-enabled" role="switch" aria-checked="${topicData.enabled === false ? 'false' : 'true'}" aria-label="每日主题校准"></button>` +
-        `</div>` +
-        `<label class="ptx-settings-row">` +
-          `<span class="ptx-settings-label">回看天数<em>只扫描最近 N 天内尚未归入主题的词条，1–90。</em></span>` +
-          `<input class="ptx-input ptx-settings-num" data-role="topic-lookback" type="number" min="1" max="90" step="1" value="${num(topicData.lookbackDays, 30)}" aria-label="回看天数">` +
-        `</label>` +
-        `<label class="ptx-settings-row">` +
-          `<span class="ptx-settings-label">聚类门限<em>标签 Jaccard 达到该值才进入候选组，0–1。</em></span>` +
-          `<input class="ptx-input ptx-settings-num" data-role="topic-threshold" type="number" min="0" max="1" step="0.05" value="${num(topicData.mergeThreshold, 0.5)}" aria-label="聚类门限">` +
-        `</label>` +
-        `<label class="ptx-settings-row">` +
-          `<span class="ptx-settings-label">最少词条<em>窗口内可归入词条少于此数则跳过本轮，1–50。</em></span>` +
-          `<input class="ptx-input ptx-settings-num" data-role="topic-min-entries" type="number" min="1" max="50" step="1" value="${num(topicData.minEntries, 1)}" aria-label="最少词条">` +
-        `</label>` +
-        `<div class="ptx-settings-row">` +
-          `<span class="ptx-settings-label">只读状态<em>` +
-            `${escapeHtml(String(topicDispatch.provider || '—'))} · ${escapeHtml(String(topicDispatch.protocol || '—'))} · ${escapeHtml(String(topicDispatch.model || '—'))}` +
-            `${topicLast ? ` · 上次创建 ${topicLast.createdTopicIds ? topicLast.createdTopicIds.length : 0} / 更新 ${topicLast.updatedTopicIds ? topicLast.updatedTopicIds.length : 0} / 归入 ${topicLast.assignedEntryIds ? topicLast.assignedEntryIds.length : 0}` : ' · 本次尚未校准'}` +
-          `</em></span>` +
-          `<button class="ptx-btn is-primary" data-action="save-topic-settings" type="button">${organicIcon('check', 13)}<span>保存主题参数</span></button>` +
-        `</div>`) +
+      renderRuntimeSettings() +
       renderSection('系统提示词',
         `<div class="ptx-editor">` +
           `<label class="ptx-editor-field">` +
@@ -3556,7 +3863,7 @@ function renderSettings() {
               `</div>`
             : `<button class="ptx-btn is-danger" data-action="clear-kb" type="button">${organicIcon('trash', 13)}<span>清空全部词条</span></button>`) +
         `</div>`) +
-      `<div class="ptx-settings-note">面板行为与轮播设置保存在本机浏览器，独立页与 Console 内嵌面板共用同一份配置；触发器门限按群聊保存在服务端并即时热生效；系统提示词保存在服务端 .patchouli/custom-prompt.txt，保存即热生效且重启不丢失。数据刷新统一收在底栏核心按钮。</div>` +
+      `<div class="ptx-settings-note">本机偏好存在浏览器；运行时参数存在服务端 .patchouli/settings.json 并即时热生效；提示词存在 .patchouli/custom-prompt.txt。</div>` +
       `</div></div></div>`;
 }
 
@@ -4627,10 +4934,6 @@ function pickChannel(value) {
   const next = value || 'all';
   closeChannelMenu(true);
   if (next === state.channel) return;
-  /* 引擎草稿按频道隔离：A 群没保存的切换选择绝不能随频道切到 B 群被误保存。 */
-  engineDraft = null;
-  tuneDraft = {};
-  autotuneDraft = null;
   state.channel = next;
   setChannelScope(next);
   renderChannelMenu();
@@ -5749,8 +6052,9 @@ function enterStage(next) {
   if (next !== 'settings') state.clearArmed = false;
   scheduleStatusPoll();
   resetIdleTimer();
+  /* 先发起读请求再渲染：首次进设置页时 loading 已置真，不会先闪一句“无字段” */
+  if (next === 'settings') { loadPrompt(); loadRuntimeSettings(); loadCardSettings(); }
   renderStage();
-  if (next === 'settings') { loadPrompt(); loadTopicSettings(); loadCardSettings(); }
 }
 
 function handleAction(action, node) {
@@ -5767,7 +6071,6 @@ function handleAction(action, node) {
   else if (action === 'reset-prompt') resetPrompt().then(() => resetIdleTimer());
   else if (action === 'save-topic-prompt') saveTopicPrompt().then(() => resetIdleTimer());
   else if (action === 'reset-topic-prompt') resetTopicPrompt().then(() => resetIdleTimer());
-  else if (action === 'save-topic-settings') saveTopicSettings().then(() => resetIdleTimer());
   else if (action === 'toggle-card-mask') toggleCardMask(node).then(() => resetIdleTimer());
   else if (action === 'toggle-section') {
     const target = node && node.getAttribute('data-target');
@@ -5782,92 +6085,6 @@ function handleAction(action, node) {
     const section = target && viewportEl ? viewportEl.querySelector(`[data-sec="${target}"]`) : null;
     if (section) section.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
-  else if (action === 'toggle-topic-enabled') {
-    const topic = state.topicSettings.data;
-    if (topic && topic.settings) topic.settings.enabled = topic.settings.enabled === false;
-    renderStage();
-  }
-}
-
-function snapshotTuneDraft() {
-  if (!viewportEl) return;
-  const fields = viewportEl.querySelectorAll('[data-role^="tune-"]');
-  for (const node of fields) {
-    const role = node.getAttribute('data-role');
-    if (role) tuneDraft[role] = node.value;
-  }
-}
-
-function tune(options) {
-  if (!viewportEl) return Promise.resolve();
-  /* 快照没到手就没有权威初值：此时输入框里只是渲染兜底值，直接提交会用兜底值
-     覆盖服务端真实门限，因此宁可拒绝也不猜。 */
-  if (!state.status) {
-    toast('尚未取得服务端门限，暂不能校准');
-    return Promise.resolve();
-  }
-  /* 引擎参数统一按 data-role → 服务端键收集；页面上没有的字段（模式切换后隐藏的分组）
-     一律跳过，服务端保留原值。只发当前渲染出的字段，切换模式不会把旧组覆盖回去。 */
-  const TUNE_FIELDS = {
-    'tune-burst': 'burstMultiplier',
-    'tune-quiet': 'quiescenceSeconds',
-    'tune-min-messages': 'minDiscussionMessages',
-    'tune-min-rate': 'minBurstRate',
-    'tune-theta': 'thetaMin',
-    'tune-rho': 'rhoMin',
-    'tune-density-mult': 'densityMultiplier',
-    'tune-peak-cool': 'peakCoolFraction',
-    'tune-dispatch-margin': 'dispatchMargin',
-  };
-  const tuned = {};
-  let invalid = false;
-  for (const role of Object.keys(TUNE_FIELDS)) {
-    const input = viewportEl.querySelector(`[data-role="${role}"]`);
-    if (!input && tuneDraft[role] === undefined) continue;
-    /* 草稿优先：模式切换重渲染后 DOM 里的是初值，另一模式下敲过的数以草稿为准。 */
-    const raw = tuneDraft[role] !== undefined ? tuneDraft[role] : input.value;
-    const value = Number(raw);
-    if (!Number.isFinite(value)) { invalid = true; break; }
-    tuned[TUNE_FIELDS[role]] = value;
-  }
-  if (invalid || Object.keys(tuned).length === 0) {
-    toast('参数格式无效');
-    return Promise.resolve();
-  }
-  /* 引擎切换：草稿模式随参数一起下发；没动过就不发（保持服务端现状）。 */
-  const tuneOptions = (state.status && state.status.options) || {};
-  const modeNow = tuneOptions.triggerMode === 'potential' || tuneOptions.triggerMode === 'shadow' ? tuneOptions.triggerMode : 'rate';
-  if (engineDraft && engineDraft !== modeNow) tuned.triggerMode = engineDraft;
-  /* 双判据同步调参开关只在 shadow 分组渲染，存在即收集。 */
-  if (autotuneDraft !== null) {
-    tuned.potentialAutoTuning = autotuneDraft;
-  } else {
-    const autoTune = viewportEl.querySelector('[data-act="toggle-engine-autotune"]');
-    if (autoTune) tuned.potentialAutoTuning = autoTune.classList.contains('is-on');
-  }
-  if (options && options.button) options.button.classList.add('is-busy');
-  return requestJson(`${API_BASE}/api/tune`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channelId: channelScopeId(), options: tuned }),
-  })
-    .then(() => {
-      engineDraft = null;
-      tuneDraft = {};
-      autotuneDraft = null;
-      return loadStatus();
-    })
-    .then(() => {
-      refreshPhase();
-      renderStage();
-      toast('触发器参数已校准');
-    })
-    .catch((err) => {
-      toast(`参数校准失败：${err && err.message ? err.message : '未知错误'}`);
-    })
-    .then(() => {
-      if (options && options.button) options.button.classList.remove('is-busy');
-    });
 }
 
 /* 唯一刷新入口：底栏核心按钮（data-act="refresh" 仅此一处）。
@@ -5888,11 +6105,19 @@ function bindActions() {
   if (!rootEl) return;
 
   rootEl.addEventListener('click', (event) => {
-    const node = event.target.closest ? event.target.closest('[data-act], [data-stage], [data-action]') : null;
+    const node = event.target.closest ? event.target.closest('[data-act], [data-stage], [data-action], [data-cfg-toggle]') : null;
     if (!node) return;
     const action = node.getAttribute('data-action');
     if (action) {
       handleAction(action, node);
+      return;
+    }
+    if (node.getAttribute('data-cfg-toggle')) {
+      /* 布尔开关：先翻转再落库，失败时由 saveRuntimeField 回滚到服务端现值 */
+      const on = !node.classList.contains('is-on');
+      node.classList.toggle('is-on', on);
+      node.setAttribute('aria-checked', on ? 'true' : 'false');
+      saveRuntimeField(node).then(() => resetIdleTimer());
       return;
     }
     const act = node.getAttribute('data-act');
@@ -5960,30 +6185,26 @@ function bindActions() {
       return;
     }
 
-    if (act === 'tune') {
-      tune({ button: node }).then(() => resetIdleTimer());
-      return;
-    }
-
-    if (act === 'engine-mode') {
-      engineDraft = node.getAttribute('data-mode');
-      snapshotTuneDraft();
-      renderStage();
-      return;
-    }
-
-    if (act === 'toggle-engine-autotune') {
-      const nextOn = !node.classList.contains('is-on');
-      autotuneDraft = nextOn;
-      node.classList.toggle('is-on', nextOn);
-      node.setAttribute('aria-checked', nextOn ? 'true' : 'false');
+    if (act === 'reload-runtime') {
+      loadRuntimeSettings().then(() => resetIdleTimer());
       return;
     }
   });
 
-  /* 设置页里的数值输入：change 即落库并立刻作用于底栏轮播 */
+  /* 运行时参数：开关是按钮，点击即翻转并立刻落库；数值 / 文本 / 枚举走 change */
   rootEl.addEventListener('change', (event) => {
-    const field = event.target.closest ? event.target.closest('[data-role]') : null;
+    const node = event.target;
+    if (!node || typeof node.getAttribute !== 'function') return;
+    if (node.getAttribute('data-cfg-key')) {
+      if (node.getAttribute('data-cfg-section') === 'trigger' && node.getAttribute('data-cfg-key') === 'triggerMode') {
+        /* 判据模式决定可见字段：先按本地选择即时重排 trigger 组（不重新 GET），保存回执到达后再落定 */
+        state.runtimeSettings.draftMode = String(node.value == null ? '' : node.value);
+        refreshRuntimeGroup('trigger');
+      }
+      saveRuntimeField(node).then(() => resetIdleTimer());
+      return;
+    }
+    const field = node.closest ? node.closest('[data-role]') : null;
     if (!field) return;
     const role = field.getAttribute('data-role');
     if (role === 'ticker-count') applySettings({ tickerCount: field.value });
@@ -6054,6 +6275,40 @@ function ensureStyles() {
   document.head.appendChild(style);
 }
 
+/* 宿主深色主题没有覆盖 Element Plus 的 .el-tag：插件配置卡里多选出来的标签
+ * （订阅表「投递群」列）在夜间是白底黑字。上游 CSS 改不了，这里补一段覆盖，
+ * 让标签与同排输入框同材质：1 级填充（--bg1）+ 输入框描边（--k-color-border）
+ * + 正文色（--k-text-dark = --fg1，即 --el-input-text-color 的取值）+ 输入框
+ * 圆角（--el-border-radius-base）。变量名取自 @koishijs/client 5.30 的
+ * app/styles/index.scss 与 app/styles/element.scss——Koishi 没有
+ * --k-color-fill-* / --k-color-text，别再退回半透明白当底色。
+ *
+ * 作用域用 `.k-schema-item`：`k-schema` 是 Vue 组件标签而不是类名，
+ * schemastery-vue 的真实根节点是 .k-schema-item（base.vue）。选择器绝不以
+ * `.el-tag` 裸开头，不触碰其它插件的外层 UI。 */
+const SCHEMA_TAG_STYLE_MARK = 'schema-tag-theme';
+const SCHEMA_TAG_STYLES = `.k-schema-item .el-select .el-tag {
+  background: var(--bg1, transparent);
+  border-color: var(--k-color-border, transparent);
+  color: var(--k-text-dark, var(--fg1, inherit));
+  border-radius: var(--el-border-radius-base, 4px);
+  font-size: 12px;
+  margin: 2px 0;
+}
+.k-schema-item .el-select .el-tag .el-tag__close { color: inherit; opacity: .6; border-radius: 2px; }
+.k-schema-item .el-select .el-tag .el-tag__close:hover { opacity: 1; background: rgba(127, 127, 127, .18); }
+`;
+
+/* 幂等：同一页面无论挂载多少次，只落一个 <style>。 */
+function ensureSchemaTagTheme() {
+  if (typeof document === 'undefined' || !document.head) return;
+  if (document.head.querySelector('style[data-patchouli="' + SCHEMA_TAG_STYLE_MARK + '"]')) return;
+  const style = document.createElement('style');
+  style.setAttribute('data-patchouli', SCHEMA_TAG_STYLE_MARK);
+  style.textContent = SCHEMA_TAG_STYLES;
+  document.head.appendChild(style);
+}
+
 // BEGIN GENERATED AUTH GATE
 (() => {
   const base = "/patchouli";
@@ -6082,7 +6337,7 @@ function ensureStyles() {
   const shell = (inner) => {
     const root = document.createElement('div');
     root.id = OVERLAY_ID;
-    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
+    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
     const card = document.createElement('form');
     card.setAttribute('style', 'width:min(440px,88vw);padding:26px 24px;border-radius:16px;background:rgba(19,25,40,.97);border:1px solid rgba(255,255,255,.13);box-shadow:0 24px 70px rgba(0,0,0,.55)');
     card.innerHTML = inner;
@@ -6385,18 +6640,73 @@ function unmount() {
   state.restoreStyle = '';
 }
 
+/* 路由判定只认 /plugins 前缀：console 插件页形如 /plugins/:name（多实例时 :name 是实例标识），
+   实例标识与插件名的任何组合都必须挂载，否则那些实例完全没有入口（独立页已删除）。 */
 function routeMatches() {
   const path = (window.location.pathname || '').toLowerCase();
   const hash = (window.location.hash || '').toLowerCase();
-  const target = `${path}${hash}`;
-  if (!target.includes('/plugins')) return false;
-  return ROUTE_KEYS.some((key) => target.includes(key));
+  return `${path}${hash}`.includes(ROUTE_PREFIX);
+}
+
+/* 当前路由键：路径 + hash 变了才重新做软校验（宿主是 SPA，pushState 不会重载脚本）。 */
+function currentRouteKey() {
+  const path = window.location.pathname || '';
+  const hash = window.location.hash || '';
+  return `${path}${hash}`;
+}
+
+/* 页面身份文本：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。 */
+const IDENTITY_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
+
+function pageIdentityText() {
+  const parts = [];
+  try {
+    parts.push(window.location.pathname || '', window.location.hash || '', window.location.search || '');
+  } catch (err) { /* 宿主没暴露 location 时按「认不出」处理 */ }
+  try {
+    if (typeof document.title === 'string') parts.push(document.title);
+  } catch (err) { /* 同上 */ }
+  for (const selector of IDENTITY_SELECTORS) {
+    let node = null;
+    try { node = document.querySelector(selector); } catch (err) { node = null; }
+    const text = node && typeof node.textContent === 'string' ? node.textContent : '';
+    if (text) parts.push(text);
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+/* 软校验：命中任一标识就认为当前页是本插件的配置页。命中失败只影响自动展开，不影响挂载。 */
+function pageIdentityMatches() {
+  const text = pageIdentityText();
+  if (!text) return false;
+  return IDENTITY_HINTS.some((hint) => text.includes(hint));
+}
+
+/* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。 */
+let routeProbe = { key: '', identified: false, ticks: 0, promoted: false };
+
+function resetRouteProbe(key) {
+  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false };
+}
+
+/* 挂载即收回：软校验没认出本插件页时只留悬浮胶囊，不遮住别的插件页。
+   与 collapsePanel 同一终态（is-collapsed + 胶囊可见），但不起过渡 —— 首帧发生在 ptx-hidden
+   里，不会先闪一帧整窗再收回去。 */
+function collapseQuietly() {
+  if (!frameEl) return;
+  clearIdleTimer();
+  state.collapsed = true;
+  frameEl.classList.remove('is-docked');
+  frameEl.classList.add('is-collapsed');
+  if (pillEl) pillEl.classList.add('is-visible');
 }
 
 function checkRoute() {
   const match = routeMatches();
 
   if (!match) {
+    /* 离开插件页：探针清零，回到插件页时重新做一次软校验 */
+    resetRouteProbe('');
     if (state.visible) {
       if (rootEl) rootEl.classList.add('ptx-hidden');
       state.visible = false;
@@ -6407,8 +6717,20 @@ function checkRoute() {
     return;
   }
 
-  if (!state.mounted) mount();
-  if (rootEl) rootEl.classList.remove('ptx-hidden');
+  const key = currentRouteKey();
+  if (routeProbe.key !== key) resetRouteProbe(key);
+  if (!routeProbe.identified && routeProbe.ticks < IDENTITY_PROBE_TICKS) {
+    routeProbe.ticks += 1;
+    routeProbe.identified = pageIdentityMatches();
+  }
+
+  const fresh = !state.mounted;
+  if (fresh) mount();
+
+  if (rootEl) {
+    if (fresh && !routeProbe.identified) collapseQuietly();
+    rootEl.classList.remove('ptx-hidden');
+  }
 
   if (!state.visible) {
     state.visible = true;
@@ -6422,6 +6744,13 @@ function checkRoute() {
        否则 × 收回的面板会在切走再回来时被弹开。 */
     resetIdleTimer();
     if (!state.refreshTimer) scheduleStatusPoll();
+  }
+
+  /* 软校验迟到命中（宿主先挂壳后画标题）：挂载时只留了胶囊，认出本插件页后自动展开一次。
+     每页只展开一次，用户随后手动收回不会被它掀开。 */
+  if (routeProbe.identified && !routeProbe.promoted) {
+    routeProbe.promoted = true;
+    if (!fresh && state.collapsed) expandPanel();
   }
 }
 
@@ -6442,6 +6771,8 @@ export default function applyPatchouliWikiReader(ctx) {
   }
 
   const boot = () => {
+    /* 配置卡的标签主题与浮窗无关：脚本一启动就铺好，不依赖用户是否打开面板。 */
+    ensureSchemaTagTheme();
     checkRoute();
     state.routeTimer = setInterval(checkRoute, 700);
   };

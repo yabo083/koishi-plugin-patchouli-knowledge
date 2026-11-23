@@ -46,6 +46,6 @@ test('ENTRY-DELIVER-06: 词条只投递到自身所属群的相册（不跨群�
     { kind: 'album', channelId: 'onebot:100000001', albumId: 'album-a' },
   ]);
   // 来源群不在名单里：静默不投递，绝不借用别人群的相册
-  assert.deepEqual(planEntryTargets(albums, '', 'onebot:199999999'), []);
+  assert.deepEqual(planEntryTargets(albums, '', 'onebot:100000005'), []);
   assert.deepEqual(planEntryTargets(['100000003/album-b'], '', 'onebot:100000001'), []);
 });

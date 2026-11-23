@@ -29,6 +29,14 @@ function baseConfig(dir, overrides = {}) {
   };
 }
 
+/**
+ * 只测消费（`take`）的用例用它：`take()` 出队后会 `void ensureFilled()` 后台补货，
+ * 而 fetch 桩是进程级全局的——遗留的后台请求会在下一个用例换上自己的桩之后才真正发出，
+ * 把对方的 `stub.calls` 数错（MEDIA-10「上游只被请求一批」实测随机数成 5）。
+ * `lowWater: 0` 让后台补货在水位判断处同步短路；补货行为本身由 MEDIA-02 / MEDIA-10 覆盖。
+ */
+const takeOnlyConfig = (dir) => baseConfig(dir, { lowWater: 0 });
+
 /** 用固定响应替换全局 fetch，返回调用计数与还原函数。 */
 function stubFetch(handler) {
   const original = globalThis.fetch;
@@ -91,7 +99,7 @@ test('MEDIA-03: 在线模式消费即删除，返回可直接内嵌的 data URI'
   await writeFile(path.join(dir, 'image', 'pending', '0000000000001-aaaa.jpeg'), 'bytes');
   const stub = stubFetch(failedResponse);
   try {
-    const pool = new MediaPool(baseConfig(dir));
+    const pool = new MediaPool(takeOnlyConfig(dir));
     const data = await pool.take('image');
     assert.match(String(data), /^data:image\/jpeg;base64,/u);
     assert.equal((await pool.stats('image')).pending, 0, '在线模式消费后文件被删除');
@@ -109,7 +117,7 @@ test('MEDIA-04: 按文件名 FIFO 取最早的一条', async () => {
   await writeFile(path.join(pending, '0000000000001-aaaa.txt'), '第一条', 'utf8');
   const stub = stubFetch(failedResponse);
   try {
-    const pool = new MediaPool(baseConfig(dir));
+    const pool = new MediaPool(takeOnlyConfig(dir));
     assert.equal(await pool.take('saying'), '第一条');
     assert.equal(await pool.take('saying'), '第二条');
   } finally {
@@ -215,7 +223,7 @@ test('MEDIA-09: 并发 take 串行消费，两个调用必须拿到不同文件'
   await writeFile(path.join(pending, '0000000000002-bbbb.png'), 'second-bytes');
   const stub = stubFetch(failedResponse);
   try {
-    const pool = new MediaPool(baseConfig(dir));
+    const pool = new MediaPool(takeOnlyConfig(dir));
     const [left, right] = await Promise.all([pool.take('image'), pool.take('image')]);
     assert.ok(left !== undefined && right !== undefined, '两个并发 take 都要拿到素材');
     const expected = [

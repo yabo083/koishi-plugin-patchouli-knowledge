@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>帕秋莉 · 订阅视图原型 v2（标签式多目标）</title>
+<style>
+  :root{
+    --bg:#141417; --panel:#1d1d22; --line:#2c2c33; --fg:#e6e6ea; --muted:#8b8b96;
+    --accent:#0ea44f; --teal:#0e8f86; --danger:#ef4444; --cell:#242429; --ink4:#6a6a76;
+    --chip:#26262d; --chip-line:#3a3a44;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:13.5px/1.55 "Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  .shell{max-width:1100px;margin:0 auto;padding:18px 20px 80px}
+  .bar{display:flex;align-items:center;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+  .bar h1{font-size:13px;font-weight:600;margin:0;letter-spacing:.06em}
+  .bar .state{margin-left:auto;font-size:11.5px;color:var(--muted)}
+  .tabs{display:flex;gap:4px;margin:14px 0 12px}
+  .tab{border:1px solid transparent;border-radius:7px;padding:5px 11px;font-size:12.5px;color:var(--muted);cursor:pointer}
+  .tab.on{background:var(--panel);border-color:var(--line);color:var(--fg)}
+
+  .head{display:flex;align-items:center;gap:10px;margin:6px 0 10px}
+  .head .t{font-size:13px;font-weight:600}
+  .head .n{font-size:11.5px;color:var(--ink4)}
+  .head .sp{margin-left:auto}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed}
+  th{color:var(--muted);font-weight:500;font-size:11.5px;text-align:left;padding:8px 9px;
+    border-bottom:1px solid var(--line)}
+  td{padding:7px 9px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top}
+  tbody tr:hover{background:rgba(255,255,255,.02)}
+  .wrap{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel)}
+
+  input[type=text]{width:100%;background:var(--cell);border:1px solid transparent;border-radius:6px;
+    color:var(--fg);padding:6px 8px;font:inherit;font-size:12.5px}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  .cb{appearance:none;width:15px;height:15px;border-radius:4px;border:1px solid #43434d;background:#232329;cursor:pointer;position:relative}
+  .cb:checked{background:var(--accent);border-color:var(--accent)}
+  .cb:checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+
+  /* 标签式多目标 */
+  .targets{display:flex;flex-wrap:wrap;gap:5px;align-items:center;min-height:30px}
+  .chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;
+    background:var(--chip);border:1px solid var(--chip-line);border-radius:6px;
+    padding:3px 6px 3px 8px;font-size:11.5px;color:var(--fg)}
+  .chip .g{color:var(--muted)}
+  .chip .x{all:unset;cursor:pointer;color:var(--ink4);font-size:11px;line-height:1;padding:1px 2px;border-radius:3px}
+  .chip .x:hover{color:var(--danger);background:rgba(239,68,68,.12)}
+  .chip.chat{border-color:rgba(14,143,134,.5);color:#9fe0da}
+  .addtag{all:unset;cursor:pointer;color:var(--accent);font-size:15px;line-height:1;
+    width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;
+    border:1px dashed rgba(14,164,79,.45);border-radius:6px}
+  .addtag:hover{background:rgba(14,164,79,.1)}
+  .targets .empty{color:var(--ink4);font-size:11.5px}
+
+  .tools{display:flex;gap:2px;justify-content:flex-end}
+  .tools button{all:unset;cursor:pointer;padding:3px 5px;border-radius:4px;font-size:11.5px;color:var(--muted)}
+  .tools button:hover{background:rgba(255,255,255,.06);color:var(--fg)}
+  .tools button.rm:hover{color:var(--danger);background:rgba(239,68,68,.12)}
+
+  .add{all:unset;cursor:pointer;color:var(--accent);font-size:12px;padding:5px 11px;border:1px dashed rgba(14,164,79,.45);border-radius:6px}
+  .add:hover{background:rgba(14,164,79,.1)}
+  .save{all:unset;cursor:pointer;background:var(--accent);color:#04140a;font-size:12px;font-weight:600;
+    padding:6px 14px;border-radius:7px}
+  .save:hover{filter:brightness(1.08)}
+  .save[disabled]{opacity:.45;cursor:default}
+  .hint{color:var(--ink4);font-size:11.5px;margin-top:9px;line-height:1.8}
+  .toast{font-size:11.5px;color:var(--accent);opacity:0;transition:opacity .2s}
+  .toast.on{opacity:1}
+  code{background:#232329;padding:1px 4px;border-radius:3px;font-size:11px}
+
+  /* 目标选择浮层 */
+  .menu{position:absolute;z-index:20;min-width:260px;max-width:360px;max-height:260px;
+    overflow-y:auto;overflow-x:hidden;
+    scrollbar-width:thin;scrollbar-color:#3a3a44 transparent;
+    background:#1f1f25;border:1px solid var(--chip-line);border-radius:8px;padding:4px;
+    box-shadow:0 12px 28px rgba(0,0,0,.45);display:none}
+  .menu::-webkit-scrollbar{width:8px}
+  .menu::-webkit-scrollbar-track{background:transparent}
+  .menu::-webkit-scrollbar-thumb{background:#3a3a44;border-radius:4px}
+  .menu::-webkit-scrollbar-thumb:hover{background:#4a4a56}
+  .menu.open{display:block}
+  .menu button{all:unset;display:block;width:100%;cursor:pointer;padding:6px 8px;border-radius:5px;font-size:12px;word-break:break-word}
+  .menu button:hover{background:rgba(255,255,255,.06)}
+  .menu .sep{height:1px;background:var(--line);margin:4px 2px}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="bar">
+    <span class="dot"></span><h1>LLMWIKI</h1>
+    <span class="state">已连接 · 0.8.72</span>
+  </div>
+
+  <div class="tabs">
+    <span class="tab">词条</span><span class="tab">主题</span><span class="tab">监控</span>
+    <span class="tab on">订阅</span><span class="tab">设置</span>
+  </div>
+
+  <div class="head">
+    <span class="t">订阅</span>
+    <span class="n" id="count">2 个群</span>
+    <span class="sp"></span>
+    <span class="toast" id="toast">已保存</span>
+    <button class="add" id="add">添加</button>
+    <button class="save" id="save">保存</button>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <colgroup><col style="width:16%"><col style="width:50%"><col style="width:9%"><col style="width:9%"><col></colgroup>
+      <thead><tr><th>来源群</th><th>投递到（可多个）</th><th>词条</th><th>周报</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="hint">
+    一行可以挂多个投递目标：<code>本群聊天</code>、任意群相册（可跨群，标签带群名）。<br>
+    相册候选取自机器人当前可见的群相册；目标为空 = 该群只沉淀不投递。
+  </div>
+</div>
+
+<div class="menu" id="menu"></div>
+
+<template id="rowTpl">
+  <tr>
+    <td><input type="text" data-k="source" placeholder="群号，* 表示全部"></td>
+    <td><div class="targets" data-k="targets"></div></td>
+    <td><input type="checkbox" class="cb" data-k="entry"></td>
+    <td><input type="checkbox" class="cb" data-k="weekly"></td>
+    <td><div class="tools"><button class="up" title="上移">↑</button><button class="down" title="下移">↓</button><button class="rm" title="删除">✕</button></div></td>
+  </tr>
+</template>
+
+<script>
+  const ALBUMS = [
+    { value: '100000001/ALBUM01', groupName: '示例群一', albumName: '帕秋莉的藏书' },
+    { value: '100000001/ALBUM02', groupName: '示例群一', albumName: '主题周报' },
+    { value: '100000002/ALBUM03', groupName: '示例群二', albumName: '群友精华' },
+    { value: '100000003/ALBUM04', groupName: '示例群三', albumName: '归档相册' },
+  ];
+  const LABELS = new Map(ALBUMS.map((a) => [a.value, { group: a.groupName, name: a.albumName }]));
+  const ROWS = [
+    { source: '100000001', targets: ['100000001/ALBUM01', '100000001/ALBUM02'], entry: true, weekly: true },
+    { source: '100000002', targets: ['@chat', '100000003/ALBUM04'], entry: true, weekly: false },
+    { source: '*', targets: ['100000003/ALBUM04'], entry: false, weekly: true },
+  ];
+
+  const rowsEl = document.getElementById('rows');
+  const tpl = document.getElementById('rowTpl');
+  const menu = document.getElementById('menu');
+  const countEl = document.getElementById('count');
+  let menuFor = null;
+
+  function labelOf(value) {
+    if (value === '@chat') return { chat: true, text: '本群聊天' };
+    const info = LABELS.get(value);
+    if (!info) return { text: value };
+    return { group: info.group, text: info.name };
+  }
+
+  function renderTargets(cell, targets) {
+    cell.innerHTML = '';
+    if (targets.length === 0) cell.insertAdjacentHTML('beforeend', '<span class="empty">不投递</span>');
+    for (const value of targets) {
+      const info = labelOf(value);
+      const chip = document.createElement('span');
+      chip.className = 'chip' + (info.chat ? ' chat' : '');
+      chip.innerHTML = (info.group ? `<span class="g">${info.group}</span>·` : '') + `<span>${info.text}</span>` +
+        '<button class="x" title="移除">✕</button>';
+      chip.querySelector('.x').onclick = () => {
+        const next = targets.filter((v) => v !== value);
+        cell.dataset.targets = JSON.stringify(next);
+        renderTargets(cell, next);
+        sync();
+      };
+      cell.appendChild(chip);
+    }
+    const add = document.createElement('button');
+    add.className = 'addtag';
+    add.textContent = '+';
+    add.title = '添加投递目标';
+    add.onclick = (event) => { event.stopPropagation(); openMenu(cell, add, targets); };
+    cell.appendChild(add);
+    cell.dataset.targets = JSON.stringify(targets);
+  }
+
+  function openMenu(cell, anchor, targets) {
+    menuFor = { cell, targets };
+    const chosen = new Set(targets);
+    const items = [['@chat', '本群聊天']];
+    for (const a of ALBUMS) items.push([a.value, `${a.groupName} · ${a.albumName}`]);
+    menu.innerHTML = items
+      .filter(([value]) => !chosen.has(value))
+      .map(([value, label]) => `<button data-v="${value}">${label}</button>`)
+      .join('') || '<button disabled>已全部添加</button>';
+    const rect = anchor.getBoundingClientRect();
+    menu.style.left = rect.left + 'px';
+    menu.style.top = rect.bottom + 6 + 'px';
+    menu.classList.add('open');
+    menu.querySelectorAll('button[data-v]').forEach((b) => {
+      b.onclick = () => {
+        const value = b.getAttribute('data-v');
+        const next = [...menuFor.targets, value];
+        menu.classList.remove('open');
+        renderTargets(menuFor.cell, next);
+        sync();
+      };
+    });
+  }
+
+  document.addEventListener('click', (e) => { if (!menu.contains(e.target)) menu.classList.remove('open'); });
+
+  function addRow(row) {
+    const node = tpl.content.firstElementChild.cloneNode(true);
+    node.querySelector('[data-k="source"]').value = row?.source ?? '';
+    node.querySelector('[data-k="entry"]').checked = row ? Boolean(row.entry) : true;
+    node.querySelector('[data-k="weekly"]').checked = Boolean(row?.weekly);
+    renderTargets(node.querySelector('[data-k="targets"]'), row?.targets ? [...row.targets] : []);
+    node.querySelector('.rm').onclick = () => { node.remove(); sync(); };
+    node.querySelector('.up').onclick = () => { const p = node.previousElementSibling; if (p) rowsEl.insertBefore(node, p); };
+    node.querySelector('.down').onclick = () => { const n = node.nextElementSibling; if (n) rowsEl.insertBefore(n, node); };
+    rowsEl.appendChild(node);
+    sync();
+    return node;
+  }
+
+  function sync() {
+    const n = rowsEl.querySelectorAll('tr').length;
+    countEl.textContent = n === 0 ? '空表 · 回退旧配置' : `${n} 个群`;
+    document.getElementById('save').disabled = n === 0;
+  }
+
+  function collect() {
+    return [...rowsEl.querySelectorAll('tr')].map((tr) => ({
+      source: tr.querySelector('[data-k="source"]').value.trim(),
+      targets: JSON.parse(tr.querySelector('[data-k="targets"]').dataset.targets || '[]'),
+      entry: tr.querySelector('[data-k="entry"]').checked,
+      weekly: tr.querySelector('[data-k="weekly"]').checked,
+    }));
+  }
+
+  document.getElementById('add').onclick = () => addRow(null);
+  document.getElementById('save').onclick = () => {
+    const toast = document.getElementById('toast');
+    toast.classList.add('on');
+    setTimeout(() => toast.classList.remove('on'), 1600);
+    console.log('POST /patchouli/api/subscriptions', { rows: collect() });
+  };
+
+  ROWS.forEach(addRow);
+</script>
+</body>
+</html>
