@@ -13,7 +13,6 @@ import {
 } from '../dispatcher/prompts';
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
-import { persistCustomPrompt, persistTopicPrompt } from '../plugin/custom-prompt';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
 import {
   DEFAULT_TUNING_PARAMETERS,
@@ -34,13 +33,10 @@ import {
   handleLogin,
   handleLogout,
   handleSession,
-  readApiTokenFile,
 } from './auth';
 import { renderTacticalDockComponent } from './tactical-dock';
 import { renderEntryCard } from '../plugin/card-pipeline';
-import { maskPublicView } from '../wiki/mask';
 import { plainText } from '../wiki/plain-text';
-import { toPublicView } from '../wiki/public-view';
 export { renderLibraryHtml, renderTacticalDockComponent };
 
 type RouteHandler = (ctx: KoishiKoaContext) => Promise<void> | void;
@@ -670,12 +666,24 @@ function dispatcherConfigOf(system: PatchouliKnowledgeSystem): DispatcherConfig 
   return dispatcher && typeof dispatcher === 'object' ? dispatcher : undefined;
 }
 
-/** 读取当前提示词状态：只读配置与调度器的实时解析结果，不触碰任何运行态。 */
+/** 读取当前提示词状态：只读调度器的运行时覆盖，不触碰任何运行态。 */
 export function readPromptState(system: PatchouliKnowledgeSystem): PromptStatePayload {
+  // 单一真源是调度器的运行时覆盖；`config.dispatcher` 只是 Schema 兜底（旧宿主 / 测试替身）。
   const config = dispatcherConfigOf(system);
-  const customPrompt = typeof config?.customSystemPrompt === 'string' ? config.customSystemPrompt : '';
+  const dispatcher = system.dispatcher;
+  const customPrompt =
+    typeof dispatcher?.customSystemPromptText === 'string'
+      ? dispatcher.customSystemPromptText
+      : typeof config?.customSystemPrompt === 'string'
+        ? config.customSystemPrompt
+        : '';
   const custom = customPrompt.trim();
-  const topicCustomPrompt = typeof config?.customTopicPrompt === 'string' ? config.customTopicPrompt : '';
+  const topicCustomPrompt =
+    typeof dispatcher?.topicPrompt === 'string'
+      ? dispatcher.topicPrompt
+      : typeof config?.customTopicPrompt === 'string'
+        ? config.customTopicPrompt
+        : '';
   const topicCustom = topicCustomPrompt.trim();
   // 与调度器同一条解析路径（`ModelDispatcher.systemPrompt`），保证「看到的就是生效的」。
   const dispatcherPrompt = system.dispatcher?.systemPrompt;
@@ -694,12 +702,6 @@ export function readPromptState(system: PatchouliKnowledgeSystem): PromptStatePa
     topicEffectivePrompt: resolveTopicSystemPrompt(topicCustom.length > 0 ? topicCustom : undefined),
     isTopicCustom: topicCustom.length > 0,
   };
-}
-
-/** 宿主的知识库根目录；未暴露（测试替身 / 旧宿主）时返回空串，表示无法持久化提示词。 */
-function wikiDirOf(system: PatchouliKnowledgeSystem): string {
-  const dir: unknown = system.wikiDir;
-  return typeof dir === 'string' ? dir : '';
 }
 
 function errorMessage(err: unknown): string {
@@ -943,20 +945,6 @@ export function registerWebUi(
       return;
     }
 
-    const dispatcherConfig = dispatcherConfigOf(system);
-    if (!dispatcherConfig) {
-      kCtx.status = 500;
-      kCtx.body = { ok: false, error: '当前宿主未暴露调度器配置' };
-      return;
-    }
-
-    const wikiDir = wikiDirOf(system);
-    if (wikiDir.length === 0) {
-      kCtx.status = 500;
-      kCtx.body = { ok: false, error: '当前宿主未暴露知识库目录，无法持久化系统提示词' };
-      return;
-    }
-
     const hasEntry = typeof body?.customPrompt === 'string';
     const hasTopic = typeof body?.customTopicPrompt === 'string';
     if (!hasEntry && !hasTopic) {
@@ -965,14 +953,14 @@ export function registerWebUi(
       return;
     }
 
-    // 原样保存用户输入（含换行缩进）：先原子落盘，再热更新实时配置；
+    // 原样保存用户输入（含换行缩进）：先原子落盘，再由 system 热更新运行时覆盖；
     // 空白内容收敛回内置提示词，同时删除落盘文件。
     try {
       if (hasEntry) {
-        await persistCustomPrompt(wikiDir, dispatcherConfig, String(body?.customPrompt));
+        await system.saveCustomPrompt(String(body?.customPrompt));
       }
       if (hasTopic) {
-        await persistTopicPrompt(wikiDir, dispatcherConfig, String(body?.customTopicPrompt));
+        await system.saveTopicPrompt(String(body?.customTopicPrompt));
       }
     } catch (err: unknown) {
       kCtx.status = 500;

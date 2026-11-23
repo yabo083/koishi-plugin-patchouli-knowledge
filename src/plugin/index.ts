@@ -654,6 +654,16 @@ export class PatchouliKnowledgeSystem {
   public readonly shadowLedger: ShadowLedger;
   public readonly config: PluginOptions;
   /**
+   * 主题校准运行时参数：独立于宿主 `config.topics` 的可变副本。
+   *
+   * 面板改参数与重启回灌都只写这里；`TopicScheduler` 持有同一引用，热更新即时生效。
+   * 宿主配置对象保持只读——Koishi loader 在启停时序列化/比较它，运行时写入会被当作
+   * 配置变更并把「停止」翻成 reload（ADR-022）。
+   */
+  private readonly topicRuntime: PluginOptions['topics'];
+  /** 自定义提示词覆盖（`system` 沉淀用 / `topic` 主题聚合用），同样不写宿主 config。 */
+  private readonly promptOverrides: { system: string; topic: string } = { system: '', topic: '' };
+  /**
    * 卡片素材池：背景图与一言的预取 / 消费 / 离线复用。
    * 与渲染器只通过目录交互——渲染器不联网，抓不到素材就出无图版式。
    */
@@ -728,6 +738,8 @@ export class PatchouliKnowledgeSystem {
     baseDir?: string,
   ) {
     this.config = config;
+    // 运行时副本：先深拷贝一份宿主配置，之后所有热更新只动它。
+    this.topicRuntime = { ...config.topics };
     this.wikiDir = resolveWikiDir(config.storage.wikiDir, baseDir);
     this.discardsDir = resolveWikiLayout(this.wikiDir).discardsDir;
     // 旧配置文件 / 直接构造的实例可能没有 `media` 段：缺省一律按「不联网」处理，
@@ -774,7 +786,7 @@ export class PatchouliKnowledgeSystem {
       engine: this.wikiEngine,
       store: this.localStore,
       invoke: async (messages) => this.dispatcher.invokeRaw(messages),
-      systemPrompt: () => resolveTopicSystemPrompt(this.config.dispatcher.customTopicPrompt),
+      systemPrompt: () => resolveTopicSystemPrompt(this.promptOverrides.topic),
       logger: loggerRef
         ? { info: (message: string) => loggerRef.info(message), warn: (message: string) => loggerRef.warn(message) }
         : undefined,
@@ -892,7 +904,7 @@ export class PatchouliKnowledgeSystem {
   private async restoreTopicSettings(): Promise<void> {
     try {
       const overlay = await readTopicSettings(this.wikiDir);
-      Object.assign(this.config.topics, overlay);
+      Object.assign(this.topicRuntime, overlay);
       if (Object.keys(overlay).length > 0) {
         this.logger?.info(
           `[Patchouli] 已载入主题校准运行时参数: ${Object.entries(overlay)
@@ -912,9 +924,10 @@ export class PatchouliKnowledgeSystem {
   public async restoreCustomPrompt(): Promise<void> {
     try {
       const prompt = await readCustomPromptFile(this.wikiDir);
-      this.config.dispatcher.customSystemPrompt = prompt;
       const topicPrompt = await readTopicPromptFile(this.wikiDir);
-      this.config.dispatcher.customTopicPrompt = topicPrompt;
+      this.promptOverrides.system = prompt;
+      this.promptOverrides.topic = topicPrompt;
+      this.dispatcher.setPromptOverrides({ system: prompt, topic: topicPrompt });
       if (prompt.length > 0) {
         this.logger?.info(
           `[Patchouli] 已载入自定义系统提示词（.patchouli/custom-prompt.txt，${prompt.length} 字符），内置提示词被整段覆盖`,
@@ -931,30 +944,42 @@ export class PatchouliKnowledgeSystem {
    * 悬浮窗设置页的「保存并应用」/「恢复默认」都走这一条路径。
    */
   public async saveCustomPrompt(prompt: string): Promise<void> {
-    await persistCustomPrompt(this.wikiDir, this.config.dispatcher, prompt);
+    const next = await persistCustomPrompt(this.wikiDir, prompt);
+    this.promptOverrides.system = next;
+    this.dispatcher.setPromptOverrides({ system: next });
   }
 
   /** 保存主题聚合提示词：原子落盘 + 热更新，只影响主题校准。 */
   public async saveTopicPrompt(prompt: string): Promise<void> {
-    await persistTopicPrompt(this.wikiDir, this.config.dispatcher, prompt);
+    const next = await persistTopicPrompt(this.wikiDir, prompt);
+    this.promptOverrides.topic = next;
+    this.dispatcher.setPromptOverrides({ topic: next });
   }
 
   /** 当前主题校准运行时参数（只读副本）。 */
   public getTopicSettings(): typeof this.config.topics {
-    return { ...this.config.topics };
+    return { ...this.topicRuntime };
+  }
+
+  /**
+   * 主题校准运行时参数的**可变引用**：仅供 `TopicScheduler` 持有以实时读热更新值，
+   * 外部（面板 / API）一律走 `updateTopicSettings`，不要直接写。
+   */
+  public get topicConfig(): typeof this.config.topics {
+    return this.topicRuntime;
   }
 
   /** 更新并持久化主题校准运行时参数；未知字段丢弃、数值夹进硬限幅。 */
   public async updateTopicSettings(patch: unknown): Promise<typeof this.config.topics> {
     const normalized = normalizeTopicSettingsPatch(patch);
-    Object.assign(this.config.topics, normalized);
+    Object.assign(this.topicRuntime, normalized);
     await writeTopicSettings(this.wikiDir, {
-      enabled: this.config.topics.enabled,
-      hour: this.config.topics.hour,
-      minute: this.config.topics.minute,
-      lookbackDays: this.config.topics.lookbackDays,
-      mergeThreshold: this.config.topics.mergeThreshold,
-      minEntries: this.config.topics.minEntries,
+      enabled: this.topicRuntime.enabled,
+      hour: this.topicRuntime.hour,
+      minute: this.topicRuntime.minute,
+      lookbackDays: this.topicRuntime.lookbackDays,
+      mergeThreshold: this.topicRuntime.mergeThreshold,
+      minEntries: this.topicRuntime.minEntries,
     });
     return this.getTopicSettings();
   }
@@ -1521,7 +1546,7 @@ export class PatchouliKnowledgeSystem {
     channelId: string,
     options: { force?: boolean; now?: number } = {},
   ): Promise<TopicRunResult> {
-    const result = await this.topicCurator.runChannel(channelId, this.config.topics, options);
+    const result = await this.topicCurator.runChannel(channelId, this.topicRuntime, options);
     this.lastTopicRun = result;
     return result;
   }
@@ -1968,7 +1993,7 @@ export function apply(ctx: Context, config: PluginOptions): void {
   }
 
   // 每日主题校准：04:00 按群各自归并；失败 30 分钟后重试，日切水位落盘。
-  const topicScheduler = new TopicScheduler(config.topics, {
+  const topicScheduler = new TopicScheduler(system.topicConfig, {
     channels: async () =>
       config.channels.length > 0 ? config.channels : await system.localStore.listChannels(),
     run: async (channelId, options) => {

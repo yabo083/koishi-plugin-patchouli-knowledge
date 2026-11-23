@@ -19,6 +19,7 @@ import {
   TRAFFIC_SAMPLE_MS,
   WikiEngine,
 } from '../lib/index.js';
+import { persistCustomPrompt, persistTopicPrompt } from '../lib/plugin/custom-prompt.js';
 
 const TEST_WIKI_DIR = path.resolve('tmp/test-api-wiki');
 
@@ -230,7 +231,23 @@ async function createPromptHost() {
   const { router, routes } = createRouterDouble();
   const topics = { enabled: true, hour: 4, minute: 0, lookbackDays: 30, mergeThreshold: 0.5, minEntries: 1 };
   const cardSettings = { maskNames: true };
+  // 提示词的运行时覆盖：真实系统挂在 `ModelDispatcher` 上，这里用同形状替身，
+  // 让「保存 → 读取」走与生产一致的路径（不再依赖写入宿主 config）。
+  const dispatcher = {
+    customSystemPromptText: '',
+    topicPrompt: '',
+    get systemPrompt() {
+      return resolveSystemPrompt(this.customSystemPromptText.trim() || undefined);
+    },
+  };
   const system = {
+    dispatcher,
+    saveCustomPrompt: async (prompt) => {
+      dispatcher.customSystemPromptText = await persistCustomPrompt(PROMPT_WIKI_DIR, prompt);
+    },
+    saveTopicPrompt: async (prompt) => {
+      dispatcher.topicPrompt = await persistTopicPrompt(PROMPT_WIKI_DIR, prompt);
+    },
     media: { stats: async () => ({ pending: 0, used: 0 }), metrics: { produced: 0, failed: 0, consumed: 0, swept: 0 } },
     config: { channels: [], dispatcher: dispatcherConfig, topics },
     wikiDir: PROMPT_WIKI_DIR,
@@ -251,7 +268,7 @@ async function createPromptHost() {
     },
   };
   registerWebUi({ router }, system, '/patchouli');
-  return { dispatcherConfig, routes, system, topics };
+  return { dispatcher, dispatcherConfig, routes, system, topics };
 }
 
 function promptCtx(body) {
@@ -269,7 +286,7 @@ async function readPromptFile() {
 }
 
 test('API-PROMPT-01: GET /api/prompt 回传默认 / 精简 / 当前生效提示词', async () => {
-  const { routes, dispatcherConfig } = await createPromptHost();
+  const { routes, dispatcher } = await createPromptHost();
   const handler = routes.get('GET /patchouli/api/prompt');
   assert.ok(handler, '提示词查阅路由必须注册');
 
@@ -282,14 +299,14 @@ test('API-PROMPT-01: GET /api/prompt 回传默认 / 精简 / 当前生效提示�
   assert.equal(ctx.body.customPrompt, '', '未配置自定义提示词时为空串');
   assert.equal(ctx.body.isCustom, false);
   assert.equal(ctx.body.effectivePrompt, PATCHOULI_SYSTEM_PROMPT, '无自定义时实际生效的就是内置提示词');
-  assert.equal(dispatcherConfig.customSystemPrompt, undefined, 'GET 必须是纯读，不得写入配置');
+  assert.equal(dispatcher.customSystemPromptText, '', 'GET 必须是纯读，不得写入配置');
   assert.equal(await readPromptFile(), null, 'GET 必须是纯读，不得创建落盘文件');
 
   await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
 });
 
 test('API-PROMPT-02: POST /api/prompt 落盘 + 热更新，调度器下一轮即时生效', async () => {
-  const { routes, dispatcherConfig } = await createPromptHost();
+  const { routes, dispatcher: hostDispatcher, dispatcherConfig } = await createPromptHost();
   const handler = routes.get('POST /patchouli/api/prompt');
   assert.ok(handler, '提示词写入路由必须注册');
 
@@ -298,7 +315,7 @@ test('API-PROMPT-02: POST /api/prompt 落盘 + 热更新，调度器下一轮即
   await handler(saved);
 
   assert.equal(saved.body.ok, true);
-  assert.equal(dispatcherConfig.customSystemPrompt, customPrompt, '必须写回实时配置对象');
+  assert.equal(hostDispatcher.customSystemPromptText, customPrompt, '必须写回运行时覆盖');
   assert.equal(saved.body.customPrompt, customPrompt);
   assert.equal(saved.body.isCustom, true);
   assert.ok(saved.body.effectivePrompt.startsWith(customPrompt), '自定义提示词必须整段生效');
@@ -325,6 +342,8 @@ test('API-PROMPT-02: POST /api/prompt 落盘 + 热更新，调度器下一轮即
     },
   });
 
+  // 真实系统的 saveCustomPrompt 会把覆盖推给同一个 dispatcher 实例；替身宿主里手工对齐。
+  dispatcher.setPromptOverrides({ system: hostDispatcher.customSystemPromptText });
   assert.equal(dispatcher.systemPrompt, saved.body.effectivePrompt, '调度器与 API 必须共享同一条提示词解析路径');
 
   const session = {
@@ -350,10 +369,11 @@ test('API-PROMPT-02: POST /api/prompt 落盘 + 热更新，调度器下一轮即
   await handler(restored);
 
   assert.equal(restored.body.ok, true);
-  assert.equal(dispatcherConfig.customSystemPrompt, '', '恢复默认必须清空自定义提示词');
+  assert.equal(hostDispatcher.customSystemPromptText, '', '恢复默认必须清空自定义提示词');
   assert.equal(restored.body.isCustom, false);
   assert.equal(restored.body.customPrompt, '');
   assert.equal(restored.body.effectivePrompt, PATCHOULI_SYSTEM_PROMPT, '恢复默认后必须立即回落到内置提示词');
+  dispatcher.setPromptOverrides({ system: hostDispatcher.customSystemPromptText });
   assert.equal(dispatcher.systemPrompt, PATCHOULI_SYSTEM_PROMPT, '调度器必须跟随恢复默认');
   assert.equal(await readPromptFile(), null, '恢复默认必须删除落盘文件，绝不留空文件');
 
@@ -361,7 +381,7 @@ test('API-PROMPT-02: POST /api/prompt 落盘 + 热更新，调度器下一轮即
 });
 
 test('API-PROMPT-04: 两套提示词独立持久化，主题提示词只影响主题聚合', async () => {
-  const { routes, dispatcherConfig, system } = await createPromptHost();
+  const { routes, dispatcher, system } = await createPromptHost();
   const getHandler = routes.get('GET /patchouli/api/prompt');
   const postHandler = routes.get('POST /patchouli/api/prompt');
 
@@ -376,8 +396,8 @@ test('API-PROMPT-04: 两套提示词独立持久化，主题提示词只影响�
   const saved = promptCtx({ customTopicPrompt: topicPrompt });
   await postHandler(saved);
   assert.equal(saved.body.ok, true);
-  assert.equal(dispatcherConfig.customTopicPrompt, topicPrompt, '主题提示词必须写回实时配置');
-  assert.equal(dispatcherConfig.customSystemPrompt, undefined, '保存主题提示词不得改动词条提示词');
+  assert.equal(dispatcher.topicPrompt, topicPrompt, '主题提示词必须写回运行时覆盖');
+  assert.equal(dispatcher.customSystemPromptText, '', '保存主题提示词不得改动词条提示词');
   assert.equal(saved.body.isTopicCustom, true);
   assert.ok(saved.body.topicEffectivePrompt.startsWith(topicPrompt));
   assert.ok(saved.body.topicEffectivePrompt.includes('JSON'), '主题提示词必须自动补齐输出契约');
@@ -385,9 +405,9 @@ test('API-PROMPT-04: 两套提示词独立持久化，主题提示词只影响�
 
   const restored = promptCtx({ customTopicPrompt: '' });
   await postHandler(restored);
-  assert.equal(dispatcherConfig.customTopicPrompt, '', '空主题提示词等同恢复默认');
+  assert.equal(dispatcher.topicPrompt, '', '空主题提示词等同恢复默认');
   assert.equal(await fs.readFile(TOPIC_PROMPT_FILE, 'utf8').catch(() => null), null, '恢复默认必须删除落盘文件');
-  assert.equal(system.config.dispatcher.customTopicPrompt, '');
+  assert.equal(system.config.dispatcher.customTopicPrompt, undefined, '宿主 config 不得被写入');
 
   await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
 });
@@ -451,7 +471,7 @@ test('API-CARD-01: 图片匿名化开关读写——默认开启、可关闭、�
 });
 
 test('API-PROMPT-03: POST /api/prompt 缺省 customPrompt 等同清空，非法体型被拒绝', async () => {
-  const { routes, dispatcherConfig } = await createPromptHost();
+  const { routes, dispatcher } = await createPromptHost();
   const handler = routes.get('POST /patchouli/api/prompt');
 
   const noFields = promptCtx({});
@@ -462,21 +482,21 @@ test('API-PROMPT-03: POST /api/prompt 缺省 customPrompt 等同清空，非法�
   const presetOnly = promptCtx({ customPrompt: '' });
   await handler(presetOnly);
   assert.equal(presetOnly.body.ok, true);
-  assert.equal(dispatcherConfig.customSystemPrompt, '', '空白 customPrompt 必须收敛为空串');
+  assert.equal(dispatcher.customSystemPromptText, '', '空白 customPrompt 必须收敛为空串');
   assert.equal(presetOnly.body.effectivePrompt, PATCHOULI_SYSTEM_PROMPT);
 
   const blank = promptCtx({ customPrompt: '  \n\t  ' });
   await handler(blank);
   assert.equal(blank.body.ok, true);
-  assert.equal(dispatcherConfig.customSystemPrompt, '', '仅含空白的提交必须收敛为空串（等同恢复默认）');
+  assert.equal(dispatcher.customSystemPromptText, '', '仅含空白的提交必须收敛为空串（等同恢复默认）');
   assert.equal(await readPromptFile(), null, '仅含空白的提交不得留下落盘文件');
 
   const invalid = promptCtx('not-an-object');
-  const before = dispatcherConfig.customSystemPrompt;
+  const before = dispatcher.customSystemPromptText;
   await handler(invalid);
   assert.equal(invalid.status, 400);
   assert.equal(invalid.body.ok, false);
-  assert.equal(dispatcherConfig.customSystemPrompt, before, '非法请求不得改动现有配置');
+  assert.equal(dispatcher.customSystemPromptText, before, '非法请求不得改动现有配置');
 
   await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });
 });
@@ -498,28 +518,29 @@ test('API-PROMPT-04: 服务重启后自动回灌 .patchouli/custom-prompt.txt，
   try {
     await system.ready;
 
-    assert.equal(config.dispatcher.customSystemPrompt, persisted, '启动必须回灌落盘的自定义提示词（含换行缩进）');
+    assert.equal(system.dispatcher.customSystemPromptText, persisted, '启动必须回灌落盘的自定义提示词（含换行缩进）');
+    assert.equal(config.dispatcher.customSystemPrompt, undefined, '回灌不得写宿主 config（ADR-022）');
     assert.equal(system.dispatcher.systemPrompt, resolveSystemPrompt(persisted), '回灌后调度器必须立刻使用该提示词');
 
     // 保存默认内容 -> 删除落盘文件 + 清空内存
     await system.saveCustomPrompt('');
-    assert.equal(config.dispatcher.customSystemPrompt, '');
+    assert.equal(system.dispatcher.customSystemPromptText, '');
     assert.equal(system.dispatcher.systemPrompt, PATCHOULI_SYSTEM_PROMPT, '恢复默认后调度器回落到内置提示词');
     assert.equal(await readPromptFile(), null, '恢复默认必须删除落盘文件');
 
     // 再写入一次，模拟「面板保存 -> 重启」的完整闭环
     await system.saveCustomPrompt(persisted);
     assert.equal(await readPromptFile(), persisted, '保存必须原子落盘');
-    assert.equal(config.dispatcher.customSystemPrompt, persisted, '保存必须同时热更新内存配置');
+    assert.equal(system.dispatcher.customSystemPromptText, persisted, '保存必须同时热更新内存配置');
 
     await fs.rm(PROMPT_FILE, { force: true });
     await system.restoreCustomPrompt();
-    assert.equal(config.dispatcher.customSystemPrompt, '', '文件缺失时回灌必须收敛为内置提示词');
+    assert.equal(system.dispatcher.customSystemPromptText, '', '文件缺失时回灌必须收敛为内置提示词');
 
     // 空白文件同样视为「未自定义」
     await fs.writeFile(PROMPT_FILE, '  \n\n  ', 'utf8');
     await system.restoreCustomPrompt();
-    assert.equal(config.dispatcher.customSystemPrompt, '', '仅含空白的文件必须视为未自定义');
+    assert.equal(system.dispatcher.customSystemPromptText, '', '仅含空白的文件必须视为未自定义');
   } finally {
     system.dispose();
     await fs.rm(PROMPT_WIKI_DIR, { recursive: true, force: true });

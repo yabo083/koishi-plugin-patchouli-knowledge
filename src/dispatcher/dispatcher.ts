@@ -1167,8 +1167,15 @@ export class ModelDispatcher {
   /** 当前生效协议（探测成功后固定，后续请求直接复用）。 */
   private activeProtocol: ModelProtocol;
   private readonly apiKey?: string;
-  /** 配置对象的实时引用：系统提示词（尤其是 `customSystemPrompt`）必须随热更新即时生效。 */
+  /** 配置对象的实时引用（只读用途）：基础参数；自定义提示词走 `promptOverrides`。 */
   private readonly config: DispatcherConfig;
+  /**
+   * 面板热更新的自定义提示词覆盖。
+   *
+   * 不写 `config.customSystemPrompt`：那是 Koishi 交给插件的配置对象，改动它会让 loader
+   * 在序列化/比较时看到「配置变更」，把用户的「停止」变成 reload（见 ADR-022）。
+   */
+  private promptOverrides: { system: string; topic: string } = { system: '', topic: '' };
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
@@ -1447,10 +1454,29 @@ export class ModelDispatcher {
     return resolveSystemPrompt(this.customPrompt || undefined);
   }
 
+  /** 主题聚合用的自定义提示词（去空白）；空串表示内置默认。 */
+  get topicPrompt(): string {
+    return this.promptOverrides.topic.trim();
+  }
+
+  /** 当前自定义系统提示词（原样，保留用户输入的换行与缩进）；空串表示内置默认。 */
+  get customSystemPromptText(): string {
+    return this.promptOverrides.system;
+  }
+
+  /**
+   * 热更新自定义提示词：只改本实例字段，不写宿主 config。
+   * 未传的键保持原值（`''` 是合法值，表示恢复默认）。
+   */
+  public setPromptOverrides(overrides: { system?: string; topic?: string }): void {
+    if (overrides.system !== undefined) this.promptOverrides.system = overrides.system;
+    if (overrides.topic !== undefined) this.promptOverrides.topic = overrides.topic;
+  }
+
   /** 已配置的自定义系统提示词（去空白）；空串表示使用内置帕秋莉提示词。 */
   private get customPrompt(): string {
-    const raw = this.config.customSystemPrompt;
-    return typeof raw === 'string' ? raw.trim() : '';
+    const raw = this.promptOverrides.system;
+    return raw.trim();
   }
 
   /**

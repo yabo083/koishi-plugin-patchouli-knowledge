@@ -13,7 +13,6 @@
 import { promises as fs } from 'node:fs';
 import { dirname as dirnamePath } from 'node:path';
 import { resolveWikiLayout } from '../wiki/layout';
-import type { DispatcherConfig } from '../types';
 
 /** 自定义提示词文件的绝对路径（纯路径运算，不做 I/O）。 */
 export function resolveCustomPromptPath(wikiDir: string): string {
@@ -56,19 +55,18 @@ export async function writeCustomPromptFile(wikiDir: string, prompt: string): Pr
 }
 
 /**
- * 「保存并应用」/「恢复默认」的唯一执行路径：**先落盘，再热更新实时配置**。
- * 落盘失败时内存保持原值，绝不出现「面板说生效、重启就丢」。
+ * 「保存并应用」/「恢复默认」的唯一落盘路径：**先落盘，再由调用方热更新运行时覆盖**。
+ * 返回值是规范化后的内容（空白 → 空串）；落盘失败直接抛出，调用方内存保持原值。
+ *
+ * 不写 `DispatcherConfig`：那是 Koishi 传给插件的配置对象，修改它会让 loader 的
+ * 序列化/比较看到「配置变更」，把用户点下的「停止」翻成 reload。
  */
-export async function persistCustomPrompt(
-  wikiDir: string,
-  dispatcher: DispatcherConfig,
-  prompt: string,
-): Promise<void> {
+export async function persistCustomPrompt(wikiDir: string, prompt: string): Promise<string> {
   const raw = typeof prompt === 'string' ? prompt : '';
-  // 仅含空白的内容一律收敛为空串：内存置空 + 删除落盘文件，绝不留下伪自定义副本。
+  // 仅含空白的内容一律收敛为空串：删除落盘文件，绝不留下伪自定义副本。
   const next = raw.trim().length > 0 ? raw : '';
   await writeCustomPromptFile(wikiDir, next);
-  dispatcher.customSystemPrompt = next;
+  return next;
 }
 
 /** 主题聚合自定义提示词文件的绝对路径。 */
@@ -105,14 +103,10 @@ export async function writeTopicPromptFile(wikiDir: string, prompt: string): Pro
   }
 }
 
-/** 「保存并应用」主题提示词：先落盘，再热更新调度器配置。 */
-export async function persistTopicPrompt(
-  wikiDir: string,
-  dispatcher: DispatcherConfig,
-  prompt: string,
-): Promise<void> {
+/** 「保存并应用」主题提示词：先落盘，再由调用方热更新运行时覆盖（同样不写宿主 config）。 */
+export async function persistTopicPrompt(wikiDir: string, prompt: string): Promise<string> {
   const raw = typeof prompt === 'string' ? prompt : '';
   const next = raw.trim().length > 0 ? raw : '';
   await writeTopicPromptFile(wikiDir, next);
-  dispatcher.customTopicPrompt = next;
+  return next;
 }
