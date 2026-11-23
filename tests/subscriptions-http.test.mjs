@@ -274,6 +274,8 @@ test('SUBS-HTTP-06: POST /api/subscriptions 拒绝非法载荷（400）', async 
       [{ rows: null }, /数组/u],
       [{ rows: [{ source: '', targets: ['@chat'], entry: true, weekly: false }] }, /source 不能为空/u],
       [{ rows: [{ source: '*', targets: ['456'], entry: true, weekly: false }] }, /target 只能是/u],
+      [{ rows: [{ source: '*', targets: ['@chat'], entry: true, weekly: false }] }, /`\*` 行不支持本群聊天/u],
+      [{ rows: [{ source: '*', targets: ['123/A1', '@chat'], entry: true, weekly: false }] }, /请指定具体群/u],
       [{ rows: [{ source: '*', targets: ['456/A9'], entry: true, weekly: false }] }, /未在探测结果中/u],
       [{ rows: [{ source: '*', targets: ['123/A1'], entry: 1, weekly: false }] }, /entry 必须是布尔值/u],
       [{ rows: [{ source: '*', targets: '123/A1', entry: true, weekly: false }] }, /targets 必须是数组/u],
@@ -458,6 +460,26 @@ test('BIND-04: 保存时绑定落盘、首轮迁移一次性写入且幂等', as
       assert.deepEqual(raw.subscriptions, subscriptions, '行本身原样落盘（名字保留，由面板提示重选）');
       install(third.system, newcomer);
       assert.deepEqual(entryTargetsFor(third.system.subscriptions(), '100000001'), [], '未绑定即停投');
+
+      // ⑤ 重启：迁移标记已落盘 → 不得再拿当前候选（同名新相册）重新解析。
+      const cleared = await readFile(settingsPath(wikiDir), 'utf8');
+      const fourth = await boot({ wikiDir });
+      try {
+        assert.equal(
+          await readFile(settingsPath(wikiDir), 'utf8'),
+          cleared,
+          '删光绑定后的重启不得再写绑定表',
+        );
+        assert.deepEqual(await readTargetBindings(wikiDir), {}, '同名新相册不得被自动绑定');
+        install(fourth.system, newcomer);
+        assert.deepEqual(
+          entryTargetsFor(fourth.system.subscriptions(), '100000001'),
+          [],
+          '保持未绑定 = 停投 + 面板提示重选，绝不改投另一个群的同名相册',
+        );
+      } finally {
+        fourth.system.dispose();
+      }
     } finally {
       third.system.dispose();
     }

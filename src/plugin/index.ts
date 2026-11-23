@@ -63,6 +63,7 @@ import {
   readSettingsOverridesSync,
   readSubscriptionOverride,
   readSubscriptionOverrideSync,
+  readTargetBindingMigration,
   readTargetBindings,
   readTargetBindingsSync,
   validateMergedSettings,
@@ -78,6 +79,8 @@ import {
   type SettingsOverrides,
   type SettingsRepairContext,
   type SettingsSection,
+  type SettingsSectionPatch,
+  type SettingsValue,
 } from './settings-store';
 import {
   CARD_SETTINGS_DEFAULT,
@@ -121,7 +124,7 @@ import {
   type TuningTarget,
 } from '../trigger/tuning';
 import { ModelDispatcher, normalizeDispatcherProvider, resolveDispatcherModels } from '../dispatcher/dispatcher';
-import { WikiEngine } from '../wiki/engine';
+import { formatDate, WikiEngine } from '../wiki/engine';
 import { LocalStore } from '../wiki/storage';
 import type { WikiEntryRecord } from '../wiki/storage';
 import { DEFAULT_WIKI_SUBDIR, ensureWikiLayout, resolveWikiLayout } from '../wiki/layout';
@@ -700,6 +703,65 @@ function refreshSubscriptionTargets(
 }
 
 /**
+ * 一轮相册探测 → 合并缓存 → 注入候选 → 重装订阅目标表。
+ *
+ * 从 `apply()` 的闭包里提出来只为一件事：**卸载竞态**。探测是异步且可跨秒的，
+ * 插件 dispose 之后探测才返回时，`ctx.schema.set` 会在已销毁的 context 上建 effect
+ * （cordis 抛 `cannot create effect on inactive context`，卸载流程被打断），`install`
+ * 还会把**旧实例的候选**写进模块级 union——新实例的下拉就被上一份快照顶掉了。
+ * 所以每个 `await` 之后都要重查 `disposed`，一次都不许漏；写成一条线性函数才能一眼数清。
+ *
+ * 返回值只给测试与日志用：`disposed` = 中途卸载，什么都没装。
+ */
+export interface AlbumRefreshDeps {
+  /** 卸载标志（`ctx.on('dispose')` 里置位）。 */
+  disposed: () => boolean;
+  /** 探测范围：机器人 + 群号（`albumProbeScope`）。 */
+  scope: () => Promise<{ bots: AlbumBot[]; groupIds: string[] }>;
+  probe: (input: { bots: readonly AlbumBot[]; groupIds: readonly string[] }) => Promise<readonly AlbumCandidate[]>;
+  readCache: () => Promise<readonly AlbumCandidate[]>;
+  writeCache: (albums: readonly AlbumCandidate[]) => Promise<unknown>;
+  /** 注入控制台候选（`Schema.dynamic`）。 */
+  applySchema: (albums: readonly AlbumCandidate[]) => void;
+  /** 重装解析 / 展示表并原地替换订阅目标 union（`refreshSubscriptionTargets`）。 */
+  install: (values: StartupTargetValues, groupIds: readonly string[]) => void;
+  configured: () => readonly string[];
+  bindings: () => Record<string, string>;
+  log: (message: string) => void;
+}
+
+/** `refreshAlbumCandidates` 的结果（`disposed` = 中途卸载，零副作用）。 */
+export type AlbumRefreshOutcome = 'disposed' | 'cached' | 'installed';
+
+export async function refreshAlbumCandidates(deps: AlbumRefreshDeps): Promise<AlbumRefreshOutcome> {
+  if (deps.disposed()) return 'disposed';
+  const { bots, groupIds } = await deps.scope();
+  if (deps.disposed()) return 'disposed';
+  if (groupIds.length === 0) {
+    const cached = await deps.readCache();
+    if (deps.disposed()) return 'disposed';
+    deps.applySchema(cached);
+    return 'cached';
+  }
+  const discovered = await deps.probe({ bots, groupIds });
+  if (deps.disposed()) return 'disposed';
+  const previous = await deps.readCache();
+  if (deps.disposed()) return 'disposed';
+  const merged = mergeAlbumCandidates(previous, discovered, groupIds);
+  // 表外群的历史缓存直接丢弃（缓存按群累积，退订群的相册不该继续挂在候选里）；
+  // scope 内的群掉线时仍走「保留旧候选」，它们本来就在 `groupIds` 里。
+  // `configured` 点名的旧值例外：只留这几个具体相册，不连带它所属群的其它相册。
+  const scoped = scopeAlbumCandidates(merged, groupIds, deps.configured());
+  if (deps.disposed()) return 'disposed';
+  deps.applySchema(scoped);
+  if (scoped.length > 0) await deps.writeCache(scoped);
+  if (deps.disposed()) return 'disposed';
+  deps.install({ albums: scoped, configured: [...deps.configured()], bindings: deps.bindings() }, groupIds);
+  deps.log(`[Patchouli] 群相册候选 ${scoped.length} 个（覆盖 ${groupIds.length} 个群）`);
+  return 'installed';
+}
+
+/**
  * 订阅表的同步范围判定：显式来源群 + 是否「监听全部群」。
  *
  * `*` 行，以及「表为空且旧白名单也为空」（旧配置的 `listening: null`）都表示全部群；
@@ -941,11 +1003,14 @@ function adoptLegacyField(
  * 把控制台的隐藏段摊平成顶层字段（`apply()` 与 `PatchouliKnowledgeSystem` 构造共用，
  * 摊平两次是幂等的）。
  *
- * 来源优先级：
- * 1. **顶层已存在的段**（0.8.4x 之前的扁平配置：隐藏段直接写在顶层）——原值优先，
+ * 来源优先级（**逐段独立**判定，不是整包二选一）：
+ * 1. **该段写在顶层**（0.8.4x 之前的扁平配置，或新版控制台把改过的段写回顶层）——原值优先，
  *    否则升级会把用户每一档设置静默重置成默认值；
- * 2. `advanced` 段（0.8.66 的容器布局）；
+ * 2. 该段只在 `advanced` 里（0.8.66 的容器布局）——取旧位置的值；
  * 3. `legacySectionsSchema()` 的 Schema 默认值（`Config({})` 不物化隐藏段，运行时在这里补齐）。
+ *
+ * 「有顶层键就整包按旧文件读」会丢掉 `advanced` 里没被搬到顶层的段（典型：
+ * 顶层改了 `trigger`、`channels` 白名单还在 `advanced` → 白名单清空 = 监听所有群）。
  *
  * `features` / `adminUsers` 同样在这里补齐：前者是插件页总闸（缺省全开），
  * 后者是自动书记白名单（缺省 `[]` = 无人可用，fail closed）。
@@ -955,9 +1020,14 @@ export function flattenConfig(rawConfig: PluginOptions): PluginOptions {
   const legacySchema = legacySectionsSchema();
   const defaults = legacySchema({}) as unknown as Record<string, unknown>;
   const nested = isPlainRecord(raw.advanced) ? raw.advanced : {};
-  // 旧扁平配置：只要顶层出现隐藏段的任一键，整段就按旧文件读（而不是 Schema 默认值）。
-  const legacyFlat = Object.keys(defaults).some((key) => raw[key] !== undefined);
-  const source = legacyFlat ? raw : nested;
+  // **逐段**决策来源（不是「顶层出现了任一隐藏键就整份按旧文件读」）：混写是真实存在的
+  // 形态——新版控制台把 `trigger` 写在顶层，而没动过的 `channels` 还留在 `advanced` 里。
+  // 按单个顶层键决定整包来源会让 `advanced.channels` 的白名单整段丢失 = 退化成监听全部群。
+  const source: Record<string, unknown> = {};
+  for (const key of Object.keys(defaults)) {
+    if (raw[key] !== undefined) source[key] = raw[key];
+    else if (nested[key] !== undefined) source[key] = nested[key];
+  }
 
   let parsed: Record<string, unknown>;
   try {
@@ -1089,6 +1159,16 @@ export class PatchouliKnowledgeSystem {
    * `initialize()` 再异步回灌。
    */
   private targetBindings: Record<string, string> = {};
+  /**
+   * 绑定表是否已经「建立」过（首轮迁移或面板保存至少完成一次）。
+   *
+   * 判据来自 `settings.json` 的 `bindingMigration` 标记（与绑定表同一次原子写，
+   * 见 `readTargetBindingMigration`）。它把两类「名字没有绑定」分开：
+   * - **未建立**（升级前只有 yml）→ 名字从没解析过，首轮迁移/首次保存要解析；
+   * - **已建立** → 名字在落盘的行里却没有绑定，只可能是掉绑后留下的（相册消失 /
+   *   歧义 / 改名）→ 不再拿当前候选重解析，等用户重选（见 `resolveTargetBindings` 规则 3）。
+   */
+  private bindingTableEstablished = false;
   /**
    * 订阅表变更回调：由 `apply()` 注入。
    *
@@ -1302,6 +1382,19 @@ export class PatchouliKnowledgeSystem {
   }
 
   /**
+   * 词条投递的外层闸：**新表生效时由行决定，表为空（旧配置回退）时才读 `entryEnabled`**。
+   *
+   * 旧实现无条件先看 `albumDelivery.entryEnabled`：用户在新表里勾了「词条」，只要这个旧开关
+   * 是关的（升级前关的 / 旧配置里写的），词条就永远不投——保存成功、日志里也有目标，实际一条不发。
+   * `features.entries` 是功能总闸，关掉就整个不做（投递钩子里还有一道同样的判断）。
+   */
+  private entryCardDeliveryEnabled(): boolean {
+    if (this.entryCardSink === undefined) return false;
+    if (this.config.features.entries === false) return false;
+    return this.subscriptions().active || this.config.albumDelivery?.entryEnabled !== false;
+  }
+
+  /**
    * 启动期异步初始化：建全 llmwiki 骨架，再回灌 `<wikiDir>/.patchouli/custom-prompt.txt`。
    * 两段都自带错误降级，`ready` 恒为 resolve —— 调用方可以安全 `await`。
    */
@@ -1373,7 +1466,7 @@ export class PatchouliKnowledgeSystem {
           this.logger?.info('[Patchouli] 已把主题校准参数迁移到 .patchouli/settings.json');
         }
       }
-      this.applySettingsOverrides(overrides);
+      this.applySettingsOverrides(overrides, 'replay');
       // 订阅表与标量段同一个文件、同一条读取路径：两处都要回灌，避免读到构造期的旧快照。
       this.subscriptionOverride = await readSubscriptionOverride(this.wikiDir);
       this.targetBindings = await readTargetBindings(this.wikiDir);
@@ -1395,6 +1488,9 @@ export class PatchouliKnowledgeSystem {
   private async migrateTargetBindings(): Promise<void> {
     try {
       this.targetBindings = await readTargetBindings(this.wikiDir);
+      // 「建立过」判据来自落盘标记（与绑定表同一次原子写）：非空表本身也算建立过。
+      this.bindingTableEstablished =
+        Object.keys(this.targetBindings).length > 0 || (await readTargetBindingMigration(this.wikiDir));
       if (Object.keys(this.targetBindings).length > 0) return;
       const rows = resolveRows(this.config, this.subscriptionOverride ?? undefined);
       const hasNames = rows.some((row) =>
@@ -1407,7 +1503,12 @@ export class PatchouliKnowledgeSystem {
       );
       if (!hasNames) return;
       const albums = await readAlbumCache(this.wikiDir);
-      const { bindings, unresolved } = resolveTargetBindings(rows, albums);
+      // 掉绑标记只来自「上一次落盘的行」，且只在绑定表**建立过**时才算数：
+      // 升级前只有 yml、还没建立绑定时名字本来就还没解析过，必须照常解析。
+      const previousRows: readonly SubscriptionRow[] = this.bindingTableEstablished
+        ? this.subscriptionOverride ?? []
+        : [];
+      const { bindings, unresolved } = resolveTargetBindings(rows, albums, {}, previousRows);
       if (Object.keys(bindings).length === 0) {
         this.logger?.warn(
           `[Patchouli] 订阅目标尚未建立绑定（投递期会停投）：${unresolved.join('、')} —— 请重新选择相册`,
@@ -1415,6 +1516,8 @@ export class PatchouliKnowledgeSystem {
         return;
       }
       this.targetBindings = await writeTargetBindings(this.wikiDir, bindings);
+      // 迁移写成（或本来就有标记）= 绑定表已建立：之后的掉绑不再被自动重解析。
+      this.bindingTableEstablished = true;
       const bound = Object.keys(this.targetBindings).length;
       this.logger?.info(
         `[Patchouli] 已为 ${bound} 个订阅目标建立相册绑定（写入 .patchouli/settings.json）` +
@@ -1557,7 +1660,8 @@ export class PatchouliKnowledgeSystem {
       // 文件被外部改写（内存快照滞后）：先把真源读回来，再按**真实合并值**给出可读的 400。
       // 不这样做的话面板会永远拿同一个冲突文案，而它看到的段值又不是文件里的值。
       const refreshed = await readSettingsOverrides(this.wikiDir, this.settingsRepairContext());
-      this.applySettingsOverrides(refreshed);
+      // 文件是外部改写的：运行态直接服从文件真源（整段应用），不是「本次补丁」。
+      this.applySettingsOverrides(refreshed, 'replay');
       const conflicts = validateMergedSettings(validated.section, {
         ...(this.mergedSection(validated.section) as unknown as Record<string, unknown>),
         ...validated.value,
@@ -1577,16 +1681,24 @@ export class PatchouliKnowledgeSystem {
   }
 
   /**
-   * 覆盖层变更的统一生效点：替换内存快照、同步主题副本，并把**本次写入的键**
-   * 落到已建状态的触发器与裁判上（只应用补丁键，不覆盖 AIMD 逐群调校结果）。
+   * 覆盖层变更的统一生效点：替换内存快照、同步主题副本，并把**本次变化的键**
+   * 落到已建状态的触发器与裁判上（只应用变化的键，不覆盖 AIMD 逐群调校结果）。
+   *
+   * `mode` 决定「变化」怎么算：
+   * - `patch`（默认，面板保存）：只应用 `previous` → `next` 之间真正变了的键。
+   *   落盘的 `trigger` 段是**累积**的（上次保存就把 `minBurstRate` 写进去了），
+   *   整段重放等于把每个群 AIMD 学到的值按老快照改回去——保存一个无关设置也会。
+   * - `replay`（启动回灌 / 文件被外部改写后重读）：整段应用。那时运行态参数本来就该
+   *   服从文件里的真源，没有「本次补丁」可言。
    *
    * 触发器热更新按群逐个兜底：文件已经落盘，这里再抛错就只剩「500 + 运行态半截」，
    * 比「这个群沿用旧参数 + 一条告警」糟得多。
    */
-  private applySettingsOverrides(next: SettingsOverrides): void {
+  private applySettingsOverrides(next: SettingsOverrides, mode: 'patch' | 'replay' = 'patch'): void {
+    const previous = this.settingsOverrides;
     this.settingsOverrides = next;
     Object.assign(this.topicRuntime, this.mergedSection('topics'));
-    const triggerPatch = next.trigger;
+    const triggerPatch = mode === 'replay' ? next.trigger : this.changedTriggerKeys(previous.trigger, next.trigger);
     if (triggerPatch !== undefined) {
       try {
         this.detector.applyDefaultOptions(triggerPatch);
@@ -1621,6 +1733,37 @@ export class PatchouliKnowledgeSystem {
         apiKey: typeof mediaPatch.apiKey === 'string' ? mediaPatch.apiKey : undefined,
       });
     }
+  }
+
+  /**
+   * 两次覆盖层快照之间**真正变了的** `trigger` 键；没有变化返回 `undefined`。
+   *
+   * 删掉的键按「回落到宿主 config 的值」应用（覆盖层里没有它了）——不能塞 `undefined`：
+   * `normalizeTriggerOptions` 只认有值的键。上限 = `trigger` 的字段数（十几个），
+   * 每次保存算一遍的成本可以忽略。
+   */
+  private changedTriggerKeys(
+    previous: SettingsSectionPatch | undefined,
+    next: SettingsSectionPatch | undefined,
+  ): SettingsSectionPatch | undefined {
+    const before = previous ?? {};
+    const after = next ?? {};
+    const patch: SettingsSectionPatch = {};
+    let changed = false;
+    for (const [key, value] of Object.entries(after)) {
+      if (Object.hasOwn(before, key) && deepEqual(before[key], value)) continue;
+      patch[key] = value;
+      changed = true;
+    }
+    const base = this.config.trigger as unknown as Record<string, SettingsValue | undefined>;
+    for (const key of Object.keys(before)) {
+      if (Object.hasOwn(after, key)) continue;
+      const fallback = base[key];
+      if (fallback === undefined) continue;
+      patch[key] = fallback;
+      changed = true;
+    }
+    return changed ? patch : undefined;
   }
 
   /**
@@ -1732,12 +1875,21 @@ export class PatchouliKnowledgeSystem {
     if (!validated.ok) return { ok: false, error: validated.error };
     // 已有绑定是「上一次保存时的解析结论」：相册仍可见就原样保留（名字换主也不换收件人），
     // 看不见了才掉绑并上报 → 停投 + 告警，绝不给同名相册当替身。
-    const { bindings, unresolved } = resolveTargetBindings(validated.rows, albums, this.targetBindings);
+    // `subscriptionOverride` 是上一次**落盘**的行：名字在里面却不在绑定表里 = 上次就掉绑了，
+    // 本次同样的行不再重解析（否则下一次保存会把它绑到新群恰好同名的相册上）。
+    // 只在绑定表建立过时才算标记：升级前只有 yml 时名字还没解析过，必须照常解析。
+    const previousRows: readonly SubscriptionRow[] = this.bindingTableEstablished
+      ? this.subscriptionOverride ?? []
+      : [];
+    const { bindings, unresolved } = resolveTargetBindings(validated.rows, albums, this.targetBindings, previousRows);
     // 落盘失败是真故障（磁盘 / 权限），直接抛出由 HTTP 层归 500，不能伪装成 400。
     const stored = await writeSubscriptionOverride(this.wikiDir, validated.rows, bindings);
     this.subscriptionOverride = stored.rows;
     // 绑定表整份替换：新表只认本次解析成功的名字。
+    // 这次写盘同时带上迁移完成标记（`writeSubscriptionOverride` 的语义：显式给绑定 = 用户
+    // 对绑定做了选择，删空也算），所以从这一刻起名字没绑上就是掉绑，不再自动重解析。
     this.targetBindings = stored.bindings;
+    this.bindingTableEstablished = true;
     if (unresolved.length > 0) {
       this.logger?.warn(
         `[Patchouli] 订阅目标未绑定（投递期会停投）：${unresolved.join('、')} —— 请重新选择相册`,
@@ -2201,11 +2353,13 @@ export class PatchouliKnowledgeSystem {
 
         // 3. 词条卡片投递：产品决策（2026-11-10）改为「讨论结束即出图」，
         //    不再等周报；投递失败不影响沉淀结果，也不拖慢结算。
-        if (this.config.albumDelivery?.entryEnabled !== false && this.entryCardSink !== undefined) {
+        if (this.entryCardDeliveryEnabled()) {
           const sink = this.entryCardSink;
-          void sink(result.entry.id, session.channelId).catch((error: unknown) => {
-            this.logger?.warn(`[Patchouli] 词条投递异常: ${String(error)}`);
-          });
+          if (sink !== undefined) {
+            void sink(result.entry.id, session.channelId).catch((error: unknown) => {
+              this.logger?.warn(`[Patchouli] 词条投递异常: ${String(error)}`);
+            });
+          }
         }
 
         // 4. 是否在群内轻量播报
@@ -2340,11 +2494,27 @@ export class PatchouliKnowledgeSystem {
    * 直接执行一次主题校准、不写日切水位（调度器与需要绕过水位的场景使用）。
    *
    * 开关 / 幂等 / 零写入语义全部由聚合器把守，这里只透传。
+   *
+   * **功能总闸在这里也要判**：`features.topics === false` 时调度器的 `channels()` 返回空表
+   * （定时轮空），但管理入口 `/api/topics` 走的是 `runTopics` → 调度器 `runChannelNow`
+   * → 本方法，会绕过那张空表照样烧一次模型。返回与聚合器同一形状的 disabled 结果。
    */
   public async runTopicsDirect(
     channelId: string,
     options: { force?: boolean; now?: number } = {},
   ): Promise<TopicRunResult> {
+    if (this.config.features.topics === false) {
+      const result: TopicRunResult = {
+        channelId,
+        dayKey: formatDate(new Date(options.now ?? Date.now())),
+        createdTopicIds: [],
+        updatedTopicIds: [],
+        assignedEntryIds: [],
+        skippedReason: 'disabled',
+      };
+      this.lastTopicRun = result;
+      return result;
+    }
     const result = await this.topicCurator.runChannel(channelId, this.topicRuntime, options);
     this.lastTopicRun = result;
     return result;
@@ -2720,6 +2890,8 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   // 订阅表 / 绑定表一变（面板保存、覆盖层回灌、首轮迁移）就重装解析表并重注入候选：
   // 解析只认落盘绑定，候选只决定下拉与标签文案，两者刻意分开刷新。
   system.onSubscriptionsChanged = () => {
+    // 卸载后不得再碰模块级 schema / 解析表：旧实例会顶掉新实例刚装好的那一份。
+    if (disposed) return;
     applyAlbumSchema(lastAlbumCandidates);
     currentTargets = refreshSubscriptionTargets({
       ...currentTargets,
@@ -2733,29 +2905,24 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
    * 探测范围只覆盖订阅表里出现的监听群（`albumProbeScope`）；探测拿到的新相册会顺手
    * 原地刷新订阅表 `targets` 的候选，控制台不必等到下次重载。
    * 群号上限由 `MAX_PROBE_GROUPS` 兜住（供控制台连接时按需触发）。
+   * 卸载竞态由 `refreshAlbumCandidates` 里的逐 `await` 重查兜住。
    */
   async function refreshAlbumSchema(): Promise<void> {
-    if (disposed) return;
-    const { bots, groupIds } = await albumProbeScope();
-    if (groupIds.length === 0) {
-      applyAlbumSchema(await readAlbumCache(system.wikiDir));
-      return;
-    }
-    const discovered = await probeGroupAlbums({ groupIds, bots, service: deliveryAlbumService() });
-    if (disposed) return;
-    const previous = await readAlbumCache(system.wikiDir);
-    const merged = mergeAlbumCandidates(previous, discovered, groupIds);
-    // 表外群的历史缓存直接丢弃（缓存按群累积，退订群的相册不该继续挂在候选里）；
-    // scope 内的群掉线时仍走「保留旧候选」，它们本来就在 `groupIds` 里。
-    // `configured` 点名的旧值例外：只留这几个具体相册，不连带它所属群的其它相册。
-    const scoped = scopeAlbumCandidates(merged, groupIds, currentTargets.configured);
-    applyAlbumSchema(scoped);
-    if (scoped.length > 0) await writeAlbumCache(system.wikiDir, scoped);
-    currentTargets = refreshSubscriptionTargets(
-      { albums: scoped, configured: currentTargets.configured, bindings: system.targetBindingsSnapshot() },
-      groupIds,
-    );
-    logger.info(`[Patchouli] 群相册候选 ${scoped.length} 个（覆盖 ${groupIds.length} 个群）`);
+    await refreshAlbumCandidates({
+      disposed: () => disposed,
+      scope: albumProbeScope,
+      probe: ({ bots, groupIds }) =>
+        probeGroupAlbums({ groupIds: [...groupIds], bots: [...bots], service: deliveryAlbumService() }),
+      readCache: () => readAlbumCache(system.wikiDir),
+      writeCache: (albums) => writeAlbumCache(system.wikiDir, albums),
+      applySchema: applyAlbumSchema,
+      install: (values, groupIds) => {
+        currentTargets = refreshSubscriptionTargets(values, groupIds);
+      },
+      configured: () => currentTargets.configured,
+      bindings: () => system.targetBindingsSnapshot(),
+      log: (message) => logger.info(message),
+    });
   }
 
   /**

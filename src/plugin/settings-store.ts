@@ -434,6 +434,15 @@ const SUBSCRIPTIONS_KEY = 'subscriptions';
  */
 const TARGET_BINDINGS_KEY = 'targetBindings';
 
+/**
+ * 首轮绑定迁移的完成标记（`bindingMigration: 1`）。
+ *
+ * 与绑定表**同一次原子写**，只写一次。语义：有标记 + 空表 = 用户把绑定删光了，
+ * 不是「还没迁移过」——启动期不得再拿当前候选重新解析同名相册（那会把收件人
+ * 悄悄换成另一个群的同名相册）。只有「缺标记 + 空表」才是首轮迁移的入口。
+ */
+const BINDING_MIGRATION_KEY = 'bindingMigration';
+
 /** 绑定表项数上限：相册候选 ≤400，1024 足够且是硬上限。 */
 export const MAX_TARGET_BINDINGS = 1024;
 
@@ -472,55 +481,116 @@ interface StoredDocument {
   sections: SettingsOverrides;
   /** `null` = 文件里没有订阅覆盖（运行时回落到 `config.subscriptions`）。 */
   subscriptions: SubscriptionRow[] | null;
-  /** 名字 → 稳定地址；空表 = 尚未建立绑定（首轮迁移会尝试填充一次）。 */
+  /** 名字 → 稳定地址；空表且没有迁移标记 = 尚未建立绑定（首轮迁移会尝试填充一次）。 */
   bindings: Record<string, string>;
+  /** 首轮绑定迁移已完成；`true` 且绑定表为空 = 用户删光了绑定，不得再自动解析。 */
+  bindingMigration: boolean;
 }
 
-const EMPTY_DOCUMENT: StoredDocument = { sections: {}, subscriptions: null, bindings: {} };
+const EMPTY_DOCUMENT: StoredDocument = {
+  sections: {},
+  subscriptions: null,
+  bindings: {},
+  bindingMigration: false,
+};
 
-function parseDocument(text: string): StoredDocument {
+/** 解析结果：`ok:false` 表示内容不可识别——读路径回退空表，写路径必须拒绝写入。 */
+type DocumentParse =
+  | { readonly ok: true; readonly document: StoredDocument }
+  | { readonly ok: false; readonly reason: string };
+
+function parseDocument(text: string): DocumentParse {
+  let doc: unknown;
   try {
-    const doc: unknown = JSON.parse(text);
-    if (!isPlainObject(doc) || doc.version !== 1) return EMPTY_DOCUMENT;
-    // 订阅表是结构化数组：脏载荷在这里收敛（行数 / 目标数 / 字段长度封顶，旧单值归一）。
-    const subscriptions = doc[SUBSCRIPTIONS_KEY];
-    return {
+    doc = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: '不是合法 JSON' };
+  }
+  if (!isPlainObject(doc)) return { ok: false, reason: '顶层不是对象' };
+  // 版本不符 = 不认识的格式：静默当空表就会在下一保存时抹掉整份未知内容。
+  if (doc.version !== 1) return { ok: false, reason: `version 不是 1（收到 ${JSON.stringify(doc.version)}）` };
+  // 订阅表是结构化数组：脏载荷在这里收敛（行数 / 目标数 / 字段长度封顶，旧单值归一）。
+  const subscriptions = doc[SUBSCRIPTIONS_KEY];
+  const bindings = sanitizeTargetBindings(doc[TARGET_BINDINGS_KEY]);
+  return {
+    ok: true,
+    document: {
       sections: sanitizeSections(doc.sections),
       subscriptions: Array.isArray(subscriptions) ? normalizeSubscriptionRows(subscriptions) : null,
-      bindings: sanitizeTargetBindings(doc[TARGET_BINDINGS_KEY]),
-    };
-  } catch {
-    return EMPTY_DOCUMENT;
-  }
+      bindings,
+      // 有绑定 = 迁移早已发生过（升级前的文件没有标记）；标记只在首次迁移 / 面板保存后落盘。
+      bindingMigration: doc[BINDING_MIGRATION_KEY] === 1 || Object.keys(bindings).length > 0,
+    },
+  };
 }
 
-async function readDocumentAt(path: string): Promise<StoredDocument> {
+/** 读文件的结果：只有 `missing`（ENOENT）允许按空文档新建，`unreadable` 一律拒绝写入。 */
+type DocumentRead =
+  | { readonly ok: true; readonly document: StoredDocument }
+  | { readonly ok: false; readonly kind: 'missing' | 'unreadable'; readonly reason: string };
+
+async function readDocumentAt(path: string): Promise<DocumentRead> {
+  let text: string;
   try {
-    return parseDocument(await fs.readFile(path, 'utf8'));
-  } catch {
-    return EMPTY_DOCUMENT;
+    text = await fs.readFile(path, 'utf8');
+  } catch (error) {
+    // `ENOENT` 是唯一「可以新建」的失败；权限 / 临时 IO / 目录撞名都不行。
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return { ok: false, kind: 'missing', reason: `${path} 不存在` };
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, kind: 'unreadable', reason: `${path} 读取失败：${detail}` };
   }
+  const parsed = parseDocument(text);
+  if (!parsed.ok) return { ok: false, kind: 'unreadable', reason: `${path} ${parsed.reason}` };
+  return { ok: true, document: parsed.document };
 }
 
-function readDocumentAtSync(path: string): StoredDocument {
+function readDocumentAtSync(path: string): DocumentRead {
+  let text: string;
   try {
-    return parseDocument(readFileSync(path, 'utf8'));
-  } catch {
-    return EMPTY_DOCUMENT;
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return { ok: false, kind: 'missing', reason: `${path} 不存在` };
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, kind: 'unreadable', reason: `${path} 读取失败：${detail}` };
   }
+  const parsed = parseDocument(text);
+  if (!parsed.ok) return { ok: false, kind: 'unreadable', reason: `${path} ${parsed.reason}` };
+  return { ok: true, document: parsed.document };
 }
 
 /**
- * 读取覆盖层（异步；文件不存在 / 损坏 / 版本不符一律空表）。
+ * 读路径（启动回灌 / GET）的宽松回退：读不出来就当空文档——一份坏文件绝不能变成
+ * 「插件起不来」的原因；但留下一次告警，让用户知道下一次保存会被拒绝、需要修文件。
+ */
+function lenientDocument(read: DocumentRead, context?: SettingsRepairContext): StoredDocument {
+  if (read.ok) return read.document;
+  if (read.kind === 'unreadable') {
+    context?.warn?.(
+      `[Patchouli] .patchouli/settings.json 无法解析，本次按空设置运行（保存会被拒绝，请修复或删除该文件）：` +
+        read.reason,
+    );
+  }
+  return EMPTY_DOCUMENT;
+}
+
+/**
+ * 读取覆盖层（异步；文件不存在 / 损坏 / 版本不符一律空表 + 一次 warn）。
  *
  * 给了 `context.base` 时会做自愈：合并后非法的段整段丢弃并 `warn`，
- * 绝不让一份坏 `settings.json` 变成插件起不来的原因。
+ * 绝不让一份坏 `settings.json` 变成插件起不来的原因。读懂了但内容非法（坏段）与
+ * 读不懂（损坏 / 版本不符）是两件事：前者由下面的 `repairSections` 就地修，后者只告警，
+ * 写路径同样会拒绝落盘——见 `performDocumentWrite`。
  */
 export async function readSettingsOverrides(
   wikiDir: string,
   context?: SettingsRepairContext,
 ): Promise<SettingsOverrides> {
-  return repairSections((await readDocumentAt(settingsPath(wikiDir))).sections, context);
+  const read = await readDocumentAt(settingsPath(wikiDir));
+  return repairSections(lenientDocument(read, context).sections, context);
 }
 
 /**
@@ -533,17 +603,18 @@ export function readSettingsOverridesSync(
   wikiDir: string,
   context?: SettingsRepairContext,
 ): SettingsOverrides {
-  return repairSections(readDocumentAtSync(settingsPath(wikiDir)).sections, context);
+  const read = readDocumentAtSync(settingsPath(wikiDir));
+  return repairSections(lenientDocument(read, context).sections, context);
 }
 
 /** 读取订阅表覆盖层；`null` = 没有覆盖（运行时按宿主 config 编译订阅）。 */
 export async function readSubscriptionOverride(wikiDir: string): Promise<SubscriptionRow[] | null> {
-  return (await readDocumentAt(settingsPath(wikiDir))).subscriptions;
+  return lenientDocument(await readDocumentAt(settingsPath(wikiDir))).subscriptions;
 }
 
 /** 读取订阅表覆盖层（同步；插件构造期用，理由同 `readSettingsOverridesSync`）。 */
 export function readSubscriptionOverrideSync(wikiDir: string): SubscriptionRow[] | null {
-  return readDocumentAtSync(settingsPath(wikiDir)).subscriptions;
+  return lenientDocument(readDocumentAtSync(settingsPath(wikiDir))).subscriptions;
 }
 
 /**
@@ -551,12 +622,27 @@ export function readSubscriptionOverrideSync(wikiDir: string): SubscriptionRow[]
  * 「没有绑定」的后果是停投 + 告警，绝不回退到按当前候选猜。
  */
 export async function readTargetBindings(wikiDir: string): Promise<Record<string, string>> {
-  return (await readDocumentAt(settingsPath(wikiDir))).bindings;
+  return lenientDocument(await readDocumentAt(settingsPath(wikiDir))).bindings;
 }
 
 /** 读取绑定表（同步；插件构造期与模块加载期用，理由同 `readSettingsOverridesSync`）。 */
 export function readTargetBindingsSync(wikiDir: string): Record<string, string> {
-  return readDocumentAtSync(settingsPath(wikiDir)).bindings;
+  return lenientDocument(readDocumentAtSync(settingsPath(wikiDir))).bindings;
+}
+
+/**
+ * 「首轮绑定迁移是否已经做过」——启动期迁移的唯一判据。
+ *
+ * - `true`：`settings.json` 里有 `bindingMigration: 1`（首次迁移或面板保存时同一次原子写），
+ *   或绑定表非空（升级前的文件没有标记，非空表本身就证明迁移发生过）。
+ * - `false`：文件不存在 / 读不懂 / 从没写过标记且绑定表为空 —— 这才是首轮迁移的入口。
+ *
+ * **`true` + 空绑定表 = 用户把绑定删光了**：调用方必须原样保持未绑定，不得拿当前相册
+ * 候选重新解析同名相册（那等于把收件人悄悄换成另一个群的同名相册）。迁移写盘侧的
+ * 第二道闸在 `writeTargetBindings`：有标记时它原样返回、不落盘。
+ */
+export async function readTargetBindingMigration(wikiDir: string): Promise<boolean> {
+  return lenientDocument(await readDocumentAt(settingsPath(wikiDir))).bindingMigration;
 }
 
 /** 同一路径的读改写串行链：两个并发 POST 不会互相覆盖（后到者一定读到前者的结果）。 */
@@ -588,6 +674,9 @@ async function writeDocument(target: string, document: StoredDocument): Promise<
   if (document.subscriptions !== null) payload[SUBSCRIPTIONS_KEY] = document.subscriptions;
   // 绑定表同理：空表不写键（「尚未建立绑定」与「空对象」同一个语义）。
   if (Object.keys(document.bindings).length > 0) payload[TARGET_BINDINGS_KEY] = document.bindings;
+  // 迁移标记：与绑定表**同一次原子写**。缺键 = 从未迁移过（首轮迁移的入口）；
+  // 有标记 + 空表 = 用户删光了绑定，重启后不得再拿当前候选猜同名相册。
+  if (document.bindingMigration) payload[BINDING_MIGRATION_KEY] = 1;
   const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fs.mkdir(nodePath.dirname(target), { recursive: true });
   try {
@@ -600,12 +689,36 @@ async function writeDocument(target: string, document: StoredDocument): Promise<
   }
 }
 
+/**
+ * 读不懂的 `settings.json`：写路径拒绝落盘（HTTP 层翻成 500），文件字节保持原样。
+ *
+ * 「当成空文档写回去」的代价是：一次单段保存就把订阅表 / 绑定 / 密钥整份抹掉。
+ * 因此损坏 JSON、`version` 不符、权限不足、临时 IO 失败一律拒绝，等用户修好文件再写；
+ * 只有 `ENOENT`（还没建过）允许新建。
+ */
+export class SettingsDocumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SettingsDocumentError';
+  }
+}
+
+/** 写路径的读：`ENOENT` 当空文档新建，其余失败一律抛错（调用方保持文件原样）。 */
+async function readWritableDocument(target: string): Promise<StoredDocument> {
+  const read = await readDocumentAt(target);
+  if (read.ok) return read.document;
+  if (read.kind === 'missing') return EMPTY_DOCUMENT;
+  throw new SettingsDocumentError(
+    `${read.reason} —— 已拒绝写入（文件保持原样；请修复或删除 .patchouli/settings.json 后重试）`,
+  );
+}
+
 /** 读改写的公共骨架：先读整份文档，交给 `mutate` 换出下一版，再原子落盘。 */
 async function performDocumentWrite(
   target: string,
   mutate: (current: StoredDocument) => StoredDocument,
 ): Promise<StoredDocument> {
-  const next = mutate(await readDocumentAt(target));
+  const next = mutate(await readWritableDocument(target));
   await writeDocument(target, next);
   return next;
 }
@@ -667,7 +780,11 @@ export async function writeSettingsOverrides(
  * 不会互相覆盖。订阅表是唯一不写进 `sections` 的键——它是结构化数组，不是标量补丁。
  *
  * `bindings` 给了就与订阅表**同一次原子落盘**：名字→地址的绑定绝不能落后于行本身，
- * 否则一次断电就能留下「新行 + 旧绑定」的错配。缺省（`undefined`）= 保留文件里的绑定表。
+ * 否则一次断电就能留下「新行 + 旧绑定」的错配。缺省（`undefined`）= 保留文件里的绑定表，
+ * 也**不算**用户对绑定做了选择（升级前的覆盖层就是这种形状，首轮迁移仍要补）。
+ *
+ * 显式给了 `bindings` 落盘的同时打上迁移完成标记：面板保存 = 用户对绑定做了**显式**
+ * 选择（删空也算），之后启动期不得再拿当前候选重新解析同名相册。
  */
 export async function writeSubscriptionOverride(
   wikiDir: string,
@@ -680,6 +797,7 @@ export async function writeSubscriptionOverride(
       ...current,
       subscriptions: rows === null ? null : normalizeSubscriptionRows(rows),
       bindings: bindings === undefined ? current.bindings : sanitizeTargetBindings(bindings),
+      bindingMigration: bindings === undefined ? current.bindingMigration : true,
     })),
   );
   return { rows: next.subscriptions, bindings: next.bindings };
@@ -690,17 +808,26 @@ export async function writeSubscriptionOverride(
  *
  * 与订阅表共用一个文件 / 一条串行链，因此迁移与并发的面板保存不会互相抹掉：
  * 迁移只替换 `bindings` 键，`subscriptions` 与 `sections` 原样保留。
+ *
+ * **只做一次**：文件里已有迁移完成标记（首次迁移写过，或面板保存过、含用户把绑定删空）
+ * 时原样返回、不落盘、不解析——迁移绝不能把用户删掉的绑定重新「猜」回来。标记与绑定表
+ * 同一次原子写，因此「迁移过」与「绑定表内容」永远一致。
  */
 export async function writeTargetBindings(
   wikiDir: string,
   bindings: Readonly<Record<string, string>>,
 ): Promise<Record<string, string>> {
   const target = settingsPath(wikiDir);
-  const next = await enqueueWrite(target, () =>
-    performDocumentWrite(target, (current) => ({
+  const next = await enqueueWrite(target, async () => {
+    const current = await readWritableDocument(target);
+    if (current.bindingMigration) return current;
+    const migrated: StoredDocument = {
       ...current,
       bindings: sanitizeTargetBindings(bindings),
-    })),
-  );
+      bindingMigration: true,
+    };
+    await writeDocument(target, migrated);
+    return migrated;
+  });
   return next.bindings;
 }

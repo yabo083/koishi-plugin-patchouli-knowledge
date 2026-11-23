@@ -377,6 +377,25 @@ test('CONFIG-11: 摊平——旧扁平配置 / 0.8.66 advanced 容器 / 新默�
   assert.equal(explicit.dispatcher.customModel, 'n');
 });
 
+test('CONFIG-14: 摊平按段判定来源——顶层 trigger + advanced.channels 混写不得丢白名单', () => {
+  // 真实形态：新版控制台把改过的 `trigger` 写回顶层，没动过的 `channels` 还留在 `advanced`。
+  // 旧实现「只要顶层出现任一隐藏键就整份按旧文件读」→ `advanced.channels` 整段丢失 →
+  // 白名单变空 = 退化成监听全部群。
+  const mixed = resolve({
+    trigger: { triggerMode: 'rate', dispatchMargin: 1.5 },
+    advanced: { channels: ['onebot:123'], query: { cardMaxHeight: 5000 } },
+  });
+  assert.deepEqual(mixed.channels, ['onebot:123'], 'channels 来自 advanced（顶层没写）');
+  assert.equal(mixed.trigger.triggerMode, 'rate', 'trigger 来自顶层');
+  assert.equal(mixed.trigger.dispatchMargin, 1.5);
+  assert.equal(mixed.trigger.maxBufferMessages, 500, '顶层缺的字段按 Schema 补齐');
+  assert.equal(mixed.query.cardMaxHeight, 5000, 'query 也来自 advanced');
+
+  // 两边都写了同一段：顶层优先（升级迁移规则不变）。
+  const topWins = resolve({ channels: ['onebot:456'], advanced: { channels: ['onebot:123'] } });
+  assert.deepEqual(topWins.channels, ['onebot:456'], '顶层已存在的段优先于 advanced');
+});
+
 test('CONFIG-13: 订阅表旧 `target` 形态——Schema 接受字符串数组，摊平后每元素一行', () => {
   // 宿主校验阶段：早期版本写出的 `target: ['1/a','2/b']` 必须能过，不能被 Schema.string() 拒掉。
   const parsedArray = Config({ subscriptions: [{ source: '1', target: ['1/a', '2/b'], entry: true, weekly: true }] });

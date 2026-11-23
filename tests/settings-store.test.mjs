@@ -9,13 +9,18 @@ import {
   PatchouliKnowledgeSystem,
   SETTINGS_META,
   SETTINGS_SECTIONS,
+  SettingsDocumentError,
   flattenConfig,
   readSettingsOverrides,
   readSettingsOverridesSync,
+  readTargetBindingMigration,
+  readTargetBindings,
   registerWebUi,
   settingsPath,
   validateSettingsPatch,
   writeSettingsOverrides,
+  writeSubscriptionOverride,
+  writeTargetBindings,
 } from '../lib/index.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
@@ -746,6 +751,115 @@ test('SETTINGS-GUARD-11: 旧文件里的明文密钥 → GET 不回显，但运�
     } finally {
       system.dispose();
     }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-12: 绑定迁移只做一次——删光绑定后重启也不重新解析同名相册', async () => {
+  const wikiDir = await makeWiki();
+  const rows = [{ source: '100', targets: ['周报相册'], entry: true, weekly: false }];
+  try {
+    // ① 首轮迁移：绑定表与迁移标记同一次原子写。
+    assert.equal(await readTargetBindingMigration(wikiDir), false, '文件不存在 = 从未迁移');
+    assert.deepEqual(await writeTargetBindings(wikiDir, { 周报相册: '100/A1' }), { 周报相册: '100/A1' });
+    assert.equal(await readTargetBindingMigration(wikiDir), true);
+    const first = JSON.parse(await readFile(settingsPath(wikiDir), 'utf8'));
+    assert.equal(first.bindingMigration, 1, '标记必须与绑定表同一次落盘');
+    assert.deepEqual(first.targetBindings, { 周报相册: '100/A1' });
+
+    // ② 面板把绑定删空（行里的名字保留，等用户重选）：标记必须留着。
+    await writeSubscriptionOverride(wikiDir, rows, {});
+    assert.deepEqual(await readTargetBindings(wikiDir), {});
+    assert.equal(await readTargetBindingMigration(wikiDir), true, '删空绑定 ≠ 从未迁移（两者语义必须分开）');
+    const cleared = JSON.parse(await readFile(settingsPath(wikiDir), 'utf8'));
+    assert.equal(cleared.targetBindings, undefined, '空绑定表仍不写键');
+    assert.equal(cleared.bindingMigration, 1);
+
+    // ③ 重启后的首轮迁移：同名新相册出现了也不得自动绑定（收件人绝不悄悄换主）。
+    const before = await readFile(settingsPath(wikiDir), 'utf8');
+    assert.deepEqual(
+      await writeTargetBindings(wikiDir, { 周报相册: '200/B9' }),
+      {},
+      '迁移已完成 → 迁移写入被拒绝、不落盘',
+    );
+    assert.equal(await readFile(settingsPath(wikiDir), 'utf8'), before, '文件必须原样');
+    assert.deepEqual(await readTargetBindings(wikiDir), {}, '绑定保持为空：停投 + 面板提示重选');
+
+    // ④ 升级前的文件没有标记：非空绑定表本身就证明迁移发生过。
+    const legacy = await makeWiki();
+    try {
+      const legacyFile = settingsPath(legacy);
+      await mkdir(path.dirname(legacyFile), { recursive: true });
+      await writeFile(
+        legacyFile,
+        JSON.stringify({ version: 1, targetBindings: { 周报相册: '100/A1' } }),
+        'utf8',
+      );
+      assert.equal(await readTargetBindingMigration(legacy), true, '有绑定 = 已迁移');
+      assert.deepEqual(await writeTargetBindings(legacy, { 周报相册: '200/B9' }), { 周报相册: '100/A1' });
+    } finally {
+      await cleanup(legacy);
+    }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-13: 读不懂的 settings.json 拒绝写入（文件原样），ENOENT 正常新建', async () => {
+  const wikiDir = await makeWiki();
+  const file = settingsPath(wikiDir);
+  try {
+    await mkdir(path.dirname(file), { recursive: true });
+
+    // ① JSON 损坏：读路径宽松（插件必须起得来、留一次告警），写路径拒绝。
+    const corrupt = '{"version":1,"sections":{"trigger":{"maxBufferMessages":';
+    await writeFile(file, corrupt, 'utf8');
+    assert.deepEqual(await readSettingsOverrides(wikiDir), {}, '读路径按空表降级');
+    const warnings = [];
+    assert.deepEqual(await readSettingsOverrides(wikiDir, { warn: (message) => warnings.push(message) }), {});
+    assert.equal(warnings.length, 1, '启动读路径必须留下一次告警');
+    assert.match(warnings[0], /无法解析/u);
+    assert.ok(!warnings[0].includes('\n'), '告警必须是单行');
+
+    await assert.rejects(
+      writeSettingsOverrides(wikiDir, 'trigger', { maxBufferMessages: 800 }),
+      (error) => error instanceof SettingsDocumentError && /已拒绝写入/u.test(error.message),
+      '一次单段保存不得把整份设置抹成只剩该段',
+    );
+    assert.equal(await readFile(file, 'utf8'), corrupt, '被拒写入不得改动文件字节');
+    await assert.rejects(
+      writeSubscriptionOverride(wikiDir, [], {}),
+      (error) => error instanceof SettingsDocumentError,
+    );
+    await assert.rejects(
+      writeTargetBindings(wikiDir, { 周报相册: '100/A1' }),
+      (error) => error instanceof SettingsDocumentError,
+    );
+    assert.equal(await readFile(file, 'utf8'), corrupt, '失败路径一律不写盘');
+
+    // ② 版本不符 = 不认识的格式：同样拒绝覆写。
+    const v2 = JSON.stringify({ version: 2, sections: { trigger: { maxBufferMessages: 700 } } });
+    await writeFile(file, v2, 'utf8');
+    await assert.rejects(
+      writeSettingsOverrides(wikiDir, 'trigger', { maxBufferMessages: 800 }),
+      /version 不是 1/u,
+    );
+    assert.equal(await readFile(file, 'utf8'), v2);
+
+    // ③ 文件不存在（ENOENT）才允许新建，新建后一切照旧。
+    await rm(file, { force: true });
+    assert.deepEqual(await writeSettingsOverrides(wikiDir, 'trigger', { maxBufferMessages: 800 }), {
+      trigger: { maxBufferMessages: 800 },
+    });
+    assert.deepEqual(await readSettingsOverrides(wikiDir), { trigger: { maxBufferMessages: 800 } });
+
+    // ④ 修好文件（合法 JSON）之后可以继续写，旧内容不被抹掉。
+    await writeFile(file, JSON.stringify({ version: 1, sections: { topics: { hour: 6 } } }), 'utf8');
+    await writeSettingsOverrides(wikiDir, 'query', { cardMaxHeight: 7000 });
+    const healed = JSON.parse(await readFile(file, 'utf8'));
+    assert.equal(healed.sections.topics.hour, 6, '合法文件里的其他段必须保留');
+    assert.equal(healed.sections.query.cardMaxHeight, 7000);
   } finally {
     await cleanup(wikiDir);
   }

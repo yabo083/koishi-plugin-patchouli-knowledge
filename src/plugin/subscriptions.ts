@@ -211,7 +211,12 @@ export function resolveRows(
 export interface SubscriptionSnapshot {
   /** 表内是否有有效行；false 时其余字段都是旧配置的镜像。 */
   readonly active: boolean;
-  /** 需要监听的群号集合；`null` = 全部群。 */
+  /**
+   * 需要监听的群号集合；`null` = 全部群。
+   *
+   * 表生效时是归一后的裸群号（`isListening` 会剥入站 ID 的前缀）；
+   * 表为空时是 `config.channels` 的**原值**（精确匹配，与升级前一致）。
+   */
   readonly listening: ReadonlySet<string> | null;
   /** 词条投递：来源群号（`*` 见 `entryTargetsAll`）→ 目标。 */
   readonly entryTargets: ReadonlyMap<string, EntryDeliveryTarget[]>;
@@ -219,7 +224,10 @@ export interface SubscriptionSnapshot {
   readonly entryTargetsAll: readonly EntryDeliveryTarget[];
   /** 参与周报的行（按首次出现顺序）。 */
   readonly weekly: readonly SubscriptionRow[];
-  /** 参与每日主题校准的群集合；`null` 表示按旧白名单。 */
+  /**
+   * 参与每日主题校准的群集合；`null` 表示按旧白名单（调用方回落 `config.channels`）。
+   * 表为空时与 `listening` 同源：`config.channels` 原值。
+   */
   readonly topicGroups: ReadonlySet<string> | null;
 }
 
@@ -402,8 +410,10 @@ export function resolveTargets(targets: readonly string[], source?: string): Ent
 /**
  * 编译订阅表。
  *
- * 旧配置镜像（表为空时）：`listening` 全部群 / `topicGroups` 旧白名单 / 词条目标留给
- * 调用方用 `planEntryTargets` 走老路径（这里返回空，`active=false` 已标明）。
+ * 旧配置镜像（表为空时）：`listening` / `topicGroups` 直接取 `config.channels` 的**原值**
+ * （与升级前的 `config.channels.includes(session.channelId)` 一字不差：精确匹配、不去
+ * 平台前缀），词条目标留给调用方用 `planEntryTargets` 走老路径（这里返回空，
+ * `active=false` 已标明）。平台前缀归一**只在表生效时**做，见 `isListening`。
  */
 export function compileSubscriptions(
   config: PatchouliPluginConfig,
@@ -411,13 +421,15 @@ export function compileSubscriptions(
 ): SubscriptionSnapshot {
   const rows = resolveRows(config, override);
   if (rows.length === 0) {
+    // 旧语义是精确匹配：`onebot:123` 与 `123` 是两个不同的写法，绝不互相命中。
+    const legacy = new Set(config.channels);
     return {
       active: false,
-      listening: config.channels.length > 0 ? new Set(config.channels.map(bareChannelId)) : null,
+      listening: legacy.size > 0 ? legacy : null,
       entryTargets: new Map(),
       entryTargetsAll: [],
       weekly: [],
-      topicGroups: config.channels.length > 0 ? new Set(config.channels.map(bareChannelId)) : null,
+      topicGroups: legacy.size > 0 ? legacy : null,
     };
   }
 
@@ -468,10 +480,18 @@ export function compileSubscriptions(
   };
 }
 
-/** 该频道是否在监听范围内（`channelId` 可带平台前缀）。 */
+/**
+ * 该频道是否在监听范围内。
+ *
+ * 表生效时表的键是归一后的裸群号 → 入站 ID 剥平台前缀再比（`onebot:123` 与 `123` 同一群）。
+ * 表为空时的旧配置镜像是 `config.channels` 的**原值**，因此这里保持升级前的精确匹配：
+ * 不剥前缀（`channels: ['onebot:123']` 只命中 `onebot:123`，不命中 `123`）。
+ */
 export function isListening(snapshot: SubscriptionSnapshot, channelId: string): boolean {
   if (snapshot.listening === null) return true;
-  return snapshot.listening.has(bareChannelId(channelId));
+  return snapshot.active
+    ? snapshot.listening.has(bareChannelId(channelId))
+    : snapshot.listening.has(channelId);
 }
 
 /** 该来源的词条投递目标（含 `*` 行）。 */
@@ -497,6 +517,9 @@ export function listeningGroupIds(snapshot: SubscriptionSnapshot): string[] | nu
  *
  * `allowed` 为空 = 本轮探测不可用（无宿主投递服务 / 机器人掉线）：只做形状校验。
  * 返回 `undefined` 表示通过，否则是给人看的错误原因。
+ *
+ * `@chat` 只看形状就会通过——它的合法性还取决于**行来源**（`*` 行没有来源群，
+ * 见 `validateSubscriptionRows` 的显式拒绝）。
  */
 function targetIssue(target: string, allowed: ReadonlySet<string>): string | undefined {
   if (target === '') return 'target 不能为空（不投递请给空数组）';
@@ -528,6 +551,9 @@ export type SubscriptionRowsValidation =
  *
  * 严格拒绝而不是静默清洗：面板显示什么就存什么，悄悄改表比报错更难查。
  * 行数 `≤ 256`、单行目标 `≤ 16` 且去重后保存；目标值域见 `targetIssue`。
+ *
+ * `*` 行不允许 `@chat`：`*` 没有具体来源群，编译时 `@chat` 必然解析成空（登记成功
+ * 却不投 = 静默失效），因此在这一层直接 400，让用户改成具体群。
  */
 export function validateSubscriptionRows(
   input: unknown,
@@ -565,6 +591,13 @@ export function validateSubscriptionRows(
     for (const item of record.targets) {
       if (typeof item !== 'string') return { ok: false, error: `${where}：targets 的元素必须是字符串` };
       const target = item.trim();
+      // `*` 行没有来源群 → `@chat` 在编译期被丢弃（存下去就是「日志有目标、实际不投」）。
+      if (sourceText === '*' && target === CHAT_TARGET) {
+        return {
+          ok: false,
+          error: `${where}：\`*\` 行不支持本群聊天（${CHAT_TARGET}），请指定具体群`,
+        };
+      }
       const issue = targetIssue(target, allowedTargets);
       if (issue !== undefined) return { ok: false, error: `${where}：${issue}` };
       if (targets.includes(target)) continue;

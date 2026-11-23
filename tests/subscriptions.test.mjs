@@ -47,12 +47,32 @@ test('SUBS-01: 空表完全回退旧配置——白名单为空即监听全部�
   assert.equal(entryTargetsFor(snapshot, 'onebot:123').length, 0, '词条目标交给旧路径，编译层不推断');
 });
 
-test('SUBS-02: 空表时旧白名单仍是监听范围，且带平台前缀也能匹配', () => {
-  const snapshot = compileSubscriptions(config({ channels: ['123', '456'] }));
+test('SUBS-02: 空表时旧白名单保持「精确匹配」——不剥平台前缀（与升级前 channels.includes 同义）', () => {
+  const snapshot = compileSubscriptions(config({ channels: ['onebot:123', '456'] }));
   assert.equal(snapshot.active, false);
-  assert.equal(isListening(snapshot, 'onebot:123'), true);
+  assert.equal(isListening(snapshot, 'onebot:123'), true, '旧配置写的是带前缀的群号');
+  assert.equal(isListening(snapshot, '123'), false, '裸群号不得命中带前缀的白名单项');
+  assert.equal(isListening(snapshot, '456'), true);
+  assert.equal(isListening(snapshot, 'onebot:456'), false, '带前缀的入站 ID 不命中裸写法');
   assert.equal(isListening(snapshot, 'onebot:789'), false);
-  assert.deepEqual(listeningGroupIds(snapshot)?.sort(), ['123', '456']);
+  assert.deepEqual(listeningGroupIds(snapshot)?.sort(), ['456', 'onebot:123'], '流量监控的键保持原值');
+  assert.deepEqual(
+    [...(snapshot.topicGroups ?? [])].sort(),
+    ['456', 'onebot:123'],
+    '主题校准集合与白名单原值同源',
+  );
+  assert.equal(isListening(compileSubscriptions(config()), '123'), true, '白名单为空 = 全部群（不是禁用）');
+});
+
+test('SUBS-02a: 表生效后才做前缀归一——来源与入站 ID 两种写法互相命中', () => {
+  for (const source of ['123', 'onebot:123']) {
+    const snapshot = compileSubscriptions(config({ subscriptions: [row(source, '')] }));
+    assert.equal(snapshot.active, true);
+    assert.equal(isListening(snapshot, '123'), true, `来源 ${source} 必须命中裸写法`);
+    assert.equal(isListening(snapshot, 'onebot:123'), true, `来源 ${source} 必须命中带前缀写法`);
+    assert.equal(isListening(snapshot, 'onebot:789'), false);
+    assert.deepEqual([...(snapshot.topicGroups ?? [])], ['123'], '表里的来源始终归一成裸群号');
+  }
 });
 
 test('SUBS-03: 表生效后监听集合只认表，旧白名单不再参与', () => {
@@ -332,6 +352,44 @@ test('SUBS-15: validateSubscriptionRows 的值域、去重与上限', () => {
   // 目录为空（探测不可用）时只做形状校验，否则面板在掉线时连 @chat 都存不下去。
   const offline = validateSubscriptionRows([{ source: '123', targets: ['456/A9'], entry: true, weekly: false }], new Set());
   assert.equal(offline.ok, true);
+});
+
+test('SUBS-15a: `*` 行拒绝 `@chat`（存下去也投不了），具体群允许', () => {
+  const albums = new Set(['@chat', '123/A1']);
+
+  // `*` 没有具体来源群 → 编译期 `@chat` 必然被丢弃。若允许保存，日志里有目标、实际不投。
+  const star = validateSubscriptionRows([{ source: '*', targets: ['@chat'], entry: true, weekly: false }], albums);
+  assert.equal(star.ok, false);
+  assert.match(star.error, /`\*` 行不支持本群聊天/u);
+  assert.match(star.error, /请指定具体群/u);
+  assert.match(star.error, /第 1 行/u);
+
+  const mixed = validateSubscriptionRows(
+    [{ source: '*', targets: ['123/A1', '@chat'], entry: true, weekly: false }],
+    albums,
+  );
+  assert.equal(mixed.ok, false, '同一行里混着 @chat 也要拒绝');
+
+  // 具体群照常允许；`*` 行的相册目标照常允许；探测不可用时也一样。
+  assert.equal(
+    validateSubscriptionRows([{ source: '123', targets: ['@chat'], entry: true, weekly: false }], albums).ok,
+    true,
+  );
+  assert.equal(
+    validateSubscriptionRows([{ source: '*', targets: ['123/A1'], entry: true, weekly: false }], albums).ok,
+    true,
+  );
+  assert.equal(
+    validateSubscriptionRows([{ source: '*', targets: ['@chat'], entry: true, weekly: false }], new Set()).ok,
+    false,
+    '形状校验（探测不可用）同样拒绝',
+  );
+
+  // 旧配置 / 直写文件里遗留的 `*` + `@chat` 只能停在编译层：丢弃且不产生投递点。
+  const snapshot = compileSubscriptions(config({ subscriptions: [row('*', ['@chat', '123/A1'])] }));
+  assert.deepEqual(entryTargetsFor(snapshot, 'onebot:999'), [
+    { kind: 'album', channelId: 'onebot:123', albumId: 'A1' },
+  ]);
 });
 
 test('SUBS-16: 订阅日志——多目标（相册名（群号））、无目标、`*` 三种形状', () => {

@@ -27,6 +27,8 @@ import {
   CHAT_TARGET,
   installSubscriptionTargetLabels,
   isTargetGroupHeader,
+  MAX_SUBSCRIPTION_ROWS,
+  MAX_TARGETS_PER_ROW,
   targetGroupValue,
 } from './subscriptions';
 
@@ -45,11 +47,16 @@ export const MAX_ALBUM_CANDIDATES = 400;
 /**
  * 「已配置但未探测到」的候选项上限。
  *
- * 这些条目只用于让保存过的旧值不从下拉里消失；上限 64 条足够覆盖正常用法，
- * 同时把 union 的总长度钉死在 `MAX_ALBUM_CANDIDATES + MAX_UNPROBED_CANDIDATES + 1`
- * （403 → 465 条），不给脏配置机会往控制台推一张无限大的 schema。
+ * 这个数**不是裁剪阈值，是上界**：订阅表本身封顶 `MAX_SUBSCRIPTION_ROWS ×
+ * MAX_TARGETS_PER_ROW`（256 行 × 16 个目标 = 4096），所以「行数 × 每行目标数」已经是
+ * 任何一份合法配置能写出的全部取值。
+ *
+ * 为什么不能像展示候选那样「留 64 个够用」：静态 const union 的校验是**严格**的，
+ * 少一个已保存值，整份插件配置就过不了校验、插件直接拒载（第 65 个未探测目标正是
+ * 这样把实例打挂的）。union 总长度随之钉死在
+ * `MAX_ALBUM_CANDIDATES + MAX_CONFIGURED_TARGETS + 1`（400 + 4096 + 1），仍然有界。
  */
-export const MAX_UNPROBED_CANDIDATES = 64;
+export const MAX_CONFIGURED_TARGETS = MAX_SUBSCRIPTION_ROWS * MAX_TARGETS_PER_ROW;
 
 /** 一条相册候选。 */
 export interface AlbumCandidate {
@@ -389,6 +396,23 @@ interface NamedAlbumTarget {
 }
 
 /**
+ * 相册名恰好长得像稳定地址（`群号/相册ID`，例如就叫 `2026/Spring`）时，追加后缀直到不像。
+ *
+ * 不处理的两个后果都是静默错投：`resolveTargetBindings` 把名字当「已经是地址」跳过
+ * （永不绑定 → 停投），`resolveTarget` 又拿它当地址解析（投到 `2026/Spring` 这个
+ * 不存在的位置）。后缀里带**稳定地址**（本身含 `/`），一次就把形状破坏掉，
+ * 而且每个相册的后缀不同，枚举内依然唯一。
+ *
+ * 未命名相册的兜底值就是它自己的地址，**不走这里**：地址天然唯一、必须可用。
+ */
+function escapeAddressShape(label: string, album: AlbumCandidate): string {
+  let escaped = label;
+  // 后缀含 `/`，所以至多一轮就退出（`^\d+/[^/]+$` 不可能匹配两个 `/`）。
+  while (ALBUM_TARGET_PATTERN.test(escaped)) escaped = `${escaped}（${albumValue(album)}）`;
+  return escaped;
+}
+
+/**
  * 相册 → 唯一可读名。**名字是持久化的值**，所以两条硬约束：
  *
  * 1. 枚举内唯一：同批重名一律加限定，绝不靠「先到先得」决定谁是裸名字
@@ -399,6 +423,8 @@ interface NamedAlbumTarget {
  *
  * 优先级：相册名（本批唯一时）→ `群名 · 相册名` → `群名 · 相册名（群号）` → 末尾 `#n`；
  * 相册名缺失（探测无名）→ 回退稳定地址 `群号/相册ID`（地址天然唯一）。
+ * 相册名自己长得像地址（`2026/Spring`）时先按 `escapeAddressShape` 加限定：
+ * 名字必须是**名字**，不能被当成地址跳过绑定、也不能被当地址投递。
  * 分配按**候选原顺序**，排序只影响展示。
  */
 function nameAlbumTargets(albums: readonly AlbumCandidate[]): NamedAlbumTarget[] {
@@ -419,13 +445,16 @@ function nameAlbumTargets(albums: readonly AlbumCandidate[]): NamedAlbumTarget[]
   for (const album of candidates) {
     const value = albumValue(album);
     const plain = album.albumName.trim();
-    const qualified = `${albumGroupName(album)} · ${plain !== '' ? plain : value}`;
+    const qualified = escapeAddressShape(
+      `${albumGroupName(album)} · ${plain !== '' ? plain : value}`,
+      album,
+    );
     // 相册名缺失（探测无名）→ 直接用稳定地址：它天然唯一，也永远不是保留值。
     const preferred =
       plain === ''
         ? [value]
         : plainCounts.get(plain) === 1
-          ? [plain, qualified]
+          ? [escapeAddressShape(plain, album), qualified]
           : [qualified];
     const name = claimTargetName(taken, [...preferred, `${qualified}（${album.groupId}）`], value);
     named.push({ album, name, albumValue: value });
@@ -502,7 +531,7 @@ export function albumTargetOptions(
   }
   let extras = 0;
   for (const raw of configured) {
-    if (extras >= MAX_UNPROBED_CANDIDATES) break;
+    if (extras >= MAX_CONFIGURED_TARGETS) break;
     const trimmed = String(raw ?? '').trim();
     if (trimmed === '' || trimmed === CHAT_TARGET || isTargetGroupHeader(trimmed)) continue;
     if (covered.has(trimmed)) continue;
@@ -649,7 +678,15 @@ export interface TargetBindingResult {
  *    同样原样保留——没有证据就不动。
  * 2. **已有绑定、但相册在候选里没了**：掉绑并进 `unresolved` → 停投 + warn，
  *    绝不给同名的新相册当替身。
- * 3. **没有绑定的名字**：解析成功就绑定；解析不到（歧义 / 改名 / 已删除）进 `unresolved`。
+ * 3. **没有绑定的名字，但上一次落盘的那一行里就有它**（`previousRows`）：那时也没绑上
+ *    （就是掉绑后留下的），**不再尝试解析**，继续 `unresolved`。这是「掉绑」的持久标记：
+ *    否则下一次同样的保存会把名字当新名字，绑到别的群恰好同名的相册上——那正是
+ *    「一次相册消失，下次保存静默改投」的来路。用户显式改过这一行（值变了 → 名字不在
+ *    上一次的行里）才重新解析。
+ * 4. **其余没有绑定的名字**：解析成功就绑定；解析不到（歧义 / 改名 / 已删除）进 `unresolved`。
+ *
+ * 「上一次落盘的行」本身就是标记，不需要另存一份 `unresolvedTargets`：它与绑定表
+ * 同一次原子落盘、同一个真源，不可能与行分叉（见 `writeSubscriptionOverride`）。
  *
  * 绑定只从当前行重建：删掉的目标不会留下孤儿绑定（上限 = 行数 × 单行目标数）。
  */
@@ -657,10 +694,21 @@ export function resolveTargetBindings(
   rows: readonly SubscriptionRow[],
   albums: readonly AlbumCandidate[],
   previous: Readonly<Record<string, string>> = {},
+  previousRows: readonly SubscriptionRow[] = [],
 ): TargetBindingResult {
   const index = buildTargetNameIndex(albums);
   // 探测为空时「相册还在不在」无从判断：已有绑定一律原样保留，免得一次掉线清空投递。
   const live = albums.length === 0 ? undefined : new Set(albums.map(albumValue));
+  // 上一次落盘时就没绑上的（来源群, 名字）：本次同样的行不再重解析（见规则 3）。
+  const dropped = new Set<string>();
+  for (const row of previousRows) {
+    const source = row.source.trim();
+    for (const target of row.targets) {
+      const name = target.trim();
+      if (name === '' || Object.hasOwn(previous, name)) continue;
+      dropped.add(rowKey(source, name));
+    }
+  }
   const bindings: Record<string, string> = {};
   const unresolved: string[] = [];
   const reported = new Set<string>();
@@ -682,12 +730,21 @@ export function resolveTargetBindings(
         else report(name);
         continue;
       }
+      if (dropped.has(rowKey(row.source.trim(), name))) {
+        report(name);
+        continue;
+      }
       const address = index.get(name);
       if (address !== undefined) bindings[name] = address;
       else report(name);
     }
   }
   return { bindings, unresolved };
+}
+
+/** 「来源群 + 名字」的复合键（`\u0000` 不会出现在群号 / 相册名里）。 */
+function rowKey(source: string, name: string): string {
+  return `${source}\u0000${name}`;
 }
 
 /**
@@ -807,7 +864,7 @@ export function albumUnionItems(
   }
   let extras = 0;
   for (const value of configured) {
-    if (extras >= MAX_UNPROBED_CANDIDATES) break;
+    if (extras >= MAX_CONFIGURED_TARGETS) break;
     const trimmed = String(value ?? '').trim();
     if (trimmed === '' || described.has(trimmed)) continue;
     // 旧 `群号/相册ID` 值（改名前的选择 / 手填）照旧保留：静态 const union 的校验是严格的，
@@ -969,7 +1026,13 @@ function patchouliBlocks(root: unknown): Record<string, unknown>[] {
   return blocks;
 }
 
-/** yml 里 `subscriptions[].targets`（+ 历史 `target` 单值 / 字符串数组）的已配置目标，去重有界。 */
+/**
+ * yml 里 `subscriptions[].targets`（+ 历史 `target` 单值 / 字符串数组）的已配置目标，去重。
+ *
+ * 上界是订阅表自身的硬上限（`MAX_CONFIGURED_TARGETS` = 行数 × 每行目标数），不是裁剪：
+ * 任何能通过 Schema 校验的表都在这个数以内，所以这里的每个值都能进候选 union，
+ * 也就都能通过严格校验（少一个 = 整份配置拒载）。
+ */
 function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): string[] {
   const configured: string[] = [];
   for (const block of blocks) {
@@ -993,7 +1056,7 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
         const trimmed = value.trim();
         if (trimmed === '' || trimmed === CHAT_TARGET || configured.includes(trimmed)) continue;
         configured.push(trimmed);
-        if (configured.length >= MAX_UNPROBED_CANDIDATES) return configured;
+        if (configured.length >= MAX_CONFIGURED_TARGETS) return configured;
       }
     }
   }

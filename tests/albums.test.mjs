@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 
 import {
-  MAX_UNPROBED_CANDIDATES,
+  MAX_CONFIGURED_TARGETS,
   albumSchemaUnion,
   albumTargetOptions,
   albumUnionItems,
@@ -245,10 +245,17 @@ test('ALBUM-10: 订阅目标候选 = @chat + 各群标题 + 各相册（取值 =
   const bare = albumSchemaUnion([], [], { targets: true });
   assert.deepEqual(bare.list.map((item) => item.value), ['@chat'], '没探测到相册时仍可选 @chat、没有空标题');
 
-  // 未探测项有上限：脏配置不能把 schema 撑成无界 union。
+  // 已配置值一个都不能丢（静态 union 的校验是严格的，少一个 = 整份配置拒载）；
+  // 上限只由订阅表自身的硬上限（行数 × 每行目标数）钉住，不是「留 64 个够用」。
   const many = Array.from({ length: 200 }, (_, index) => `9/x${index}`);
-  const capped = albumSchemaUnion([], many, { targets: true });
-  assert.equal(capped.list.length, 1 + MAX_UNPROBED_CANDIDATES, '未探测项封顶');
+  const kept = albumSchemaUnion([], many, { targets: true });
+  assert.equal(kept.list.length, 1 + many.length, '已配置但未探测到的取值全部进 union');
+  const oversized = Array.from({ length: MAX_CONFIGURED_TARGETS + 5 }, (_, index) => `9/y${index}`);
+  assert.equal(
+    albumSchemaUnion([], oversized, { targets: true }).list.length,
+    1 + MAX_CONFIGURED_TARGETS,
+    '总长度仍被订阅表硬上限（行数 × 每行目标数）钉住',
+  );
 });
 
 test('ALBUM-10b: 取值 = 唯一可读名（重名加群名、再重加群号、最后 #n；无名回退地址）', () => {
@@ -686,5 +693,110 @@ test('BIND-02: 唯一名消失 + 新群同名相册出现——停投并 warn，
   } finally {
     installSubscriptionTargetLabels();
     installSubscriptionTargetWarnings();
+  }
+});
+
+test('ALBUM-18: 相册名长得像稳定地址（2026/Spring）时加限定后缀——可绑定、不被当地址', () => {
+  const album = { groupId: '2026', groupName: '', albumId: 'ALBUM01', albumName: '2026/Spring' };
+  const item = albumTargetOptions([album]).find((option) => option.albumValue !== undefined);
+  assert.equal(item.albumValue, '2026/ALBUM01');
+  assert.equal(item.value, '2026/Spring（2026/ALBUM01）', '后缀带稳定地址：形状被破坏，且枚举内唯一');
+  assert.match(item.value, /^2026\//u);
+  assert.doesNotMatch(item.value, /^\d+\/[^/]+$/u, '候选值不得再匹配「群号/相册ID」');
+
+  // 绑定能建立：地址形状的名字会被当成「已经是地址」跳过（旧实现 → 永不绑定 → 停投）。
+  const rows = [{ source: '2026', targets: [item.value], entry: true, weekly: false }];
+  assert.deepEqual(resolveTargetBindings(rows, [album]), {
+    bindings: { [item.value]: '2026/ALBUM01' },
+    unresolved: [],
+  });
+  assert.equal(buildTargetNameIndex([album]).get(item.value), '2026/ALBUM01', '名字索引同样指向该相册');
+
+  // 未命名相册仍回退它自己的地址：地址天然唯一，必须可用。
+  const unnamed = albumTargetOptions([
+    { groupId: '7', groupName: '群7', albumId: 'x', albumName: '' },
+  ]).find((option) => option.albumValue !== undefined);
+  assert.equal(unnamed.value, '7/x');
+});
+
+test('BIND-03: 掉绑后重复同样的保存不再改绑；改过这一行才重新解析', () => {
+  const gone = { groupId: '100', groupName: '图书室', albumId: 'a', albumName: 'Notes' };
+  const newcomer = { groupId: '200', groupName: '阅览室', albumId: 'b', albumName: 'Notes' };
+  const weekly = { groupId: '200', groupName: '阅览室', albumId: 'c', albumName: '周报' };
+  const rows = [{ source: '100', targets: ['Notes'], entry: true, weekly: false }];
+
+  // ① 相册还在 → 绑定。
+  const first = resolveTargetBindings(rows, [gone]);
+  assert.deepEqual(first, { bindings: { Notes: '100/a' }, unresolved: [] });
+
+  // ② 相册消失：本次掉绑、名字保留在行里（`rows` 就是这次落盘的内容）。
+  const dropped = resolveTargetBindings(rows, [newcomer], first.bindings, rows);
+  assert.deepEqual(dropped, { bindings: {}, unresolved: ['Notes'] }, '相册没了就掉绑，不改投新群同名相册');
+
+  // ③ 下一次**完全相同**的保存：上次落盘的行里已经有 `Notes` 且没绑上 → 不再尝试解析。
+  //    （不带 previousRows 时旧实现会把它当新名字绑到 `200/b`——一次相册消失就静默改投。）
+  assert.deepEqual(
+    resolveTargetBindings(rows, [newcomer], dropped.bindings),
+    { bindings: { Notes: '200/b' }, unresolved: [] },
+    '不带历史行时确实会改绑（对照组：证明上一行的断言确实在拦它）',
+  );
+  assert.deepEqual(
+    resolveTargetBindings(rows, [newcomer], dropped.bindings, rows),
+    { bindings: {}, unresolved: ['Notes'] },
+    '带历史行（= 本次落盘的内容）→ 继续未绑定，等用户重选',
+  );
+
+  // ④ 用户显式重选（值变了）→ 标记失效，正常解析。
+  const repicked = resolveTargetBindings(
+    [{ source: '100', targets: ['周报'], entry: true, weekly: false }],
+    [newcomer, weekly],
+    dropped.bindings,
+    rows,
+  );
+  assert.deepEqual(repicked, { bindings: { 周报: '200/c' }, unresolved: [] });
+
+  // ⑤ 标记按「来源群 + 名字」记：另一个来源群的新选择照常解析。
+  const otherSource = resolveTargetBindings(
+    [{ source: '200', targets: ['Notes'], entry: true, weekly: false }],
+    [newcomer],
+    dropped.bindings,
+    rows,
+  );
+  assert.deepEqual(otherSource, { bindings: { Notes: '200/b' }, unresolved: [] });
+});
+
+test('ALBUM-19: 5 行 × 13 个未探测目标（第 65 个）全部能通过严格 union 校验', async () => {
+  const rows = Array.from({ length: 5 }, (_, rowIndex) => ({
+    source: `${1000 + rowIndex}`,
+    targets: Array.from({ length: 13 }, (_, index) => `9/v${rowIndex}-${index}`),
+    entry: true,
+    weekly: false,
+  }));
+  const configured = rows.flatMap((row) => row.targets);
+  assert.equal(configured.length, 65);
+
+  // 静态 const union 的校验是严格的：少一个已保存值，整份插件配置就过不了校验。
+  const schema = subscriptionTargetsSchema([], configured);
+  for (const row of rows) {
+    assert.doesNotThrow(() => schema(row.targets), `第 ${row.source} 行的目标必须全部命中候选`);
+  }
+
+  // 每个已保存值都在候选里（面板下拉可见，不会一保存就被清掉）。
+  const values = new Set(albumUnionItems([], configured, { targets: true }).map((item) => item.value));
+  for (const value of configured) assert.equal(values.has(value), true);
+
+  // 同一份配置走实例 yml 的读取路径：`configuredFromBlocks` 同样不得截断，
+  // 否则启动期候选里少了第 65 个，整份插件配置一样过不了校验。
+  const dir = path.resolve('tmp/configured-65');
+  const yaml = ['plugins:', '  patchouli-knowledge:', '    storage:', '      wikiDir: data/llmwiki', '    subscriptions:'];
+  for (const row of rows) {
+    yaml.push(`      - source: '${row.source}'`);
+    yaml.push(`        targets: [${row.targets.map((target) => `'${target}'`).join(', ')}]`);
+  }
+  try {
+    await makeInstance(dir, yaml, []);
+    assert.equal(readStartupTargetValues({ cwd: dir }).configured.length, 65, '启动期同样收下全部已配置值');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });
