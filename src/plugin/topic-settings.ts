@@ -1,9 +1,10 @@
 /**
- * 主题校准运行时参数的持久化。
+ * 主题校准参数的**旧存储**（只读迁移）。
  *
- * 这些是「多久回看、多严才合并」的产品旋钮，允许在阅读面板里即时调整；
- * 与凭据/模型路由等部署面配置分开存放，避免 WebUI 触碰 `koishi.yml`。
- * 文件：`<wikiDir>/.patchouli/topics-settings.json`（只存可调子集）。
+ * 0.8.66 及以前把这块调参面单独落在 `<wikiDir>/.patchouli/topics-settings.json`；
+ * 现在统一进 `.patchouli/settings.json` 的 `topics` 段（`src/plugin/settings-store.ts`）。
+ * 本模块只剩两件事：字段归一化（面板 POST 复用同一套限幅）与旧文件的一次性读取。
+ * 新代码不得再写这个文件——两处真源必然漂移。
  */
 
 import { promises as fs } from 'node:fs';
@@ -17,11 +18,6 @@ export type TopicSettingsPatch = Partial<
     'enabled' | 'hour' | 'minute' | 'lookbackDays' | 'mergeThreshold' | 'minEntries'
   >
 >;
-
-export interface TopicSettingsFile {
-  version: 1;
-  settings: TopicSettingsPatch;
-}
 
 /** 可调字段及硬限幅。 */
 export const TOPIC_SETTING_LIMITS = {
@@ -61,34 +57,22 @@ export function normalizeTopicSettingsPatch(input: unknown): TopicSettingsPatch 
   return next;
 }
 
-function settingsPath(wikiDir: string): string {
+function legacySettingsPath(wikiDir: string): string {
   return nodePath.join(resolveWikiLayout(wikiDir).patchouliDir, 'topics-settings.json');
 }
 
-/** 读取运行时覆盖值；文件不存在 / 损坏一律返回空补丁（沿用 koishi.yml 配置）。 */
+/**
+ * 读取旧版运行时覆盖值；文件不存在 / 损坏 / 版本不符一律返回空补丁。
+ * 唯一调用点是启动期迁移：`settings.json` 还没有 `topics` 段时把旧值搬过去。
+ */
 export async function readTopicSettings(wikiDir: string): Promise<TopicSettingsPatch> {
   try {
-    const raw = JSON.parse(await fs.readFile(settingsPath(wikiDir), 'utf8')) as unknown;
+    const raw = JSON.parse(await fs.readFile(legacySettingsPath(wikiDir), 'utf8')) as unknown;
     if (typeof raw !== 'object' || raw === null) return {};
     const record = raw as { version?: unknown; settings?: unknown };
     if (record.version !== 1) return {};
     return normalizeTopicSettingsPatch(record.settings);
   } catch {
     return {};
-  }
-}
-
-/** 原子写入运行时覆盖值。 */
-export async function writeTopicSettings(wikiDir: string, settings: TopicSettingsPatch): Promise<void> {
-  const target = settingsPath(wikiDir);
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  const document: TopicSettingsFile = { version: 1, settings };
-  await fs.mkdir(nodePath.dirname(target), { recursive: true });
-  try {
-    await fs.writeFile(temp, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
-    await fs.rename(temp, target);
-  } catch (error) {
-    await fs.rm(temp, { force: true }).catch((): undefined => undefined);
-    throw error;
   }
 }

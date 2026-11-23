@@ -52,12 +52,15 @@ sequenceDiagram
 
 ## 2.2 群相册候选目录（`src/plugin/albums.ts`）
 
-- 配置项 `topicDelivery.albums` 是 `Schema.array(Schema.dynamic(ALBUM_SCHEMA_KEY))`；候选项由 `ctx.schema.set(ALBUM_SCHEMA_KEY, albumSchemaUnion(...))` 注入，Console 数据服务订阅 `internal/schema` 后向在线页面广播，**无需重启插件或刷新页面**。
-- 探测范围＝`channels` 白名单 ∪ 机器人 `get_group_list` 返回的全部群（上限 40）；相册是**投递**目标，与**监听**白名单语义独立。
+- 同一份探测结果用在两处，但**生效时机不同**：
+  - `albumDelivery.albums` = `Schema.array(Schema.dynamic(ALBUM_SCHEMA_KEY))`（`ALBUM_SCHEMA_KEY = 'patchouli.album'`），候选是**单选** const union，首位空值 `''` = 不上传；由 `ctx.schema.set` 注入，Console 数据服务订阅 `internal/schema` 后向在线页面广播，**无需重启插件或刷新页面**。
+  - `subscriptions[].targets` = `Schema.array(albumSchemaUnion(..., { targets: true })).role('select')`：**多选标签**，候选 = `@chat`（本群聊天） + **按群分段**（每组一条 `#group:<群号>` 的不可选标题项 `Schema.disabled()`，下拉里就是分组标题；上游只渲染平铺 `<el-option>`，没有 `el-option-group`）+ 每个相册（**取值 = 唯一可读名**：相册名；同批重名一律改成 `群名 · 相册名`、群名也重再追加 `（群号）`、仍重再加 `#n`；相册名缺失回退稳定地址 `群号/相册ID`；`@chat` 与 `#group:` 是保留值，相册名撞上时同样走限定名），外加「已配置但本轮未探测到」的保留项。schemastery-vue 的 `<el-option>` 没有 `:label`、标签只显示 value，所以可读名必须直接当值；「不会错投」由**枚举内名字唯一 + 保存时绑定 + 只按绑定表解析**保证（保存订阅表时名字换成 `群号/相册ID` 写进 `settings.json` 顶层 `targetBindings`，投递期 `resolveTarget` 只查这张表，查不到就丢弃并 warn，绝不猜；详见 §3.5.2），升级前的稳定地址 `群号/相册ID` 仍按形状兼容。候选由 `readStartupTargetValues()` 在**模块加载时**同步读一次（首次启动即可用），并由 `refreshSubscriptionTargets()` 在 `apply()` 每次**重载**、以及每轮相册探测后**原地替换** union 的 `inner.list`——`require` 缓存让重载不重跑模块顶层，不替换的话新相册永远进不了下拉；`Schema.toJSON()` 每次序列化都现读 `list`，控制台下次拉 schema 就拿到新候选（`type` / `role` / `inner` 都不动，`isMultiSelect()` 与 `toColumns(inner)` 的结论不变）：实例配置的 `plugins` 树里找到本插件块（键名 `patchouli-knowledge`，容忍 `~` 前缀 / `:id` 后缀 / 分组嵌套）→ 取 `storage.wikiDir`（缺省 `data/llmwiki`）→ 读 `<wikiDir>/.patchouli/albums.json`，再合并同一批插件块 `subscriptions[].targets`（+ 历史 `target`）；**任何异常都降级为空候选**（模块加载期抛错会…
+- 探测范围＝**订阅表里出现的监听群**（`subscriptionTable().rows` 的 `source`，上限 40）；只有 `*` 行（监听全部群）或「表为空且旧白名单为空」才回退到机器人 `get_group_list` 的全量群——候选是给订阅表用的，把机器人所在的几十个群全探一遍只会让下拉变成噪音。
 - 探测优先 `ctx['miyako-delivery'].listAlbums`，空结果/服务缺失时回退 bot 直查（`get_qun_album_list` + `attach_info` 翻页，兼容顶层与 `data` 两种响应形状）。
 - **隐藏 Bot 不参与探测**：`chatluna-sandbox` 会注册一个 `hidden = true` 的 onebot Bot，其 `internal` 是 Proxy——任何动作都回「NapCat 基线不支持 OneBot action：_get」，不跳过就会每次探测刷一屏 `[E]`；`probeGroupAlbums` / `listBotGroupIds` 都按 `hidden !== true` 过滤（`miyako-delivery` 0.3.1 起 `resolveBot` / `listAlbums` 同样跳过）。
-- 合并规则：本轮有结果的群整体覆盖；本轮为空的群**保留旧候选**（掉线 / 限流不得抹掉下拉项）；退群的群丢弃。缓存落 `<wikiDir>/.patchouli/albums.json`，apply 阶段先读缓存填下拉，`ready` 后再真探测，此后每 15 分钟复探；`console/connection`（有人打开控制台）也会按 60 秒节流补探一次——新建相册后打开配置页即可见。
-- union 首位是空值 `''`：控制台「添加项目」以第一个 const 作新行默认值，新行必须是「不上传相册」。
+- 合并规则：本轮有结果的群整体覆盖；本轮为空的群**保留旧候选**（掉线 / 限流不得抹掉下拉项）；退群的群丢弃。合并结果还要按探测范围再过一遍（`scopeAlbumCandidates`）：**表外群的历史缓存直接丢**——缓存按群累积，退订群的相册不砍掉就会一直挂在下拉里；只有 `configured` 里点名的**具体相册**作为例外保留（它们所属群的其它相册照旧丢），因为静态 union 的严格校验不能少一个已保存的值。缓存落 `<wikiDir>/.patchouli/albums.json`（写回的是过滤后的集合），apply 阶段先读缓存填下拉，`ready` 后再真探测，此后每 15 分钟复探；`console/connection`（有人打开控制台）也会按 60 秒节流补探一次——**这只刷新 `albumDelivery.albums` 的在线候选**；订阅表的 `targets` 候选也在每轮探测后原地换成新的 `inner.list`，并在每次插件重载时重算，因此新增相册不再需要重启进程。
+- **订阅表恢复成表格（实测边界）**：`subscriptions` 声明 `.role('table')`。schemastery-vue 的表格在渲染前按 `toColumns(schema.inner)` 校验列，只有**静态** const union 能过；`Schema.dynamic()` = `Schema.any().role('dynamic')`，解析发生在渲染期组件里，`isConstUnion(inner)` 永远为假 → validate 失败 → 退回卡片行。**表格与动态候选互斥**，这里选表格（已与用户确认）；候选由 `apply()` 原地替换 union 的 `inner.list`，新增相册重载插件即出现。已配置但未探测到的目标由 `readStartupTargetValues().configured` 带进 union——否则静态 union 的严格校验会让整个插件配置过不了。
+- **面板候选**：`GET /api/albums` 走 `loadAlbumCatalog(wikiDir, probe)`——缓存有内容直接回（`probedAt` 取文件 mtime），为空才探测一次并回写；失败返回空目录而非 500。`probe` 由 `apply()` 注入（`probeAlbumsForPanel`），探测范围与 `refreshAlbumSchema` 共用 `albumProbeScope()`，不存在两套范围。
 
 ## 2.3 知识周报排程（`src/plugin/weekly-schedule.ts`）
 
@@ -142,7 +145,7 @@ Schema.intersect([
   无消息时 `latestMessage: null`，异步解析结果按 message id 防旧消息覆盖新消息。
 - **文本摘要**：`toMessagePreview(content, maxChars?)`（导出）将 Koishi markup 摘要为单行纯文本；实体反转义、空白折叠，并按码点截断到 1000 字符。它用于旧消费者摘要，不再承担完整媒体渲染。
 - **富元素**：`elements[]` 支持 `text / image / quote / forward / card / face / file / record / video / unknown`；只读解析优先 OneBot 原始段与 `session.elements`，再回退 `h.parse(content)`，quote 单独传入。OneBot resolver 仅使用只读 `get_msg / get_forward_msg / get_image`，有超时与次数、递归和元素上限。媒体只接受公网 HTTP(S)，不将 `raw / userId` 暴露至浏览器。
-- **媒体代理**：图片及音视频子资源若来源为 HTTP，改写为同源 `/api/media/<opaqueId>`；HTTPS 媒体保留直链。代理只服务当前缓存消息登记的 URL，固定公网 DNS 地址、逐跳校验重定向、拒绝 active content、支持 Range 与正文空闲超时；卡片导航与文件下载不改写为代理。
+- **媒体代理**：图片及音视频子资源若来源为 HTTP，改写为同源 `/api/media/<opaqueId>`；HTTPS 媒体保留直链。代理只服务当前缓存消息登记的 URL，固定公网 DNS 地址、逐跳校验重定向、拒绝 active content、支持 Range 与正文空闲超时；IPv4 映射形式的 IPv6 字面量（`::ffff:7f00:1` / `::ffff:8.8.8.8` 等，含全展开与大小写混写）在字面量直通分支即整条拒绝，绝不进入 pinnedLookup；卡片导航与文件下载不改写为代理。
 - **前端渲染**：元素使用 DOM 节点与 `textContent`，不把消息拼进 `innerHTML`；图片可放大、转发可展开、音视频使用原生控件且不自动播放，卡片 / 引用 / 表情 / 文件按元素类型呈现。同一 message id 与元素指纹相同则复用媒体 DOM 节点，轮询不会中断播放或折叠状态。
 - **HTTP 暴露**：`GET /api/status?channelId=<群号>` 附带 `latestMessage: LatestMessage | null`
   （跟随群筛选，缺省群回落配置里的第一个群）；`GET /api/latest?limit=<1..20>`（缺省 20，越界收敛）
@@ -285,9 +288,9 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   未认证一律 **401**（`{error:'unauthorized', reason}`），运维直连可用 `Bearer <apiToken>` / `x-api-token` / `?token=`。
   另有 `GET <base>/session` 自检与 `POST <base>/logout`。守卫以 `use` 中间件挂在 `<base>/api` 上；
   **宿主 router 不支持 `use` 时插件不注册任何 `/api/*` 路由并告警**——守卫装不上就宁可不提供接口，
-  绝不 fail open 成零鉴权（登录 / 自检 / 页面壳不受影响）。`/session` 在长期令牌直连（`via === 'token'`）
+  绝不 fail open 成零鉴权（登录 / 自检不受影响）。`/session` 在长期令牌直连（`via === 'token'`）
   时 `session` 恒为 `null`：短票据才会回显，长期令牌绝不经由响应头 / 响应体回传。
-- **前端门禁**：页面与 Console 浮窗共用 `src/web/auth-bootstrap.ts`——**打开即弹模态**（本地无未过期票据时
+- **前端门禁**：Console 浮窗使用 `src/web/auth-bootstrap.ts`——**打开即弹模态**（本地无未过期票据时
   不发起任何业务请求）；每个 `/api` 请求自动带 `Authorization: Bearer <sid>`，401 即清票据重新弹。
   浏览器**永不保存 apiToken**，只存 7 天会话票据（`HttpOnly` Cookie；落盘文件里也只有哈希）。
 - **首次初始化**：`security.apiToken` 留空且没有已落盘密钥时，`/session` 返回 `bootstrapRequired: true`，
@@ -305,6 +308,71 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   首次渲染时按词条所属群分配，同一词条恒同号、改道投递也不改号，落盘
   `<wikiDir>/.patchouli/card-seq.json` 的 `channels[<群号>]` 桶，重启接着数；结构不符一律当空表
   重新从 1 数——序号是派生数据，不做历史兼容）；页脚只放一句话（一言），没有一言时整块页脚不渲染。
+
+### 3.5.2 订阅表：多值目标 + 覆盖层（`src/plugin/subscriptions.ts` / `src/plugin/settings-store.ts`）
+
+- 行形状：`{ source, targets: string[], entry, weekly }`。`targets` 是**多值标签**，
+  元素是 `@chat`（投到**来源群**聊天）或相册的**唯一可读名**；空数组 = 不投。
+  `source` 为 `*`（全部群）时 `@chat` 无法定值，编译期丢弃并只留其余目标。
+- **为什么取值是可读名、又为什么不会错投**：schemastery-vue 的 `<el-option>` 没有 `:label`，
+  已选标签只显示 value，所以可读名必须直接当值（否则标签里是 `100000001/ALBUM01…`）。
+  错投由三条规则挡死：①枚举内名字唯一——同批重名一律改成 `群名 · 相册名`，群名也重再追加
+  `（群号）`，仍重再加 `#n`，相册名缺失回退稳定地址，`@chat` / `#group:` 是保留值（相册名撞上
+  时同样走限定名，**名为 `@chat` 的相册在候选里叫 `群名 · @chat`**）；②**保存时绑定**——
+  面板保存订阅表时，把每个 `targets` 里的名字用**当时**的候选解析成 `群号/相册ID`，与订阅表
+  **同一次原子落盘**写进 `settings.json` 顶层的 `targetBindings`（名字 → 地址）；
+  ③**投递只查绑定表**——`resolveTarget` / `albumValueOfTarget` 先排除保留值，再查
+  `targetBindings`，最后才按旧稳定地址 `群号/相册ID` 的形状直接认。绑定表里没有 = 解析失败：
+  停投并 warn `目标未绑定或相册已变更：<值>，请在面板重新选择`，**绝不回退到按当前候选猜名字**
+  ——所以同群同名相册换探测顺序、唯一名消失后别的群出现同名相册，都不会悄悄换收件人。
+  已有绑定只要那个相册还在候选里就原样保留（改名不动绑定；相册消失则掉绑并进 `unresolved`）。
+- **首轮迁移**（升级兼容）：启动时绑定表为空但订阅表里有名字 → 用当前候选**一次性**填充并落盘，
+  之后不再自动改写；一个都解析不到时不写空表（下次启动还能再试）。旧 yml 里的稳定地址不需要绑定。
+- **`#group:<群号>` 是保留值**：下拉分组标题项（`Schema.disabled()`，不可选）用它当 value，
+  永远不会被选中或写进配置；归一（`rawTargets`）、`resolveTarget`、面板校验、日志一律把它
+  当作「非目标」跳过——手填的标题既不能被当成裸群号投递，也不该占掉一个目标位。
+- **日志可读名**：启动 / 保存时的订阅日志把相册目标写成 `相册名（群号）`
+  （`readStartupTargetTables().valueToName` = 当前候选的展示表；值先按绑定表解析成地址再取文案，
+  解析不了的原样回显），`@chat` → `本群聊天`，一行多目标仍用 ` + ` 连接。
+- **控制台字段**：`subscriptions` 声明 `role: 'table'`（每行是表格行，列头只有
+  `监听群` / `投递群（可多个）` / `词条` / `周报`，没有表级说明）；`targets` 是
+  `array(const union)` + `role: 'select'`（候选 `@chat` + 各相册，取值 = 唯一可读名）。
+  候选初值在**模块加载时**由 `readStartupTargetValues()` 读一次（实例配置 + `<wikiDir>/.patchouli/albums.json`，
+  详见 §2.2），`apply()` 每次重载与每轮探测后由 `refreshSubscriptionTargets()` 原地替换
+  `inner.list`——**新增相册重载插件即进候选**（`require` 缓存让重载不重跑模块顶层）。
+- **为什么候选必须静态（实测，别再试一遍）**：`Schema.dynamic()` = `Schema.any().role('dynamic')`，
+  解析在 schemastery-vue 的 `dynamic` **组件**里（`plugin-console` 注册 `{type:'any', role:'dynamic'}`）；
+  而表格组件 `{type:'array', role:'table', validate:(v,s)=>!!toColumns(s.inner)}` 在 `schema.vue`
+  里按 `isConstUnion(schema.inner)` 校验列，此时 inner 恒为 `any` → `toColumns` 返回 `undefined`
+  → validate 必失败。**结论：表格单元格只能放静态 const union，动态候选只能留在卡片里。**
+  静态 union 的校验同样是严格的：yml 里已配置的目标必须出现在候选里，否则整份配置过不了校验
+  ——所以 `configured` 必须来自启动期读取的配置本身，而不是「本轮探测结果」。
+- **历史兼容**：宿主 yml 里的单值 `target` 在归一阶段转成 `targets: [target]`；
+  「目标 = 来源群号」这种旧写法等价改写成 `@chat`，语义完全相同。旧配置不需要手改。
+- 归一（`normalizeSubscriptionRows`）= 去平台前缀 + 去重 + 丢弃空串 / 超长项 + 行数 ≤256 +
+  单行目标 ≤16；目标串**原样保留**（不做解析，名字能不能解析由投递期裁决），`#group:` 标题
+  直接丢。裸群号（`456`）不再是合法目标——跨群聊天请用 `@chat` 或改走相册。
+- 面板校验（`validateSubscriptionRows` / `targetIssue`）：值域 = 候选唯一名 ∪ 候选稳定地址 ∪
+  现有值（探测抖动 / 改名后仍能原样保存）∪ `@chat`；目录为空（探测不可用）时只做形状校验。
+- 运行时：`subscriptionTable()` 给面板行 + `source`（`settings` = 覆盖层 / `config` = 宿主 yml）；
+  `compileSubscriptions(config, override)` 编译快照：非 `*` 行按**行自己的来源**解析 `@chat`，
+  `*` 行不带来源解析，因此 `*` 行里的 `@chat` 不产生投递点（要发来源群聊天请写成具体群号的行）。
+  周报相册目标按绑定表解析（`albumValueOfTarget()`：先排除 `@chat` / `#group:`，再查绑定表，
+  最后按旧稳定地址形状认），未绑定的名字拿不到地址 → 该来源没有相册目标、不渲染不上传，
+  由解析层的 warn 提示重选；**绝不会把「只勾了 `@chat` 的行」变成对某个相册的上传**。
+- 覆盖层：面板写入 `<wikiDir>/.patchouli/settings.json` 的**顶层 `subscriptions` 键**（不在 `sections` 里，
+  因为它是结构化数组而不是标量补丁）与顶层 `targetBindings` 键（名字 → `群号/相册ID`，
+  清洗规则：保留值 / 超长 / 非地址形状一律丢弃，≤1024 项）。与五段标量**同文件、同一条串行写链**：
+  写任一侧都读出整份文档再整份原子落盘，互不抹除；订阅表与绑定表永远同一次落盘，不会出现
+  「新行 + 旧绑定」的错配。优先级 **覆盖层 > config**；`null`（文件无该键）= 完全按 config，`[]` = 面板清空了表。
+  **绝不写宿主 config**（ADR-022）。
+- 面板接口（守卫覆盖 `/patchouli/api/*`）：
+
+| 路由 | 语义 |
+| :--- | :--- |
+| `GET <base>/api/albums` | `{ albums: [{value, groupId, groupName, albumId, albumName, label}], probedAt }`；`label` = `群名 / 相册名`。**缓存优先**（`.patchouli/albums.json` 有内容直接回，`probedAt` = 文件 mtime），为空才用注入的 `probeAlbums`（`apply()` 提供：订阅监听群 ∪ 机器人全部群，优先 `miyako-delivery.listAlbums`）探测一次并回写缓存；探测抛错 / 空结果一律 `{ albums: [], probedAt: null }`，**不 500、不写空缓存** |
+| `GET <base>/api/subscriptions` | `{ rows, source, albums, probedAt }`；相册只读缓存（GET 不触发秒级探测，保鲜交给 `/api/albums`） |
+| `POST <base>/api/subscriptions` | body `{ rows }` → `200 { ok: true, rows, unresolved }` / `400 { ok: false, error }`。`unresolved` = 本次解析不到相册（歧义 / 改名 / 删除）因而**没有绑定**的名字：行里保留、投递期停投，面板提示重选。校验：`source` 非空（`*` 允许）、每行 `targets` 是数组且元素只能是 `@chat` 或**探测到 / 缓存里存在 / 当前行已用**的目标、`entry`/`weekly` 布尔、单行 ≤16、总行 ≤256。相册目录为空（探测不可用）时只做形状校验，否则面板在掉线时连 `@chat` 都存不下去 |
 
 ### 3.6 自动书记存储（`src/plugin/scribe.ts`）
 
@@ -382,4 +450,17 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
 
 | 日期 | 变更 |
 | :--- | :--- |
+| 2026-11-24 | **审查修复：相册名 / 掉绑标记 / 候选上界 / 摊平与热更新（`B1`~`B8`）**：①`nameAlbumTargets()` 遇到**长得像稳定地址**的相册名（`2026/Spring`）追加 `（群号/相册ID）` 后缀直到不匹配——否则保存时被当「已经是地址」跳过（永不绑定）、投递时又被当地址解析；未命名相册仍回退它自己的地址；②`resolveTargetBindings(rows, albums, previous, previousRows)`：名字在上一次**落盘的行**里却没有绑定 = 上次就掉绑了，本次同样的行不再重解析（此前一次相册消失会让**下一次相同的保存**把名字绑到别的群同名相册）；标记只在绑定表**建立过**（`bindingMigration` 或非空表）时生效，用户改过该行（值变了）才重新解析；③「已配置但未探测到」的候选不再封顶 64：上限改为订阅表自身的硬上限 `MAX_SUBSCRIPTION_ROWS × MAX_TARGETS_PER_ROW`（部分已保存值被截断 = 整份配置过不了严格校验、插件拒载）；④`flattenConfig()` 改为**逐段**判定来源（顶层 → `advanced` → 默认值），顶层写了 `trigger` 时 `advanced.channels` 的白名单不再整段丢失（退化成监听全部群）；⑤`applySettingsOverrides(next, mode)`：面板保存只应用 `previous → next` **真正变化的键**（落盘的 `trigger` 段是累积的，整段重放会把每个群 AIMD 学到的 `minBurstRate` 改回快照值），启动回灌 / 文件被外部改写仍整段应用；⑥词条投递的外层闸改为「新表生效 → 由行决定；表为空回退 → 读 `entryEnabled`」（旧开关不再压制新表已勾的「词条」）；⑦`runTopicsDirect()` 入口先判 `features.topics`（`/api/topics` 绕过调度器空表照样烧模型），关闭时返回既有的 `disabled` 结果；⑧`apply()` 的相册探测提成 `refreshAlbumCandidates()`，**每个 `await` 之后**重查 `disposed`（卸载后不再 `ctx.schema.set` / 不覆盖模块级候选与解析表），`onSubscriptionsChanged` 回调同样早退 |
+| 2026-11-24 | **可读名改为落盘绑定，投递只认绑定表（修两条 BLOCKER）**：①`settings.json` 顶层新增 `targetBindings`（名字 → `群号/相册ID`），与订阅表**同一份文档 / 同一条原子写链 / 同一次落盘**；清洗掉保留值键、超长键与非地址形状，≤1024 项；②`updateSubscriptions(rows, allowed, albums)` 在落盘前用**当时候选**绑定：解析不到的名字保留在行里但**不绑定**并进响应 `unresolved`（面板提示重选）；已有绑定只要相册还在候选里就原样保留，相册消失才掉绑——同群同名相册换探测顺序、唯一名消失后别群出现同名相册，都不再改投（`resolveTarget` / `albumValueOfTarget` 只查绑定表与旧地址形状，保留值优先，绝不回退到实时索引）；③首轮迁移：启动时绑定表为空但订阅表里有名字 → 用当前候选**一次性**填充并落盘，之后不再自动改写（幂等，解析不到不写空表）；④`@chat` / `#group:` 在 `buildTargetNameIndex`、旧别名索引、`albumValueOfTarget`、周报来源规划里全部排除，名为 `@chat` 的相册在候选里改名 `群名 · @chat`，周报行只勾 `@chat` 时上传数为 0；⑤`readStartupTargetMaps` → `readStartupTargetTables` / `installTargetTables`（解析表 = 绑定表，展示表 = 候选），解析失败 warn 改为 `目标未绑定或相册已变更：<值>，请在面板重新选择`；⑥新增测试 BIND-01（交换探测顺序地址不变）/ BIND-02（唯一名消失 + 新群同名 → 停投 + warn，不改投）/ WEEKLY-SCOPE-07a（相册取名 `@chat`）/ BIND-04（绑定落盘、迁移幂等、面板保存掉绑）。 |
+| 2026-11-24 | **安全：IPv4 映射 IPv6 字面量不再能穿透媒体代理**：①`isPrivateIPv6` 换成真正的 IPv6 归一化解析（`::` 展开、内嵌 IPv4 尾段折成两段、大小写不敏感、非法写法保守拒绝），`::ffff:HHHH:HHHH`/点分写法都拼回 32 位再按 IPv4 规则判私网·本机·保留段（`::ffff:7f00:1` = 127.0.0.1、`::ffff:a9fe:a9fe` = 169.254.169.254、`::ffff:c0a8:101` = 192.168.1.1）——旧实现只看首段、遇到 `::` 开头靠「首段为 0」侥幸拦下，判据与实际地址无关；②新增导出 `isIPv4MappedIPv6()`，媒体代理的**字面量直通分支**一律拒绝映射写法（`http://[::ffff:8.8.8.8]/` 经 WHATWG 归一成 `[::ffff:808:808]`，内嵌 IPv4 虽是公网也不放行），与私网同路径 403，绝不进 pinnedLookup / DNS；③主机名归一收敛到 `normalizeHostLiteral()`，`isPrivateOrLocalHost` 与映射判定共用。 |
+| 2026-11-24 | **订阅目标取值改回唯一可读名 + 解析失败即拒绝**（撤回下一条的「只认稳定地址」：`<el-option>` 没有 `:label`，已选标签只显示 value，`100000001/ALBUM01…` 在控制台里读不了）：①`albumTargetOptions()` 的 value = **唯一可读名**（相册名；**同批重名一律**改成 `群名 · 相册名`，群名也重再加 `（群号）`、仍重加 `#n`；名字缺失回退稳定地址；`@chat` / `#group:` 为保留值，相册名撞上时同样走限定名），`description` = value；②`readStartupTargetMaps()` → `{ nameToValue, valueToName }`：`nameToValue` 只登记枚举内唯一的名字（新命名 + 旧形态唯一别名，由新 `buildTargetNameIndex()` 构建），歧义名字**不登记**；③`resolveTarget` 固定顺序：`@chat` → 名字查表 → 旧地址 `群号/相册ID` 形状，未命中即丢弃并 warn `无法解析投递目标：<值>（相册可能已改名或删除，请重新选择）`（同值只喊一次、上限 64 条）；④`normalizeSubscriptionRows` 不再按名字换算（只 trim / 去重 / 封顶），「目标 = 来源群号 → `@chat`」只对旧单值 `target` 生效；⑤`POST /api/subscriptions` 白名单 = 候选唯一名 ∪ 候选稳定地址 ∪ 现有值 ∪ `@chat`（旧表原样保存不 400）；⑥删 `legacyNameToValues` / `legacyTargetValueOf`（归一阶段不再需要反解）。yml 里没迁移的 `群号/相册ID` 仍按形状兼容，迁移只是让标签可读。 |
+| 2026-11-24 | **账号修正：投递目标只认稳定地址**（BLOCKER）：①`albumTargetOptions()` 的 value 改回 `群号/相册ID`，相册名只进 `description`（重名后缀规则不变，仅影响展示）；②删除「可读名 → 稳定值」反解（`labelToValue` / `targetValueOf` / `subscriptionTargetLabels()`），`resolveTarget` 只认 `@chat` 与 `群号/相册ID`，裸群号与分组标题一律丢弃——两个群都有「周报」或相册取名 `@chat` 都不会再改变收件人；③旧短名迁移挪到归一阶段：`readStartupTargetMaps().legacyNameToValues` 给出候选集合，`legacyTargetValueOf()` 只在**恰好一个**匹配时换算，零个或多个匹配丢弃并 warn `无法唯一确定目标，已丢弃：<值>`（`installSubscriptionTargetWarnings` 接 logger）；④`readStartupTargetMaps()` 只保留 `valueToName`（日志）与 `legacyNameToValues`（迁移）；⑤union 里已保存的旧短名留成 `Schema.disabled()` 保留项（文案说清「运行时换算为 1/a」或「无法唯一确定，已丢弃」），静态校验照旧能过。新增 SUBS-19 与 ALBUM 相关断言。 |
+| 2026-11-24 | **候选里的表外群缓存清掉**：缓存按群累积，退订 / 早已移除的测试群相册会一直挂在下拉里（实测 `100000002` 已不在订阅表却仍出现，日志还报「覆盖 2 个群」）。新增 `scopeAlbumCandidates(albums, groupIds, configured)`：只保留 `groupIds` 里的群，`configured`（宿主 yml 已保存的目标）**点名的具体相册**例外保留（旧命名也能反解命中），同群其它相册照旧丢。`refreshAlbumSchema` 合并后过滤再注入/写缓存，`apply()` 的同步预过滤与 `albumProbeScope()` 共用 `subscriptionProbeSources()`（`*` / 空表才异步问机器人，先不过滤）；日志 N = 过滤后候选数、M = `albumProbeScope` 的群数。 |
+| 2026-11-24 | **订阅候选收敛 + 文案极简 + 重载即刷新**：①探测范围只取订阅表 `source` 群（`*` 行或「表为空且旧白名单为空」才回退 `get_group_list` 全量，上限 40），日志改为 `群相册候选 N 个（覆盖 M 个群）`；②文案删到列头一行（`监听群` / `投递群（可多个）` / `词条` / `周报`，无表级说明）；③`targets` 取值改为**相册名**（同批重名追加 `（群名）`，群名也重再追加 `（群号）`，名字缺失回退 `群号/相册ID`；旧命名 `群名 · 相册名` 由 `legacyAlbumTargetOptions()` 继续登记进运行时映射、并作为 union 保留项标注「旧名，仍可用」）；④新增 `albumUnionItems()` 与 `refreshSubscriptionTargets()`：`apply()` 每次重载与每轮探测后**原地替换** `Config.dict.subscriptions.inner.dict.targets.inner.list`（实测 `Schema.toJSON()` 每次现读 `list`，`type` / `role` / `inner` 不动 → `isMultiSelect()` 与 `toColumns(inner)` 结论不变），新相册不再需要重启进程。 |
+| 2026-11-24 | **订阅目标取值改为可读名**（修已选标签只显示 `100000001/ALBUM01…`：schemastery-vue 的 `<el-option>` 没有 `:label`，上游不可改）：`targets` 的 const value = `群名 · 相册名`（新增 `albumTargetOptions()`；同批重名追加 `（群号）`、同群同名再追加 `（群号/相册ID）`，名字缺失回退 `群号/相册ID`），新增 `readStartupTargetMaps()`（可读名 → `群号/相册ID`）与 `installSubscriptionTargetLabels()`，随 `Config` 在模块加载期求值；`resolveTarget` / 新 `albumValueOfTarget` / `validateSubscriptionRows` 先查映射再按旧形状解析，周报上传与 `POST /api/subscriptions` 的白名单同样走反解；`MAX_SUBSCRIPTION_TARGET_CHARS` 128 → 192（可读名更长，避免归一阶段静默丢目标）。代价：相册/群改名后需重新选择。 |
+| 2026-11-24 | **订阅表恢复成表格**（后者是用户确认的取舍，撤回下条的「撤掉表格」）：`subscriptions` 重新声明 `.role('table')`，`targets` 改为**启动期静态** `array(const union).role('select')`——新增 `readStartupTargetValues()` 在模块加载时同步读实例配置（`plugins` 树 → 本插件块的 `storage.wikiDir` → `<wikiDir>/.patchouli/albums.json`；再合并 `subscriptions[].targets` / 历史 `target`；任何异常降级为空候选），`SubscriptionTargets` 常量随 `Config` 一起求值。删除 `Schema.dynamic('patchouli.subscription-target')` 注册与注入期 `configuredTargetValues()`。代价：**新增相册需重启 Koishi** 才进候选（表格列在渲染前校验，只认静态 const union）。 |
+| 2026-11-24 | 控制台订阅目标候选补全：`configured` 同时收「生效表」与宿主 `config.subscriptions`（覆盖层顶替后仍能拿到 yml 迁移值）；`updateSubscriptions` 成功与覆盖层回灌完成后立即重注入 schema（不触发探测）；未探测值的标签文案改为 `<群号> 的相册 <相册ID>（未探测到…）`，不再显示原始 `群号/相册ID`。 |
+| 2026-11-24 | 控制台订阅表的 `targets` 换成**动态候选标签多选**：`Schema.dynamic('patchouli.subscription-target')` + 注册值 `array(const union).role('select')`，候选 = `@chat` + 各相册（说明 `群名 · 相册名`），随 `ctx.schema.set` 在线刷新。同时**撤掉 `subscriptions` 的 `role: 'table'`**：实测 schemastery-vue 的表格按 `toColumns(schema.inner)` 校验列，dynamic 的 inner 恒为 `any`（解析发生在渲染期组件里），表格 validate 必失败，只能卡片行——表格与动态候选互斥。 |
+| 2026-11-24 | **订阅目标下拉按群分段 + 日志可读名**：`albumTargetOptions(albums, configured)` 现在一次给出整份 `targets` 候选——`@chat` 首位、每个群一段（`#group:<群号>` 的 `Schema.disabled()` 标题项，文案就是群名，靠 `<el-option :disabled>` 当分组标题，上游没有 `el-option-group`）、组内按相册名排序、末尾接「已配置未探测」保留项；**重名后缀仍按候选原顺序分配**，排序只改展示（已保存的 value 不会换主）。`#group:` 是保留值：`rawTargets` / `resolveTarget` / 面板校验 / 日志一律跳过。日志目标改为 `相册名（群号）`（新增 `readStartupTargetMaps().valueToName`，未命中回退 `群号/相册ID`）。 |
+| 2026-11-24 | 订阅表投递目标改为**多值标签**（`targets: string[]`，元素为 `@chat` 或 `群号/相册ID`，空数组不投；历史单值 `target` 读取时归一）。新增面板接口 `GET /api/albums`（缓存优先 + 冷启动探测 + 失败降级）、`GET/POST /api/subscriptions`（`source` 标明覆盖层 / 宿主配置，写入 `settings.json` 顶层 `subscriptions` 并与标量段共用原子串行写链，绝不写宿主 config）。 |
 | 2026-11-13 | 新增调度质量门 `trigger.dispatchMargin`（默认 0 = 关闭）：结算后 `potentialPeak.quality < Θ_burst × margin` 时在 judge 门控之前短路，留证 `kind:'GATE'` 且不做 AIMD 步进；AIMD 的 `LOW_DENSITY` 步进同时按 `qualityScore` 连续化（判废越狠收紧越多），`FRAGMENTED` / `NOISE_SPAM` / `HIGH_QUALITY` 不变。 |

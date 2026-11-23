@@ -146,17 +146,90 @@ function isPrivateIPv4(hostname: string): boolean {
   );
 }
 
-function isPrivateIPv6(hostname: string): boolean {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/iu.exec(hostname);
-  if (mapped) return isPrivateIPv4(mapped[1]);
-  const first = Number.parseInt(hostname.split(':')[0] || '0', 16);
-  if (!Number.isFinite(first)) return false;
+/** 归一化主机名字面量：去方括号（IPv6 URL 形态）、去尾部根点、统一小写。 */
+function normalizeHostLiteral(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[(.*)\]$/u, '$1').replace(/\.$/u, '');
+}
+
+/** IPv6 十六进制段：1~4 位（输入已归一化为小写）。 */
+const HEXTET_PATTERN = /^[0-9a-f]{1,4}$/u;
+
+/**
+ * 把 IPv6 字面量解析成固定的 8 个 16 位段：
+ *   - `::` 展开为若干 `0` 段（必须补足 8 段）；
+ *   - 内嵌 IPv4 尾段（`::ffff:8.8.8.8`）折成两个 16 位段；
+ *   - 全展开（`0:0:0:0:0:ffff:7f00:1`）与大小写混写同等对待。
+ * 非法写法返回 `undefined`（调用方据此保守拒绝）。
+ */
+function readIPv6Hextets(host: string): number[] | undefined {
+  let text = host;
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/u.exec(text);
+  if (dotted) {
+    const v4 = readIPv4Parts(dotted[1]);
+    if (!v4) return undefined;
+    const high = ((v4[0] << 8) | v4[1]).toString(16);
+    const low = ((v4[2] << 8) | v4[3]).toString(16);
+    text = `${text.slice(0, text.length - dotted[1].length)}${high}:${low}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const compressed = halves.length === 2;
+  // 带 `::` 时至少省略 1 段；不带 `::` 时必须正好 8 段
+  if (compressed ? head.length + tail.length > 7 : head.length !== 8) return undefined;
+  const missing = compressed ? 8 - head.length - tail.length : 0;
+  // `::` 处补 `missing` 个 0 段，一次遍历校验 + 转换
+  const ordered = compressed ? [...head, ...new Array<string>(missing).fill('0'), ...tail] : head;
+  const hextets: number[] = [];
+  for (const part of ordered) {
+    if (!HEXTET_PATTERN.test(part)) return undefined;
+    hextets.push(Number.parseInt(part, 16));
+  }
+  return hextets;
+}
+
+/**
+ * IPv4 映射前缀 `::ffff:0:0/96` 的判定：前 5 段为 0、第 6 段为 `0xffff`。
+ * 命中时把最后两个 16 位段拼成 32 位并按 IPv4 点分形式返回（`::ffff:7f00:1` → `127.0.0.1`）。
+ */
+function readMappedIPv4(hextets: readonly number[]): string | undefined {
+  for (let i = 0; i < 5; i += 1) if (hextets[i] !== 0) return undefined;
+  if (hextets[5] !== 0xffff) return undefined;
+  const high = hextets[6];
+  const low = hextets[7];
+  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
+/**
+ * IPv6 字面量是否为 IPv4 映射形式（`::ffff:0:0/96`）：`::ffff:7f00:1`、
+ * 全展开 `0:0:0:0:0:ffff:7f00:1`、点分 `::ffff:8.8.8.8`、任意大小写皆算。
+ * 与内嵌 IPv4 等价，而正规媒体源绝不会使用这种写法——媒体代理的字面量直通分支
+ * 据此**整体**拒绝映射形式（见 `resolvePublicAddress`），绝不交给 pinnedLookup。
+ */
+export function isIPv4MappedIPv6(hostname: string): boolean {
+  const host = normalizeHostLiteral(hostname);
+  if (isIP(host) !== 6) return false;
+  const hextets = readIPv6Hextets(host);
+  return hextets !== undefined && readMappedIPv4(hextets) !== undefined;
+}
+
+function isPrivateIPv6(host: string): boolean {
+  const hextets = readIPv6Hextets(host);
+  // 解析不出合法 IPv6：保守视为不可公开访问（调用方已用 isIP 确认过类型，正常不会走到这里）
+  if (!hextets) return true;
+  // IPv4 映射形式：拼回 32 位后按 IPv4 规则判私网 / 本机 / 保留段
+  // （`::ffff:7f00:1` → 127.0.0.1、`::ffff:a9fe:a9fe` → 169.254.169.254、`::ffff:c0a8:101` → 192.168.1.1）；
+  // 内嵌公网 IPv4 的映射写法由媒体代理的字面量直通分支统一拒绝（`isIPv4MappedIPv6`）。
+  const mapped = readMappedIPv4(hextets);
+  if (mapped !== undefined) return isPrivateIPv4(mapped);
+  const first = hextets[0];
   return first === 0 || (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00;
 }
 
 /** 私网 / 本机 / 内网单标签主机名判定（含 `.local` / `.internal` 等保留后缀）。 */
 export function isPrivateOrLocalHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/u, '$1').replace(/\.$/u, '');
+  const host = normalizeHostLiteral(hostname);
   if (!host) return true;
   if (LOCAL_HOSTNAMES.has(host)) return true;
   if (RESERVED_SUFFIXES.some((suffix) => host.endsWith(suffix))) return true;

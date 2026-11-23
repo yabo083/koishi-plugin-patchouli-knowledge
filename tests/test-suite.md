@@ -11,30 +11,21 @@
 | **WIKI-01** | llmwiki 文件与索引写入 | 调度器输出有效 `WikiEntry` + 本轮 `DiscussionSession` | 写入指定 wiki 根目录 | 生成 `wiki/debates/<id>.md` 与 `raw/sessions/<id>.json`，更新 `index.md` 单行索引，追加 `log.md` | 严格遵守 llmwiki 单行索引、真理源只增不改与 `Source:` 可追溯规范 |
 | **STORE-01** | 本地数据持久化与查询 | 沉淀完成并持久化 | 调用 `search` 或 `getRecent` API | 能够按关键词搜索到标题/摘要，并按时间倒序查阅 | 本地存储保证离线与群指令高效检索 |
 
-### Web UI / Console 组件补充用例 (WEBUI-01 ~ WEBUI-22)
+### Web UI / Console 组件补充用例 (WEBUI-02 / 04 / 05 / 06 / 15 / 18)
 
 | 用例 ID | 场景描述 | 预期结果 | 底层判定机制 |
 | :--- | :--- | :--- | :--- |
-| **WEBUI-01** | 独立页面渲染 | 标题为 `LLMWiki 知识阅读器`，恰好两个核心页签（词条 / 监控），含观点碰撞矩阵，且不硬编码任何真实群号，零外部字体/资源 | 渲染结果字符串断言 |
-| **WEBUI-02** | 路由与 API 交互 | `/patchouli` 及 `entries`/`status`/`tune` 三个 API 均注册并可用 | 模拟 Router 注册表调用 |
-| **WEBUI-03** | 内嵌组件与拖拽收回 | 含 `ptx-window`、`ptx-rail`、`ptx-pill`、两个 `ptx-tab` 图标按键（词条 / 监控）、`clampPosition` 钳制引擎、`floatWindow` 浮动层与 5 秒收回常量 | 结构字符串断言 |
+| **WEBUI-02** | 路由清单 | 只注册 `<base>/session`、`POST <base>/login` / `logout` / `bootstrap` 与 `<base>/api/*`；`GET <base>` / `GET <base>/` 必须不存在（服务端不再渲染任何 HTML，UI 只在 Console 浮窗） | 模拟 Router 注册表调用 |
 | **WEBUI-04** | Console 组件注入 | `addEntry` 收到绝对路径且目录内存在 `index.js`，仅可能出现 node_modules 403 风险提示 | 模拟 `ctx.console` 捕获入参 |
 | **WEBUI-05** | 控制台缺失降级 | 无 console 服务或 `addEntry` 非函数时不注入、不抛错 | 无 console 的 ctx 调用 |
 | **WEBUI-06** | 配置表单清洁 | `Config.toJSON()` 序列化结果无 `_preview`、无 `iframe` | Schema 序列化检查 |
-| **WEBUI-11** | 极简 UI 契约 | 长段口号与 Hero 宣传块已清除；说明全部由 `[data-tip]:hover::after` 承载；零 Emoji | 渲染结果 + 源码断言 |
-| **WEBUI-15** | 内联运行时语法自洽 | 页面 / 内嵌组件的 `<script>` 与客户端产物均可被 `new Function` 编译 | 语法编译断言 |
-| **WEBUI-16** | 图标规格统一 | 三端图标均为 Lucide（24px 网格 / 2px 圆头描边 / `currentColor` 内联），且无任何外链或图标字体 | 图标属性与红线断言 |
+| **WEBUI-15** | 客户端产物语法自洽 | `client/dist/index.js` 可被 `new Function` 编译 | 语法编译断言 |
 | **WEBUI-18** | 真实时间轴流量绘线 | 空采样不画线、不伪造基线；已监测无消息落在基线 0；X 按真实时间戳定位、Y 按条数/满刻度（峰值不拉满）；缺桶与 NaN 采样断开不跨线；窗口外采样不绘制（过期点不堆积在左边界）；单点画短横线 | 数值坐标断言 |
-| **WEBUI-19** | 卡片 / 列表视图切换 | 词条索引标题行右端渲染 `ptx-view-mode` 分段胶囊，两枚按钮各带 `data-mode` 与 `aria-pressed`，图标为 Lucide `grid` / `list`；模式以 `patchouli-view-mode` 落库并容错收敛到 `card` \| `list`；列表模式给 `.ptx-spores` 挂 `is-list`（单列 / 最小 46px / 标题单行省略 / 隐藏大摘要）；页面、内嵌组件与客户端三端结构与样式同步 | 渲染结果 + 客户端源码断言 |
-| **WEBUI-20** | 双槽位轮播 / 群聊记忆 / 索引视图 / 页签收敛 | 长轨道 `ptx-ticker-track` 与 `TICKER_ROW` 彻底移除，容器自身为唯一裁切槽位；`.ptx-trow` 绝对定位，`is-active` 归位 0、`is-entering` 自下方 100% 滑入、`is-leaving` 向上 100% 滑出，`TICKER_SWAP_MS = 400` 后移出 DOM；群聊选择写入 `patchouli-channel-scope` 并在 `pickChannel` 落库；设置页「索引视图」复用同一枚 `renderViewToggle()`；`data-stage="matrix"` / `data-stage="quotes"` 已从侧栏消失而详情页仍展示矩阵与引用 | 渲染结果 + 客户端源码断言 |
-| **WEBUI-23** | 阅读区视觉结构 | 相关线索无外框、名词注两列网格、附录为固定列宽对照表、内联昵称 0.95em；双端同步 | `organic-style.ts` / `client/dist` 双端正则断言 |
-| **WEBUI-21** | 系统提示词原生编辑器（双端同步） | 设置页提示词区复用原生 `ptx-editor` 卡片：`ptx-editor-field` / `ptx-editor-label`（帕秋莉系统提示词 (SYSTEM PROMPT)）/ `textarea.ptx-input.ptx-editor-area.ptx-editor-md[data-role="system-prompt"]` / `ptx-editor-foot` / `ptx-editor-hint` / 恢复默认 + 保存并应用（Lucide `check`）；旧 `.ptx-prompt`、`.ptx-prompt-desc`、`.ptx-prompt-editor`、`.ptx-prompt-actions` 彻底消失，只保留 `.ptx-prompt-status(.is-custom)`；页面、内嵌组件与客户端三端一致 | 渲染结果 + 客户端源码断言 |
-| **WEBUI-22** | 拖拽合成层平移 / 主题原语顺序 | 拖拽帧只写 `translate3d(dx, dy, 0)`（`applyDrag` 体内不出现 `style.left` / `style.top`），`.ptx-window.is-dragging` 带 `will-change: transform` 而 `.is-resizing` 不提升合成层；手势态仍零材质重写；几何经 `snapPx`（`round(v·dpr)/dpr`）对齐设备像素；`DARK_TOKENS` / `LIGHT_TOKENS` / `THEME_KEY` 声明在 `state` 的 `detectHostDark()` 调用之前（var 提升会让数组为 undefined 并抛 TypeError 使运行时停摆） | 三端源码断言 + DPR 1.25 真机拖动实测（拖动中 left/top 不变、抬手后 rect 与 left 逐位一致且无回弹） |
 | **TRAFFIC-01..03** | 采样与静默群 | 墙钟对齐5秒桶，按接受消息计数；静默为真实0，未监测历史缺失；60点上限、读取副本、启动半桶不丢真实消息 | 虚拟时钟与真实触发器 |
 | **LATEST-01..03** | 当前群消息预览 | 仅接受群缓存、无消息null、去除markup、无raw/userId、返回副本、长度上限且不切断代理对；`elements` 恒为非空 JSON 安全 AST 且不含 userId/原始 attrs | 真实系统消息入口与API读取 |
 | **LATEST-04** | 最新词条轮播源 | 真实存储按最新排序，限制1–20条，独立于关键词与群筛选 | 真实LocalStore与API查询 |
 | **RICH-01..09** | 富消息解析与媒体安全 | OneBot / Koishi 元素归一化为安全 AST；支持图片、引用、合并转发、卡片、视频、语音、文件、@与表情；只读 action 白名单、逐层切片与跨层预算、异步旧消息隔离；仅子资源媒体代理，卡片/文件导航直链保留；媒体正文超时、IPv6 与 Range 安全边界；前端仅构造安全 DOM、不自动播放，同指纹不重建媒体节点 | 真实解析器、API 副本、媒体代理与浏览器 DOM 行为 |
-| **MEDIA-01..02** | 同源媒体代理边界 | 收到首包后若响应体停滞仍会超时并中止上游；公网 IPv6 字面地址固定解析并保持 Range/字节流，解析阶段不触发 DNS | 可控 readable stream 与固定 IP 抓取器 |
+| **MEDIA-01..02** | 同源媒体代理边界 | 收到首包后若响应体停滞仍会超时并中止上游；公网 IPv6 字面地址固定解析并保持 Range/字节流，解析阶段不触发 DNS；IPv4 映射字面量（含点分公网映射 `::ffff:808:808`）在字面量直通分支即判为不可用（403），绝不进 DNS / pinnedLookup / fetch | 可控 readable stream 与固定 IP 抓取器 |
 | **QUOTE-UNAVAILABLE** | 引用原消息不可读 | OneBot `get_msg` 返回 1200（撤回 / 过期 / 查无此消息）时不写 warning 日志，预览显示「引用消息不可用」并保留引用者名字与原消息 id；真正的通道故障仍然告警并标记解析失败 | 真实解析器 + 注入 resolver 的成败对照 |
 | **FORWARD-UNAVAILABLE** | 合并转发不可读 | OneBot `get_forward_msg` 返回 1200（撤回 / 过期 / 内存表冲掉）时不写 warning 日志，返回 `[合并转发不可用]`；真正的通道故障仍然告警并标记解析失败 | 真实解析器 + 注入 resolver 的成败对照 |
 | **WINDOW-RESIZE** | 自定义窗口尺寸 | 八方向边缘/角拖动可缩放；最小尺寸按视口约束、对边锚定、视口内边界；最大化时禁用手柄，还原自定义尺寸并根据容器宽度重排 | 实际浏览器 Pointer Events 操作 |
@@ -118,7 +109,7 @@
 | 用例 ID | 场景描述 | 预期结果 | 底层判定机制 |
 | :--- | :--- | :--- | :--- |
 | **RICH-01** | 元素归一化全覆盖 | 原始 OneBot 段（text/at/face/img/record/video/file/reply/forward/json/xml/share/music/location/contact/dice/rps/poke/markdown）各自映射到契约内类型；CQ 实体反转义；只有 QQ 号时不得暴露 userId；无输入时 `elements` 仍为非空数组且 `content` 摘要保留 | 真实 `onIncomingMessage` + 元素 AST 断言与 JSON 往返 |
-| **RICH-02** | 媒体地址安全 | 仅放行公网 http(s)：`javascript:` / `data:` / `blob:` / `file:` / Windows 与 POSIX 本地路径 / 相对路径 / 私网与 link-local（含云 metadata 地址）/ `localhost` 与单标签内网名 / `.local`·`.lan` 后缀 / 非 80·443 端口 / 带 userinfo 的 URL 全部拒绝；`image/svg+xml`、`text/html` 等 active content 不在媒体白名单内 | `sanitizeMediaUrl` / `isAllowedMediaType` / `MediaRegistry.register` 枚举断言 |
+| **RICH-02** | 媒体地址安全 | 仅放行公网 http(s)：`javascript:` / `data:` / `blob:` / `file:` / Windows 与 POSIX 本地路径 / 相对路径 / 私网与 link-local（含云 metadata 地址）/ `localhost` 与单标签内网名 / `.local`·`.lan` 后缀 / 非 80·443 端口 / 带 userinfo 的 URL 全部拒绝；IPv4 映射 IPv6 字面量（`::ffff:7f00:1` / **全展开** `0:0:0:0:0:ffff:a9fe:a9fe` / 大小写混写）按拼回的 32 位判私网·本机·保留段并一律拒绝；`image/svg+xml`、`text/html` 等 active content 不在媒体白名单内 | `sanitizeMediaUrl` / `isAllowedMediaType` / `MediaRegistry.register` / `isIPv4MappedIPv6` 枚举断言 |
 | **RICH-03** | 只读 resolver | `get_image` 解析 file → 真实 URL；`get_msg` 补齐引用（标题/正文/targetMessageId）；`get_forward_msg` 展开为 `items[]`；只调用白名单内只读 action（`_get` 优先，参数用标准 `id`）；resolver 抛错时保留元素类型 + 可见 error 文本且记录日志，绝不造假 URL | 假只读通道捕获调用序列 + 元素断言 |
 | **RICH-03b** | 只读边界 | 写操作（`send_msg`）绝不被调用；`_request` 回退必须校验 `retcode`，非 0 视为失败而非假成功 | 捕获调用 + retcode 断言 |
 | **RICH-04** | 上限明示截断 | 转发节点超限追加「共 N 条转发，仅展开前 M 条」；递归深度超限标注「层级过深，未展开」；顶层元素超限追加「已截断，共 N 段元素」；元素文本按码点截断到上限 | `maxForwardNodes`/`maxForwardDepth`/`maxElements`/`textLimit` 注入断言 |
@@ -204,8 +195,12 @@
 | **CARDSEQ-01..06** | 卡片序号（按群独立） | 每群各自从 1 递增；同一词条恒同号且与传入群无关；跨实例延续（文件 `{version:2,channels:{群:{next,map}}}`）；同 id 并发同号、异 id 不重号；结构不符 / 损坏一律当空表从头数；空路径只内存计数 | `CardSequence` |
 | **API-CARD-01..03** | 管理面长图导出 | `GET /patchouli/api/card/:id`：空 id 400、缺失 404、无 puppeteer 503 + 纯文本（不伪造图片）、有 puppeteer 时 `image/png` 且渲染 HTML 已脱敏（不含真实昵称与号码）、页眉带序号、页脚为一言、整张卡不含任何 URL | `registerWebUi` 模拟 Router + 假 page |
 | **DELIVERY-01..07** | 投递桥 | 只认 `ctx['miyako-delivery']`；**服务缺失时频道目标也显式失败且不触碰 bot**；服务异常收敛为 `DELIVERY_FAILED`；卡片以图片元素投递 | `getDeliveryService` / `deliverElements` |
-| **ALBUM-01..08** | 群相册候选目录 | 投递服务优先、空结果回退 bot；`data.attach_info`/`has_more` 翻页；单群空结果保留旧候选；退群丢弃；union 以空值为首并保留已配置未探测项；频道条目归一；缓存往返与损坏容错；`get_group_list` 覆盖全部群 | `probeGroupAlbums` / `mergeAlbumCandidates` / `albumSchemaUnion` / `readAlbumCache` |
+| **ALBUM-01..17** | 群相册候选目录 | 投递服务优先、空结果回退 bot；`data.attach_info`/`has_more` 翻页；单群空结果保留旧候选；退群丢弃；**表外群的历史缓存被 `scopeAlbumCandidates` 丢弃，`configured` 点名的具体相册（含旧命名）仍保留、同群其它相册不出现**；union 以空值为首并保留已配置未探测项；频道条目归一；缓存往返与损坏容错；`get_group_list` 覆盖全部群；目标候选 = `@chat` + **按群分段**（每组一条 `#group:<群号>` 的 `Schema.disabled()` 标题项、文案就是群名，组内按相册名排序，标题项不可选且被 `resolveTarget` / 归一丢弃；**相册项取值 = 唯一可读名**（相册名；同批重名一律改成 `群名 · 相册名`、群名也重再追加 `（群号）`、仍重加 `#n`，名字缺失回退稳定地址，`@chat` / `#group:` 为保留值），文案与取值一致；旧名 / 旧地址作为不可选保留项并注明能否解析；无空串项、`@chat` 不重复）；目标注册 schema 是 `array(const union)` + role `select`（标签多选）；**启动期静态候选** `readStartupTargetValues`：读实例配置 + `<wikiDir>/.patchouli/albums.json`、键名变体（`~` / `:id` / 分组嵌套）与自定义/缺省 `wikiDir`、配置缺失或损坏时静默降级为空；**启动期辅助表** `readStartupTargetTables`：`nameToValue`（**只来自 `settings.json` 的 `targetBindings`**，候选不参与解析，ALBUM-16 断言）与 `valueToName`（日志展示 `相册名（群号）`，来自当前候选）；`albumUnionItems` 原地替换 `inner.list` 后序列化与校验随新候选（ALBUM-12，重载刷新可行） | `probeGroupAlbums` / `mergeAlbumCandidates` / `scopeAlbumCandidates` / `albumSchemaUnion` / `albumUnionItems` / `albumTargetOptions` / `legacyAlbumTargetOptions` / `subscriptionTargetsSchema` / `readAlbumCache` / `readStartupTargetValues` / `readStartupTargetTables` |
+| **BIND-01..05** | 名字→地址绑定表（`targetBindings`） | 保存时用当时候选绑定，落盘与订阅表同一次原子写；**同群同名相册交换探测顺序 → 已保存目标的最终地址不变**；**唯一名消失 + 新群出现同名相册 → 已绑定继续投老地址、掉绑后停投并 warn，绝不改投**；候选为空（探测掉线）不清空绑定；首轮迁移一次性填充且幂等（绑定表非空不重写），迁移完成标记 `bindingMigration` 与绑定表同一次落盘 → **用户删光绑定后重启不按当前候选重新解析同名相册**；面板保存把解析不到的名字留在行里并返回 `unresolved` | `resolveTargetBindings` / `readTargetBindings` / `readTargetBindingMigration` / `writeTargetBindings` / `PatchouliKnowledgeSystem.updateSubscriptions` / `POST /api/subscriptions` |
+| **SUBS-01..22** | 订阅表编译（多值目标） | 空表回退旧配置；`*` 行监听全部群；`@chat` 解析为来源群聊天（无来源 / `*` 来源丢弃）；多值目标合并去重、非法项丢弃；`*` 行里的 `@chat` 丢弃（无具体来源）；历史单值 `target` 归一成 `targets`（`目标 = 来源群` 等价写成 `@chat`）；**归一原样保留名字**、投递期按唯一名表解析（未登记 / 歧义名字丢弃并 warn、`@chat` 恒为保留值、`#group:` 丢弃）、名字与旧地址指向同一投递点只投一次、面板接受候选唯一名 ∪ 稳定地址 ∪ 现有值（`@chat` 恒可写）；POST 校验的值域 / 去重 / 单行 ≤16 / 总行 ≤256 / 目录为空时只做形状校验 / 拒绝 `#group:` 分组标题；日志目标显示 `相册名（群号）`（值先解析成地址再取文案，解析不了原样回显）、`@chat` → 本群聊天、分组标题不显示；**空表回退的旧白名单保持精确匹配**（`onebot:123` 与 `123` 不互相命中，与升级前 `channels.includes` 同义），表生效时才按裸群号归一；**`*` 行 + `@chat` 在 POST 校验即 400**（存下去也投不了） | `compileSubscriptions` / `isListening` / `resolveTarget` / `resolveTargets` / `albumValueOfTarget` / `buildTargetNameIndex` / `installSubscriptionTargetLabels` / `installSubscriptionTargetWarnings` / `normalizeSubscriptionRows` / `validateSubscriptionRows` |
+| **SUBS-HTTP-01..08** | 面板订阅接口 | `GET /api/albums` 缓存优先（命中不探测）、冷启动探测一次并回写、探测失败降级空目录不 500；`GET /api/subscriptions` 带 `source`（`settings`/`config`）与相册目录；`POST` 校验失败 400、成功落 `settings.json` 顶层 `subscriptions` 且与标量段互不抹除、绝不写宿主 config、并发串行、覆盖层整段顶替 config 并即时改变监听范围 | `registerWebUi` + 真 `PatchouliKnowledgeSystem` + 模拟 Router |
 | **WEEKLY-01..05** | 知识周报排程 | 空表达式回落默认并按 `Asia/Shanghai` 注册；配置表达式收敛空白后使用；段数不足 / 宿主解析抛错 / 缺 `scheduleCron` 一律不注册且留可读告警 | `registerWeeklyCron` |
+| **WEEKLY-SCOPE-01..09** | 知识周报按来源取材与投递 | 只给 A 开周报时只渲染 / 投递 A 的主题（B 的标题不进卡）；`*` 行取全库；订阅表为空保持旧的「全库 + `albumDelivery.albums`」；同来源多行目标一张图多目标且 `dedupeKey=<分钟桶>:<来源>:<相册>`；来源无主题记 info 不渲染；无相册目标 `album-not-configured`；过期主题不参与且全过期 `no-topics`；取材上限 500 | `runWeeklyAlbumDelivery` / `planWeeklyAlbumSources`（注入假 store / render / deliver） |
 
 ---
 
@@ -345,6 +340,8 @@
 | **MASK-11** | 单字中文名在提及语境里必须替换（结构化字段同样） | `mask.test.mjs` |
 | **MEDIA-IDLE** | upstream headers do not disable response-body idle timeout | `media-proxy.test.mjs` |
 | **MEDIA-IPV6** | public literal is pinned without DNS and streams bytes unchanged | `media-proxy.test.mjs` |
+| **MEDIA-IPV6-MAPPED** | IPv4 映射字面量在字面量直通分支即拒绝，不进 DNS / pinnedLookup / fetch | `media-proxy.test.mjs` |
+| **RICH-02-MAPPED** | IPv4 映射 IPv6 字面量（十六进制 / 全展开 / 大小写混写）判定为私网 / 不可用 | `rich-message.test.mjs` |
 | **QQ-VIDEO-CARD** | mini-app detail_1 qqdocurl is retained as a navigation link | `qq-video-card.test.mjs` |
 | **QUOTE-FAILURE** | 真正的通道故障仍然告警并标记解析失败 | `quote-unavailable.test.mjs` |
 | **FORWARD-FAILURE** | 真正的合并转发通道故障仍然告警并标记解析失败 | `quote-unavailable.test.mjs` |
@@ -370,8 +367,6 @@
 | **TUNING-04** | 高价值讨论才放宽，且舍弃判定优先于评分 | `tuning.test.mjs` |
 | **TUNING-05** | 硬限幅恒成立（minBurstRate 3~8 / minDiscussionMessages 6~16 / thetaMin 10~60） | `tuning.test.mjs` |
 | **TUNING-06** | 初始状态与非法输入收敛到锚点/默认值 | `tuning.test.mjs` |
-| **WEBUI-24** | 主题校准 / 沉淀下限 / 主题提示词三块设置能力双端同源 | `webui.test.mjs` |
-| **WEBUI-25** | 设置页大纲 / 单栏折叠 / 紫色辅助标签 / 表格无底色（双端同源） | `webui.test.mjs` |
 | **WIKI-EDIT-01** | removeIndexEntry 删除全部同标题托管行并保留脚手架与用户分区 | `wiki-edit-delete.test.mjs` |
 | **WIKI-EDIT-02** | removeLogEntry 删除全部同标题流水行并保留标题脚手架 | `wiki-edit-delete.test.mjs` |
 | **WIKI-DELETE-01** | deleteEntry 精确删除单个词条的文件/原始 dump/索引/流水，且幂等 | `wiki-edit-delete.test.mjs` |

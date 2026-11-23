@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>帕秋莉知识库 · 配置分层设计 v4</title>
+<style>
+  :root{
+    --bg:#1b1b1f; --panel:#242429; --line:#33333a; --fg:#e8e8ea; --muted:#9a9aa4;
+    --accent:#8b5cf6; --danger:#ef4444; --cell:#2a2a30;
+    --paper:#f7f5f0; --ink:#232323; --ink-muted:#6b6b6b; --green:#0ea44f; --teal:#0e8f86;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 "Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  .top{display:flex;align-items:center;gap:12px;padding:13px 24px;border-bottom:1px solid var(--line)}
+  .top h1{font-size:15px;font-weight:600;margin:0}
+  .top .note{margin-left:auto;font-size:11.5px;color:var(--muted)}
+  main{max-width:940px;margin:0 auto;padding:22px 24px 80px}
+  .part{margin:10px 0 12px;font-size:11.5px;letter-spacing:.16em;color:var(--muted)}
+  .part b{color:var(--fg);letter-spacing:.02em}
+
+  .field{display:grid;grid-template-columns:1fr auto;gap:16px;align-items:center;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+  .field:last-child{border-bottom:none}
+  .label{font-weight:500}
+  .switch{position:relative;width:42px;height:22px;border-radius:11px;background:#3a3a42;cursor:pointer;transition:background .18s;flex:none}
+  .switch.on{background:var(--accent)}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .18s}
+  .switch.on::after{transform:translateX(20px)}
+  input[type=text],select{background:var(--cell);border:1px solid transparent;border-radius:5px;color:var(--fg);
+    padding:6px 9px;font:inherit;font-size:12.5px}
+  input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
+  input[type=text]::placeholder{color:#6b6b76}
+
+  .group{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:2px 16px;margin-bottom:14px}
+  .group>.gh{padding:11px 0 7px;font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px}
+  .group>.gh .tag{font-size:10.5px;font-weight:400;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:0 7px}
+
+  .table-head{display:flex;align-items:center;gap:12px;margin:18px 0 8px}
+  .table-head .left{flex:1;font-weight:600}
+  .tbl-wrap{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+  table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+  th{background:#26262c;color:var(--muted);font-weight:500;font-size:12px;text-align:left;
+    padding:9px 10px;border-bottom:1px solid var(--line);border-right:1px solid var(--line)}
+  th:last-child{border-right:none;text-align:center;width:74px}
+  td{padding:5px 8px;border-bottom:1px solid rgba(255,255,255,.05);border-right:1px solid rgba(255,255,255,.05)}
+  td:last-child{border-right:none;text-align:center;white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  input.cell{width:100%;background:var(--cell);border:1px solid transparent;border-radius:5px}
+  .cb{appearance:none;width:16px;height:16px;border-radius:4px;border:1px solid #4a4a55;background:#232329;cursor:pointer;position:relative}
+  .cb:checked{background:var(--accent);border-color:var(--accent)}
+  .cb:checked::after{content:"";position:absolute;left:4.5px;top:1.5px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .rowtools{display:inline-flex;gap:2px;color:var(--muted)}
+  .rowtools button{all:unset;cursor:pointer;padding:3px 5px;border-radius:4px;font-size:12px}
+  .rowtools button:hover{background:rgba(255,255,255,.06);color:var(--fg)}
+  .rowtools button.rm:hover{color:var(--danger);background:rgba(239,68,68,.12)}
+  .addrow{all:unset;cursor:pointer;color:var(--accent);font-size:12.5px;padding:5px 12px;
+    border:1px dashed rgba(139,92,246,.5);border-radius:6px;white-space:nowrap}
+  .addrow:hover{background:rgba(139,92,246,.12)}
+  .hint{color:var(--muted);font-size:11.5px;line-height:1.7;margin:8px 0 0}
+  code{background:#2a2a31;padding:1px 5px;border-radius:4px;font-size:11px}
+
+  .quick{display:grid;grid-template-columns:1fr 1fr;gap:0 22px}
+  .quick .field{padding:10px 0}
+
+  /* 自建面板 */
+  .panel{background:var(--paper);color:var(--ink);border-radius:14px;padding:18px 22px 22px;margin-top:6px}
+  .panel .ph{display:flex;align-items:center;gap:10px;padding-bottom:11px;border-bottom:1px solid #e2ddd3}
+  .panel .ph .dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+  .panel .ph h3{margin:0;font-size:14px;font-weight:600}
+  .panel .ph .where{margin-left:auto;font-size:11px;color:var(--ink-muted);font-family:ui-monospace,Consolas,monospace}
+  .panel .field{border-bottom:1px solid #e7e2d8;padding:10px 0}
+  .panel .label{color:var(--ink);font-weight:500}
+  .panel .bt{font-size:11px;letter-spacing:.14em;color:var(--teal);font-weight:600;margin:14px 0 2px}
+  .panel .switch{background:#d9d4c9}
+  .panel .switch.on{background:var(--green)}
+  .panel input[type=text],.panel select{background:#fff;border:1px solid #ddd7cb;color:var(--ink)}
+  .panel input[type=text]:focus,.panel select:focus{border-color:var(--teal)}
+  .panel .kv{display:grid;grid-template-columns:150px 1fr;gap:5px 14px;font-size:12px;color:var(--ink-muted);margin-top:12px}
+  .panel .kv b{color:var(--ink);font-weight:500}
+  .arrowdown{display:flex;justify-content:center;color:var(--muted);margin:24px 0 4px}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>帕秋莉知识库</h1><span style="color:var(--muted);font-size:12px">[0848oh]</span>
+  <span class="note">配置分层 v4 · 上 Koishi 插件页 / 下 自动面板</span>
+</div>
+<main>
+  <div class="part">KOISHI 插件页</div>
+
+  <div class="group">
+    <div class="gh">模型配置 <span class="tag">置顶</span></div>
+    <div class="field"><div class="label">provider</div><div><select><option>ChatLuna</option><option>自定义端点</option></select></div></div>
+    <div class="field"><div class="label">模型</div><div><select><option>继承平台默认</option><option>gemini-3.8-flash</option></select></div></div>
+    <div class="field"><div class="label">端点地址</div><div><input type="text" placeholder="https://…/v1beta" style="width:230px"></div></div>
+    <div class="field"><div class="label">密钥</div><div><input type="text" placeholder="sk-…" style="width:180px"></div></div>
+    <div class="field"><div class="label">temperature · maxTokens</div>
+      <div style="display:flex;gap:8px"><input type="text" value="0.3" style="width:74px"><input type="text" value="6000" style="width:84px"></div></div>
+  </div>
+
+  <div class="group">
+    <div class="field"><div class="label">启用</div><div><div class="switch on" role="switch" aria-checked="true" tabindex="0"></div></div></div>
+  </div>
+
+  <div class="table-head">
+    <div class="left">订阅表</div>
+    <button class="addrow">添加行</button>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <colgroup><col style="width:19%"><col style="width:46%"><col style="width:12%"><col style="width:12%"><col></colgroup>
+      <thead><tr><th>来源群</th><th>投递目标</th><th>词条</th><th>周报</th><th>操作</th></tr></thead>
+      <tbody id="rows">
+        <tr><td><input class="cell" type="text" value="100000001"></td>
+          <td><input class="cell" type="text" value="100000001/ALBUM01"></td>
+          <td><input type="checkbox" class="cb" checked></td><td><input type="checkbox" class="cb" checked></td>
+          <td><span class="rowtools"><button>↑</button><button>↓</button><button class="rm">🗑</button></span></td></tr>
+        <tr><td><input class="cell" type="text" value="100000002"></td>
+          <td><input class="cell" type="text" value="100000002"></td>
+          <td><input type="checkbox" class="cb" checked></td><td><input type="checkbox" class="cb"></td>
+          <td><span class="rowtools"><button>↑</button><button>↓</button><button class="rm">🗑</button></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="hint">
+    来源群填裸群号，<code>*</code> 全部。投递目标：<code>留空</code> 不投 · <code>群号</code> 发群聊 · <code>群号/相册ID</code> 发相册。
+  </div>
+
+  <div class="group" style="margin-top:14px">
+    <div class="gh">功能开关</div>
+    <div class="quick">
+      <div class="field"><div class="label">词条投递</div><div><div class="switch on" tabindex="0"></div></div></div>
+      <div class="field"><div class="label">主题周报</div><div><div class="switch on" tabindex="0"></div></div></div>
+      <div class="field"><div class="label">每日主题校准</div><div><div class="switch on" tabindex="0"></div></div></div>
+      <div class="field"><div class="label">卡片素材</div><div><div class="switch" tabindex="0"></div></div></div>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="field"><div class="label">知识库目录</div><div><input type="text" value="data/llmwiki" style="width:220px"></div></div>
+    <div class="field"><div class="label">面板密钥</div><div><input type="text" value="••••••••••••" style="width:180px"></div></div>
+  </div>
+
+  <div class="arrowdown">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+  </div>
+  <div class="part">自动面板 · 设置 <span style="color:var(--muted)">（/patchouli）</span></div>
+
+  <div class="panel">
+    <div class="ph">
+      <span class="dot"></span><h3>设置</h3>
+      <span class="where">/patchouli</span>
+    </div>
+
+    <div class="bt">触发算法</div>
+    <div class="field"><div class="label">判据模式</div><div><select><option>势能</option><option>速率</option></select></div></div>
+    <div class="field"><div class="label">窗口 · 突发倍率 · 最小速率</div>
+      <div style="display:flex;gap:8px"><input type="text" value="60" style="width:70px"><input type="text" value="2.5" style="width:70px"><input type="text" value="6" style="width:70px"></div></div>
+    <div class="field"><div class="label">平息静默 · 冷却比</div>
+      <div style="display:flex;gap:8px"><input type="text" value="300" style="width:80px"><input type="text" value="1.1" style="width:70px"></div></div>
+    <div class="field"><div class="label">其余参数</div><div><button class="addrow">展开</button></div></div>
+
+    <div class="bt">主题校准</div>
+    <div class="field"><div class="label">时间</div>
+      <div style="display:flex;gap:8px"><input type="text" value="04" style="width:58px"><input type="text" value="00" style="width:58px"></div></div>
+    <div class="field"><div class="label">相似度 · 最少词条 · 回看天数</div>
+      <div style="display:flex;gap:8px"><input type="text" value="0.5" style="width:70px"><input type="text" value="1" style="width:60px"><input type="text" value="30" style="width:60px"></div></div>
+
+    <div class="bt">素材池与长图</div>
+    <div class="field"><div class="label">离线模式</div><div><div class="switch" tabindex="0"></div></div></div>
+    <div class="field"><div class="label">水位 · 批量 · 冷却小时</div>
+      <div style="display:flex;gap:8px"><input type="text" value="12" style="width:60px"><input type="text" value="8" style="width:60px"><input type="text" value="6" style="width:60px"></div></div>
+    <div class="field"><div class="label">长图最大高度</div><div><input type="text" value="6000" style="width:96px"></div></div>
+
+    <div class="bt">本地裁判服务</div>
+    <div class="field"><div class="label">启用</div><div><div class="switch" tabindex="0"></div></div></div>
+
+    <div class="kv">
+      <span>版本</span><b>0.8.66</b>
+      <span>目录</span><b>data/llmwiki</b>
+      <span>上次校准</span><b>今天 04:00 · 12 个主题</b>
+    </div>
+  </div>
+</main>
+<script>
+  document.querySelectorAll('.switch').forEach((el) => {
+    el.addEventListener('click', () => { const on = el.classList.toggle('on'); el.setAttribute('aria-checked', String(on)); });
+    el.addEventListener('keydown', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); el.click(); } });
+  });
+  const rows = document.getElementById('rows');
+  document.querySelector('.addrow').addEventListener('click', () => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input class="cell" type="text" placeholder="群号，* 表示全部"></td>
+      <td><input class="cell" type="text" placeholder="群号 或 群号/相册ID"></td>
+      <td><input type="checkbox" class="cb" checked></td><td><input type="checkbox" class="cb"></td>
+      <td><span class="rowtools"><button>↑</button><button>↓</button><button class="rm">🗑</button></span></td>`;
+    rows.appendChild(tr);
+    tr.querySelector('.rm').onclick = () => tr.remove();
+  });
+  document.querySelectorAll('#rows .rm').forEach((b) => { b.onclick = () => b.closest('tr').remove(); });
+</script>
+</body>
+</html>

@@ -154,7 +154,7 @@ const IDENTIFIER_CHAR = /[\p{L}\p{N}_.%+-]/u;
 const MENTION_TOKEN = /^[^\s@，。、；：！？…·（）()\[\]【】「」『』《》<>"“”'‘’]+/u;
 /** 令牌尾部的句读符号：属于文本，不属于昵称。 */
 const MENTION_TAIL = /[.．。]+$/u;
-/** 昵称尾部的附着信息：`VMNXD 1606987772` / `空庭流萤（B服天蓝色的海#9937）` 的底名要归一。 */
+/** 昵称尾部的附着信息：`VMNXD 100000009` / `空庭流萤（B服天蓝色的海#9937）` 的底名要归一。 */
 const NAME_PARENS = /（[^）]*）|\([^)]*\)/gu;
 const NAME_SUFFIX = /[\s_#-]*\d+$/u;
 /** 伪号空间：`10` + 6 位十进制。 */
@@ -191,7 +191,7 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * 归一昵称：`VMNXD 1606987772` → `VMNXD`、`空庭流萤（B服…#9937）` → `空庭流萤`。
+ * 归一昵称：`VMNXD 100000009` → `VMNXD`、`空庭流萤（B服…#9937）` → `空庭流萤`。
  * 复合昵称与它的裸写形态共享同一个假名；剥完不足 2 字符时退回原名（不吞单字昵称）。
  */
 export function canonicalNameKey(name: string): string {
@@ -212,7 +212,7 @@ function pad6(value: number): string {
 export function createMasker(seed = ''): Masker {
   const nameSalt = `${seed}\u0000name\u0000`;
   const numberSalt = `${seed}\u0000number\u0000`;
-  /** 归一键 → 假名：`VMNXD 1606987772` 与 `VMNXD` 落同一条，共享一个假名。 */
+  /** 归一键 → 假名：`VMNXD 100000009` 与 `VMNXD` 落同一条，共享一个假名。 */
   const byRealName = new Map<string, string>();
   const takenNames = new Set<string>();
   const byRealNumber = new Map<string, string>();
@@ -332,7 +332,7 @@ export function createMasker(seed = ''): Masker {
       // 单字符中文名（如「夜」）照登记：结构化字段（participants / 金句署名 / 支持质疑方）
       // 走 `maskName` 直接换，与长度无关；只有**正文裸提**需要上下文判定（见 replaceReservedNames）。
       reservedNames.add(trimmed);
-      // 复合昵称的底名也要能命中：`VMNXD 1606987772` 在正文常被裸写成 `VMNXD`。
+      // 复合昵称的底名也要能命中：`VMNXD 100000009` 在正文常被裸写成 `VMNXD`。
       const base = canonicalNameKey(trimmed);
       if (base !== trimmed && base !== '') reservedNames.add(base);
     }

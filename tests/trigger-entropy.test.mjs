@@ -32,8 +32,8 @@ function createChatGenerator(seed) {
   return (length) => {
     let text = '';
     for (let index = 0; index < length; index += 1) {
-      state = (state * 1103515245 + 12345) % 2147483648;
-      text += CHAT_POOL[Math.floor((state / 2147483648) * CHAT_POOL.length)];
+      state = (state * 0x41c64e6d + 12345) % 0x80000000;
+      text += CHAT_POOL[Math.floor((state / 0x80000000) * CHAT_POOL.length)];
     }
     return text;
   };

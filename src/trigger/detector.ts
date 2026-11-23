@@ -1158,6 +1158,17 @@ export class BurstQuiescenceDetector {
   }
 
   /**
+   * 全局默认参数热更新（面板设置覆盖层写入后调用）。
+   *
+   * 只改 patch 里出现的键：已建状态的群由调用方另行 `updateOptions`，
+   * 未建状态的群下次 `ensureState` 时才吃到新默认值。
+   */
+  applyDefaultOptions(patch: Partial<TriggerOptions>): TriggerOptions {
+    Object.assign(this.defaults, normalizeTriggerOptions(patch, this.defaults));
+    return { ...this.defaults };
+  }
+
+  /**
    * 逐群热更新触发参数（AIMD 控制器输出的 `parameters` 可直接回灌）。
    * 返回更新后的度量快照。
    */

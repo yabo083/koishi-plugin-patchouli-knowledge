@@ -20,7 +20,7 @@ import { request as httpsRequest, type RequestOptions } from 'node:https';
 import { isIP } from 'node:net';
 import { Transform } from 'node:stream';
 import { MEDIA_FETCH_TIMEOUT_MS, MEDIA_MAX_REDIRECTS } from '../types';
-import { isPrivateOrLocalHost, sanitizeMediaUrl } from '../plugin/rich-message';
+import { isIPv4MappedIPv6, isPrivateOrLocalHost, sanitizeMediaUrl } from '../plugin/rich-message';
 import { MEDIA_ID_PATTERN, type MediaRegistry } from '../plugin/media-registry';
 
 /** 代理处理器所需的 Koa 上下文最小契约（由 `registerWebUi` 的宿主上下文满足）。 */
@@ -101,7 +101,8 @@ export function isAllowedMediaType(contentType: string): boolean {
 /**
  * 解析主机名并返回**唯一的公网 IP**（供 `lookup` 固定使用）。
  * 任一解析结果落在私网 / 本机 / 保留段（含 CGNAT、link-local、组播、RFC 2544 基准段）即整条拒绝，
- * 不存在任何例外段：媒体源必须是公网地址。
+ * IPv4 映射形式的 IPv6 字面量（`::ffff:7f00:1` / `::ffff:8.8.8.8` 等）同样整条拒绝，
+ * 不存在任何例外段：媒体源必须是公网地址，且绝不把映射字面量交给 pinnedLookup 去连。
  */
 async function resolvePublicAddress(
   hostname: string,
@@ -109,7 +110,12 @@ async function resolvePublicAddress(
 ): Promise<{ address: string; family: number } | undefined> {
   const host = hostname.replace(/^\[(.*)\]$/u, '$1');
   const literal = isIP(host);
-  if (literal !== 0) return isPrivateOrLocalHost(host) ? undefined : { address: host, family: literal };
+  if (literal !== 0) {
+    // 映射形式与内嵌 IPv4 等价（`::ffff:808:808` ≡ 8.8.8.8），正规媒体源绝不会使用这种写法；
+    // 与私网同路径直接判为不可用，绝不进入 pinnedLookup。
+    if (literal === 6 && isIPv4MappedIPv6(host)) return undefined;
+    return isPrivateOrLocalHost(host) ? undefined : { address: host, family: literal };
+  }
   try {
     const records = await lookup(host);
     if (records.length === 0) return undefined;

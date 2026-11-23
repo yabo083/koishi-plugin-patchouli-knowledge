@@ -577,8 +577,44 @@ export interface WikiStorageConfig {
   databasePath?: string;    // 本地持久化 SQLite / 存储文件路径
 }
 
-export interface PatchouliPluginConfig {
-  enabled: boolean;
+/**
+ * 订阅表的一行：一个监听来源 + 它的投递目标（多值标签）与开关。
+ *
+ * 表为空时**完全按旧配置运行**（`channels` + `albumDelivery`），因此升级不会改变
+ * 已有实例的行为；一旦用户建了行，只认表。
+ */
+export interface SubscriptionRow {
+  /** 来源群号；`*` = 所有群。裸 QQ 号，不带平台前缀。 */
+  source: string;
+  /**
+   * 投递目标（多值）：`@chat` = 来源群聊天；相册 = 该群相册长图，写的是相册的
+   * **唯一可读名**（`相册名`；同批重名时 `群名 · 相册名`，再重加 `（群号）`）。
+   * 空数组 = 不投递。顺序即投递顺序，重复项在归一阶段去掉。
+   *
+   * 名字必须能解析成相册：投递期查「名字 → `群号/相册ID`」的唯一表，查不到就**拒绝**
+   * 并 warn（相册改名 / 删除 / 本批重名没分配到的裸名字）。升级前写进 yml 的稳定地址
+   * `群号/相册ID` 仍然兼容，按形状直接认。
+   *
+   * 控制台下拉里的 `#group:<群号>` 只是不可选的分组标题，永远不会出现在这里：
+   * 归一阶段直接丢弃，`resolveTarget` 也不解析它。
+   *
+   * 历史 yml 里的单值 `target` 仍在读取路径上兼容（归一成 `targets: [target]`），
+   * 但运行时只用本字段。
+   */
+  targets: string[];
+  /** 该来源沉淀出的词条是否投递到 `targets`。 */
+  entry: boolean;
+  /** 该来源是否参与每周主题周报（周报只认相册稳定地址）。 */
+  weekly: boolean;
+}
+
+/**
+ * 高级设置：控制台里由 `advancedMode` 开关**条件渲染**（关闭时不显示，但默认值仍在）。
+ *
+ * 运行时由 `apply()` 与 `PatchouliKnowledgeSystem` 构造**摊平到顶层**，
+ * 其余代码照旧读 `config.dispatcher` 这类顶层字段，不需要知道高级区的存在。
+ */
+export interface PatchouliAdvancedConfig {
   channels: string[];       // 启用的群聊白名单 (空为所有群)
   trigger: TriggerOptions;
   dispatcher: DispatcherConfig;
@@ -594,11 +630,68 @@ export interface PatchouliPluginConfig {
   media: MediaConfig;
   /** 管理面鉴权（`apiToken` 为空即全部 API 拒绝）。 */
   security: SecurityConfig;
+  /** 本地裁判服务（缺省关闭，关闭即门控直通）。 */
+  judge?: JudgeConfig;
   /**
    * 可观测性与排障留证开关。缺省（旧配置 / 未写该项）按**全部关闭**处理：
    * 普通用户只需要知识库与面板，排障证据由运维显式开启。
    */
   observability?: ObservabilityConfig;
+}
+
+/** 本地裁判服务配置。 */
+export interface JudgeConfig {
+  enabled: boolean;
+  baseURL: string;
+  apiKey: string;
+  model?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * 插件页「功能总闸」：四个纯启停开关，运行时作为该能力的总开关。
+ *
+ * 与调参面（`settings.json` 覆盖层）不同，这些是 `koishi.yml` 里的配置字段——
+ * 关掉即整条链路不跑（词条 sink 直接返回 / 不注册周报 cron / 主题校准无目标 /
+ * 素材池不发请求且出无图版式）。
+ */
+export interface PatchouliFeatureToggles {
+  /** 讨论沉淀后投递词条长图。 */
+  entries: boolean;
+  /** 每周主题周报。 */
+  weekly: boolean;
+  /** 每日主题校准。 */
+  topics: boolean;
+  /** 卡片素材池：关闭后不抓素材、不补货，卡片走无图版式。 */
+  media: boolean;
+}
+
+export interface PatchouliPluginConfig extends PatchouliAdvancedConfig {
+  enabled: boolean;
+  /** 自动书记管理员 QQ 白名单。 */
+  adminUsers: string[];
+  /**
+   * 订阅表：每行一个来源群 + 投递目标与开关。为空时回退到 `channels` + `albumDelivery`
+   * 的旧语义（升级零变化）。
+   */
+  subscriptions: SubscriptionRow[];
+  /** 插件页的功能总闸。 */
+  features: PatchouliFeatureToggles;
+  /**
+   * 大模型调度器（插件页置顶）。`flattenConfig` 之后与历史键 `dispatcher` 同值，
+   * 运行时代码继续读 `config.dispatcher`。
+   */
+  modelConfig?: DispatcherConfig;
+  /**
+   * 0.8.66 的容器段：控制台高级区整体折叠在这里。`flattenConfig` 摊平后运行时不读它，
+   * 但保留字段是为了让旧配置能被识别并迁移（含 `storage` / `security` / `dispatcher`）。
+   */
+  advanced?: Partial<PatchouliAdvancedConfig>;
+  /**
+   * 历史 UI 判别字段（`advancedMode` 条件表单）。新插件页不再使用，
+   * 保留声明只为旧配置过 Schema 校验；运行时忽略。
+   */
+  advancedMode?: boolean;
 }
 
 /** 管理面鉴权配置。 */

@@ -9,8 +9,10 @@ import type {
   DiscussionSession,
   DispatcherConfig,
   LatestMessage,
+  PatchouliFeatureToggles,
   PatchouliPluginConfig,
   RichMessageElement,
+  SubscriptionRow,
   TrafficPoint,
   TriggerOptions,
   TuningSnapshot,
@@ -27,18 +29,27 @@ import type { DispatcherResult } from '../types';
 import { clampCodePoints } from '../trigger/filter';
 import {
   ALBUM_SCHEMA_KEY,
+  MAX_PROBE_GROUPS,
   albumSchemaUnion,
+  albumUnionItems,
   channelGroupIds,
+  installTargetTables,
   listBotGroupIds,
   mergeAlbumCandidates,
   probeGroupAlbums,
   readAlbumCache,
+  readStartupTargetValues,
+  resolveTargetBindings,
+  scopeAlbumCandidates,
+  subscriptionTargetsSchema,
   writeAlbumCache,
   type AlbumBot,
   type AlbumCandidate,
   type AlbumServiceLike,
+  type StartupTargetValues,
 } from './albums';
 import { registerWeeklyCron, type CronSchedulerLike } from './weekly-schedule';
+import { planWeeklyAlbumSources, runWeeklyAlbumDelivery } from './weekly-album';
 import { MediaRegistry } from './media-registry';
 import {
   persistCustomPrompt,
@@ -48,13 +59,37 @@ import {
   writeTopicPromptFile,
 } from './custom-prompt';
 import {
+  readSettingsOverrides,
+  readSettingsOverridesSync,
+  readSubscriptionOverride,
+  readSubscriptionOverrideSync,
+  readTargetBindingMigration,
+  readTargetBindings,
+  readTargetBindingsSync,
+  validateMergedSettings,
+  validateSettingsPatch,
+  writeSettingsOverrides,
+  writeSubscriptionOverride,
+  writeTargetBindings,
+  redactSettingsSection,
+  SETTINGS_META,
+  SETTINGS_SECTIONS,
+  SettingsConflictError,
+  type SettingsBaseSections,
+  type SettingsOverrides,
+  type SettingsRepairContext,
+  type SettingsSection,
+  type SettingsSectionPatch,
+  type SettingsValue,
+} from './settings-store';
+import {
   CARD_SETTINGS_DEFAULT,
   normalizeCardSettingsPatch,
   readCardSettings,
   writeCardSettings,
   type CardSettings,
 } from './card-settings';
-import { normalizeTopicSettingsPatch, readTopicSettings, writeTopicSettings } from './topic-settings';
+import { normalizeTopicSettingsPatch, readTopicSettings } from './topic-settings';
 import { resolveTopicSystemPrompt } from '../dispatcher/prompts';
 import { TopicCurator, type TopicRunResult } from '../wiki/topics';
 import { renderWeeklyAlbumSummaryPng } from './card';
@@ -73,7 +108,12 @@ import {
   type RichMessageContext,
 } from './rich-message';
 import type { DispatcherRuntimeOptions } from '../dispatcher/dispatcher';
-import { BurstQuiescenceDetector, MANUAL_SESSION_MIN_MESSAGES, POTENTIAL_SEEDING } from '../trigger/detector';
+import {
+  BurstQuiescenceDetector,
+  DEFAULT_TRIGGER_OPTIONS,
+  MANUAL_SESSION_MIN_MESSAGES,
+  POTENTIAL_SEEDING,
+} from '../trigger/detector';
 import {
   DEFAULT_TUNING_PARAMETERS,
   HIGH_QUALITY_THRESHOLD,
@@ -84,20 +124,36 @@ import {
   type TuningTarget,
 } from '../trigger/tuning';
 import { ModelDispatcher, normalizeDispatcherProvider, resolveDispatcherModels } from '../dispatcher/dispatcher';
-import { WikiEngine } from '../wiki/engine';
+import { formatDate, WikiEngine } from '../wiki/engine';
 import { LocalStore } from '../wiki/storage';
 import type { WikiEntryRecord } from '../wiki/storage';
 import { DEFAULT_WIKI_SUBDIR, ensureWikiLayout, resolveWikiLayout } from '../wiki/layout';
 import { saveDiscardDump } from '../wiki/discard-dump';
 import type { DiscardVerdict } from '../wiki/discard-dump';
 import { ScribeStore, isScribeAdmin, restoreScribeSessions, scribeScopeRefusal } from './scribe';
-import { registerWebUi, renderTacticalDockComponent } from '../web/api';
+import { registerWebUi } from '../web/api';
 import { attachTelemetry } from '../telemetry/inspector';
 import { ShadowLedger } from '../telemetry/shadow-ledger';
 import type { PatchouliInspector } from '../telemetry/inspector';
 import { CardSequence, cardSequencePath } from '../media/card-sequence';
 import { collectSessionNames, renderEntryCard } from './card-pipeline';
 import { planEntryTargets } from './entry-delivery';
+import {
+  ALBUM_TARGET_PATTERN,
+  CHAT_TARGET,
+  compileSubscriptions,
+  entryTargetsFor,
+  formatSubscriptionLogLines,
+  installSubscriptionTargetWarnings,
+  isListening,
+  isTargetGroupHeader,
+  listeningGroupIds,
+  normalizeSubscriptionRows,
+  projectLegacySubscriptionRows,
+  resolveRows,
+  validateSubscriptionRows,
+  type SubscriptionSnapshot,
+} from './subscriptions';
 import { MediaPool } from '../media/pool';
 import { JudgeClient } from '../judge/client';
 import type { JudgeOptions } from '../judge/client';
@@ -122,9 +178,35 @@ export {
   TOPIC_SETTING_LIMITS,
   normalizeTopicSettingsPatch,
   readTopicSettings,
-  writeTopicSettings,
   type TopicSettingsPatch,
 } from './topic-settings';
+export {
+  MAX_TARGET_BINDINGS,
+  SETTINGS_META,
+  SETTINGS_SECRET_KEYS,
+  SETTINGS_SECTIONS,
+  SettingsConflictError,
+  readSettingsOverrides,
+  readSettingsOverridesSync,
+  readSubscriptionOverride,
+  readSubscriptionOverrideSync,
+  readTargetBindings,
+  readTargetBindingsSync,
+  redactSettingsSection,
+  sanitizeTargetBindings,
+  settingsPath,
+  validateMergedSettings,
+  validateSettingsPatch,
+  writeSettingsOverrides,
+  writeSubscriptionOverride,
+  writeTargetBindings,
+  type SettingsBaseSections,
+  type SettingsFieldMeta,
+  type SettingsOverrides,
+  type SettingsRepairContext,
+  type SettingsSection,
+  type SettingsSectionPatch,
+} from './settings-store';
 
 export const name = 'patchouli-knowledge';
 
@@ -242,14 +324,30 @@ function toLangChainMessages(
 export type PluginOptions = PatchouliPluginConfig;
 
 /**
- * 裁判配置的运行时归一化：`judge` 是本轮新增的顶层键，旧配置 / 未写该项时
- * 全部字段回落默认值（`enabled: false`，行为与从未引入裁判完全一致）。
- * 只接受类型正确的字段，其余一律丢弃——非法配置不会把服务拖进半开状态。
+ * `system.settings(section)` 的返回类型表：与 `SETTINGS_SECTIONS` 的键一一对应。
+ *
+ * 五段都是「合并后的完整对象」（覆盖层 > config > Schema 默认值），
+ * `judge` 在 Schema 里是可选段，这里按已补齐的完整对象暴露。
  */
-function readJudgeOptions(config: PatchouliPluginConfig): Partial<JudgeOptions> {
-  const raw = (config as PatchouliPluginConfig & { judge?: unknown }).judge;
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
-  const record = raw as Record<string, unknown>;
+export interface PatchouliSettingsValues {
+  trigger: PluginOptions['trigger'];
+  topics: PluginOptions['topics'];
+  media: PluginOptions['media'];
+  query: PluginOptions['query'];
+  judge: NonNullable<PluginOptions['judge']>;
+}
+
+/**
+ * 裁判配置的运行时归一化：入参是**合并后**的 `judge` 段（覆盖层 > config > Schema 默认值）。
+ *
+ * 按外部数据对待（`unknown` + 逐字段类型守卫）：`enabled` / `baseURL` / `apiKey` 等缺失或类型
+ * 不对时一律丢弃，由 `JudgeClient` 回落 `DEFAULT_JUDGE_OPTIONS`（`enabled: false`）——
+ * 非法配置不会把服务拖进半开状态。
+ */
+function readJudgeOptions(section: unknown): Partial<JudgeOptions> {
+  if (typeof section !== 'object' || section === null || Array.isArray(section)) return {};
+  const record: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(section)) record[key] = value;
   const options: Partial<JudgeOptions> = {};
   if (typeof record.enabled === 'boolean') options.enabled = record.enabled;
   if (typeof record.baseURL === 'string') options.baseURL = record.baseURL;
@@ -496,122 +594,493 @@ const dispatcherSchema = Schema.intersect([
   enableAutoTuning: true,
 });
 
+/** 功能总闸的字段声明（默认全开，行为与 0.8.66 一致）。 */
+const FEATURES_FIELDS = {
+  entries: Schema.boolean().default(true).description('讨论沉淀后投递词条长图。'),
+  weekly: Schema.boolean().default(true).description('每周主题周报（按订阅表的 weekly 行投递）。'),
+  topics: Schema.boolean().default(true).description('每日主题校准。'),
+  media: Schema.boolean().default(true).description('卡片素材池：关闭后不抓素材，卡片出无图版式。'),
+};
+
+/** 知识库目录（`databasePath` 是内部项，保持收起）。 */
+const STORAGE_FIELDS = Schema.object({
+  wikiDir: Schema.string().default(DEFAULT_WIKI_SUBDIR).description('知识库根目录路径。'),
+  databasePath: Schema.string().description('索引数据库存储路径。').hidden(),
+});
+
+/** 管理面鉴权（`apiToken` 为空即全部 API 拒绝）。 */
+const SECURITY_FIELDS = Schema.object({
+  apiToken: Schema.string()
+    .role('secret')
+    .default('')
+    .description('管理面密钥，留空则所有 /api 请求返回 401。'),
+});
+
+/**
+ * 已撤出控制台的运行时段：声明保留（旧配置能加载、能校验），但空配置不物化这些键。
+ *
+ * `.default(undefined)` 让「用户没写过」的段不出现在解析结果里——插件页顶层才只剩七块；
+ * 用户写过时仍按该段自己的 Schema 补齐默认值。`flattenConfig` 负责摊平回运行时顶层键。
+ */
+const HIDDEN_LEGACY_FIELDS: Record<string, Schema> = Object.fromEntries(
+  Object.entries(legacySectionsSchema().dict ?? {}).map(([key, field]) => [
+    key,
+    field.default(undefined as unknown as never).hidden(),
+  ]),
+);
+
+/**
+ * 订阅目标候选的初值：**模块加载时**读一次实例目录（`koishi.yml` + 相册缓存）。
+ *
+ * 为什么不能在 `apply()` 里注入 dynamic schema：订阅表是 `.role('table')`，
+ * schemastery-vue 的表格列在渲染前就按 `toColumns(schema.inner)` 校验，而
+ * `Schema.dynamic()` 那时只是 `Schema.any()`（解析发生在渲染期）→ validate 失败、
+ * 退回每行一张卡片。**表格 + 动态候选无法共存**，所以候选是静态 const union，
+ * 由 `refreshSubscriptionTargets()` 在每次重载时原地换掉（见该函数）。
+ */
+const STARTUP_TARGETS = readStartupTargetValues();
+
+/**
+ * 解析 / 展示用两张表：`targets` 的 const value 是相册的**唯一可读名**，
+ * `nameToValue` 是 `settings.json` 里的**绑定表**（名字 → `群号/相册ID`，查不到就拒绝
+ * 并 warn），`valueToName` 只给日志起文案（`相册名（群号）`）。
+ * 模块加载期安装一次，`apply()` 每次重载、每轮探测与每次保存后重装。
+ */
+installTargetTables(STARTUP_TARGETS);
+
+/** 订阅表 `targets` 的多选 schema（`@chat` + 相册候选）。 */
+const SUBSCRIPTION_TARGETS_SCHEMA = subscriptionTargetsSchema(STARTUP_TARGETS.albums, STARTUP_TARGETS.configured);
+
+/**
+ * Config 里 `targets` 的默认值刻意是 `undefined` 而不是 `[]`。
+ *
+ * Schema 解析会把**缺失**的键按 `meta.default` 物化：默认 `[]` 时，「用户没写过」和
+ * 「用户写了 `targets: []`（清空收件人）」在 `flattenConfig` 里长得一模一样，旧 `target`
+ * 就会把已清空的目标复活。留成 `undefined` 后缺失键不物化，`projectLegacySubscriptionRows`
+ * 才能按「键存在即权威」迁移；两种形态归一后都是运行时 `[]`（不投递），行为不变。
+ *
+ * `.default()` 返回的是浅拷贝，`inner` 与 `SUBSCRIPTION_TARGETS_SCHEMA` 共享同一份
+ * const union —— `refreshSubscriptionTargets` 原地换 `inner.list` 依然生效。
+ */
+const SUBSCRIPTION_TARGETS_FIELD = SUBSCRIPTION_TARGETS_SCHEMA.default(undefined as unknown as string[]);
+
+/**
+ * 重算订阅目标候选：插件重载时与每轮相册探测后各调一次。
+ *
+ * 静态 union 只在模块顶层求值，而 Koishi 的 `require` 缓存让「重载插件」不重跑顶层——
+ * 不重算的话新相册永远进不了下拉。这里**原地**替换 union 的 `list`：外层 `array` +
+ * `role: 'select'`、inner 的类型与 `meta` 都不动，所以 `isMultiSelect()`（type array +
+ * role select + 纯 const union）与表格列校验 `toColumns(inner)` 的结论不变；
+ * `Schema.toJSON()` 每次序列化都现读 `list`，控制台下一次拉 schema 就拿到新候选。
+ *
+ * 读盘全空（yml 读不到 / 缓存为空）时**不替换**：那会把已保存的值挤出候选，
+ * 整份配置过不了严格校验。
+ *
+ * `groupIds` 给定时按探测范围过滤候选（`scopeAlbumCandidates`）：缓存按群累积，
+ * 表外群（退订 / 早已移除的测试群）的历史相册不该继续挂在候选里；`configured`
+ * 里点名的旧值仍保留成「未探测」条目。`undefined` = 范围要异步问机器人，先不过滤。
+ *
+ * 返回过滤后的候选（调用方拿它记住 `configured`，供探测后的再次刷新）。
+ */
+function refreshSubscriptionTargets(
+  values: StartupTargetValues,
+  groupIds?: readonly string[],
+): StartupTargetValues {
+  if (values.albums.length === 0 && values.configured.length === 0) {
+    // 没有候选也要装表：解析表只认绑定表，展示表为空即可——不装的话残留的是上一份快照。
+    installTargetTables(values);
+    return values;
+  }
+  const albums =
+    groupIds === undefined ? values.albums : scopeAlbumCandidates(values.albums, groupIds, values.configured);
+  const next: StartupTargetValues = { albums: [...albums], configured: values.configured, bindings: values.bindings };
+  // 解析表 = 落盘绑定（不随候选变）；展示表 = 本轮候选。
+  installTargetTables(next);
+  const union = Config.dict?.['subscriptions']?.inner?.dict?.['targets']?.inner;
+  if (union === undefined) return next;
+  union.list = albumUnionItems(albums, values.configured, { targets: true });
+  return next;
+}
+
+/**
+ * 一轮相册探测 → 合并缓存 → 注入候选 → 重装订阅目标表。
+ *
+ * 从 `apply()` 的闭包里提出来只为一件事：**卸载竞态**。探测是异步且可跨秒的，
+ * 插件 dispose 之后探测才返回时，`ctx.schema.set` 会在已销毁的 context 上建 effect
+ * （cordis 抛 `cannot create effect on inactive context`，卸载流程被打断），`install`
+ * 还会把**旧实例的候选**写进模块级 union——新实例的下拉就被上一份快照顶掉了。
+ * 所以每个 `await` 之后都要重查 `disposed`，一次都不许漏；写成一条线性函数才能一眼数清。
+ *
+ * 返回值只给测试与日志用：`disposed` = 中途卸载，什么都没装。
+ */
+export interface AlbumRefreshDeps {
+  /** 卸载标志（`ctx.on('dispose')` 里置位）。 */
+  disposed: () => boolean;
+  /** 探测范围：机器人 + 群号（`albumProbeScope`）。 */
+  scope: () => Promise<{ bots: AlbumBot[]; groupIds: string[] }>;
+  probe: (input: { bots: readonly AlbumBot[]; groupIds: readonly string[] }) => Promise<readonly AlbumCandidate[]>;
+  readCache: () => Promise<readonly AlbumCandidate[]>;
+  writeCache: (albums: readonly AlbumCandidate[]) => Promise<unknown>;
+  /** 注入控制台候选（`Schema.dynamic`）。 */
+  applySchema: (albums: readonly AlbumCandidate[]) => void;
+  /** 重装解析 / 展示表并原地替换订阅目标 union（`refreshSubscriptionTargets`）。 */
+  install: (values: StartupTargetValues, groupIds: readonly string[]) => void;
+  configured: () => readonly string[];
+  bindings: () => Record<string, string>;
+  log: (message: string) => void;
+}
+
+/** `refreshAlbumCandidates` 的结果（`disposed` = 中途卸载，零副作用）。 */
+export type AlbumRefreshOutcome = 'disposed' | 'cached' | 'installed';
+
+export async function refreshAlbumCandidates(deps: AlbumRefreshDeps): Promise<AlbumRefreshOutcome> {
+  if (deps.disposed()) return 'disposed';
+  const { bots, groupIds } = await deps.scope();
+  if (deps.disposed()) return 'disposed';
+  if (groupIds.length === 0) {
+    const cached = await deps.readCache();
+    if (deps.disposed()) return 'disposed';
+    deps.applySchema(cached);
+    return 'cached';
+  }
+  const discovered = await deps.probe({ bots, groupIds });
+  if (deps.disposed()) return 'disposed';
+  const previous = await deps.readCache();
+  if (deps.disposed()) return 'disposed';
+  const merged = mergeAlbumCandidates(previous, discovered, groupIds);
+  // 表外群的历史缓存直接丢弃（缓存按群累积，退订群的相册不该继续挂在候选里）；
+  // scope 内的群掉线时仍走「保留旧候选」，它们本来就在 `groupIds` 里。
+  // `configured` 点名的旧值例外：只留这几个具体相册，不连带它所属群的其它相册。
+  const scoped = scopeAlbumCandidates(merged, groupIds, deps.configured());
+  if (deps.disposed()) return 'disposed';
+  deps.applySchema(scoped);
+  if (scoped.length > 0) await deps.writeCache(scoped);
+  if (deps.disposed()) return 'disposed';
+  deps.install({ albums: scoped, configured: [...deps.configured()], bindings: deps.bindings() }, groupIds);
+  deps.log(`[Patchouli] 群相册候选 ${scoped.length} 个（覆盖 ${groupIds.length} 个群）`);
+  return 'installed';
+}
+
+/**
+ * 订阅表的同步范围判定：显式来源群 + 是否「监听全部群」。
+ *
+ * `*` 行，以及「表为空且旧白名单也为空」（旧配置的 `listening: null`）都表示全部群；
+ * 那种范围只能异步问机器人（`listBotGroupIds`），这里只如实标注出来。
+ * `apply()` 的同步预过滤与 `albumProbeScope()` 的异步探测共用这一处，不许各判一套。
+ */
+function subscriptionProbeSources(
+  rows: readonly { source: string }[],
+  channels: readonly string[],
+): { explicit: string[]; listenAll: boolean } {
+  const explicit = channelGroupIds(rows.length > 0 ? rows.map((row) => row.source) : channels);
+  const listenAll = rows.some((row) => row.source === '*') || (rows.length === 0 && explicit.length === 0);
+  return { explicit, listenAll };
+}
+
+/**
+ * 插件页配置：只保留七块高频项（模型置顶、启用、管理员、订阅表、功能总闸、知识库目录、面板密钥）。
+ *
+ * 调参面（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）已撤出控制台，改由自建面板写
+ * `<wikiDir>/.patchouli/settings.json`（`SETTINGS_META` 是唯一字段表）。旧配置里的值仍然
+ * **可以加载**：这些段以降级声明留在 Schema 里（`hiddenLegacyFields()`，`.default(undefined)`
+ * 使空配置不物化它们），`flattenConfig` 负责把它们摊平回运行时顶层键。
+ *
+ * 为什么隐藏段用 `.default(undefined)`：schemastery 的 object 会把子默认值填进结果，声明了
+ * 就会出现在 `Config({})` 里——那会让控制台多出十几个隐藏键，也让「顶层只有七块」的契约失效。
+ * `.default(undefined)` 保留字段校验能力，但键在用户没写过时不会出现。
+ */
 export const Config: Schema<PluginOptions> = Schema.object({
+  // ── 1. 模型配置（置顶）────────────────────────────────────────────────
+  modelConfig: dispatcherSchema,
+  // ── 2. 启用 ───────────────────────────────────────────────────────────
   enabled: Schema.boolean().default(true).description('是否启用群聊讨论沉淀。'),
-  channels: Schema.array(Schema.string()).default([]).description('群聊白名单，留空监听全部群，不是禁用。'),
+  /** 自动书记管理员白名单：留空 = 无人可用（fail closed）。 */
   adminUsers: Schema.array(Schema.string())
     .default([])
-    .description(
-      '自动书记管理员 QQ 白名单，留空表示无人可用。',
-    ),
-  notifyOnSummarized: Schema.boolean().default(false).description('沉淀完成后是否在群内轻提示。').hidden(),
-  topics: Schema.object({
-    enabled: Schema.boolean().default(true).description('是否启用每日主题校准。'),
-    hour: Schema.number().default(4).description('每日校准触发的小时（0～23）。'),
-    minute: Schema.number().default(0).description('每日校准触发的分钟（0～59）。'),
-    mergeThreshold: Schema.number().default(0.5).description('标签相似度阈值，达到即归入同一主题。'),
-    minEntries: Schema.number().default(1).description('待处理词条少于此数则跳过校准。'),
-    lookbackDays: Schema.number().default(30).description('回看天数，仅处理窗口内未归档词条。'),
-    maxSessionsPerRun: Schema.number().default(20).description('单次校准最多读取的会话数。'),
-    maxMessagesPerSession: Schema.number().default(60).description('单会话最多提交的原始消息条数。'),
-  }).description('每日主题校准，将新词条归入或新建主题。').hidden(),
-  albumDelivery: Schema.object({
-    entryEnabled: Schema.boolean()
-      .default(true)
-      .description('每轮沉淀后是否将词条长图发至相册。'),
-    entryRedirectChannelId: Schema.string()
-      .default('')
-      .description('改道群号，填群号则发聊天不进相册。'),
-    cron: Schema.string()
-      .default(DEFAULT_WEEKLY_CRON)
-      .description('主题周报定时表达式（五段），由 miyako-delivery 调度。'),
-    albums: Schema.array(Schema.dynamic(ALBUM_SCHEMA_KEY))
-      .default([])
-      .description('词条与主题的目标相册，支持在线刷新。'),
-  }).description('相册投递：讨论后发词条，每周发主题。'),
-  query: Schema.object({
-    cardMaxHeight: Schema.number().default(6000).description('词条长图最大像素高度。').hidden(),
-  }).description('长图渲染参数。').hidden(),
-  security: Schema.object({
-    apiToken: Schema.string()
-      .role('secret')
-      .default('')
-      .description('管理面密钥，留空则所有 /api 请求返回 401。'),
-  }).description('管理接口鉴权设置。'),
-  media: Schema.object({
-    offline: Schema.boolean()
-      .default(false)
-      .description('离线模式，不抓取新素材，循环复用旧素材。'),
-    lowWater: Schema.number().default(12).description('可用素材低于此数时自动补货。'),
-    batch: Schema.number().default(8).description('单次补货的素材数量。'),
-    cooldownHours: Schema.number().default(6).description('离线复用前已用素材的冷却小时数。'),
-    dir: Schema.string().default('').description('素材目录，留空使用知识库默认目录。'),
-    imageSource: Schema.string()
-      .default('https://uapis.cn/api/v1/random/image?category=acg&type=pc')
-      .description('背景图接口地址，支持 HTTP 重定向。'),
-    sayingSource: Schema.string()
-      .default('https://uapis.cn/api/v1/saying')
-      .description('一言接口地址，需返回含 text 的 JSON。'),
-    apiKey: Schema.string()
-      .role('secret')
-      .default('')
-      .description('素材接口密钥，留空为匿名调用。'),
-  }).description('卡片素材池，管理背景图与一言。'),
-  trigger: Schema.object({
-    windowSizeSeconds: Schema.number().default(60).description('发言速率检测的瞬时滑动窗口（秒）。'),
-    burstMultiplier: Schema.number().default(2.5).description('判定突发讨论的速率倍率阈值。'),
-    minBurstRate: Schema.number().default(6).description('触发突发的最低绝对速率（条/分）。'),
-    quiescenceSeconds: Schema.number().default(300).description('判定讨论平息的静默观察期（秒）。'),
-    coolingRatioThreshold: Schema.number().default(1.1).description('平息回落常态倍率下限。'),
-    minDiscussionMessages: Schema.number().default(12).description('单次有效沉淀的最低消息条数。'),
-    maxBufferMessages: Schema.number().default(500).description('最多缓存的历史消息条数。'),
-    baselineEwmaAlpha: Schema.number().default(0.05).description('动态速率基线的平滑系数。'),
-    triggerMode: Schema.union(['rate', 'potential', 'shadow'] as const).default('potential').description('rate只看发言频率，potential看信息势能，shadow两套并列只观测。'),
-    thetaMin: Schema.number().default(POTENTIAL_SEEDING.thetaMin).description('势能突发阈值下限。'),
-    potentialAutoTuning: Schema.boolean()
-      .default(false)
-      .description('shadow 模式下两套门限同步参与自动调优。'),
-    dispatchMargin: Schema.number()
-      .default(1.2)
-      .description(
-        '调度质量门，过滤弱讨论，0 为关闭。',
-      ),
-    densityMultiplier: Schema.number()
-      .default(1)
-      .description(
-        '密度基线倍率，设为 0 使用固定下限。',
-      ),
-    peakCoolFraction: Schema.number()
-      .default(0.5)
-      .description(
-        '峰值冷却比例，设为 0 仅按基线计算。',
-      ),
-    rhoMin: Schema.number().default(POTENTIAL_SEEDING.rhoMin).description('单条消息的平均信息密度下限。'),
-  }).description('自适应突发与平息触发器配置。').hidden(),
-  dispatcher: dispatcherSchema,
-  judge: Schema.object({
-    enabled: Schema.boolean()
-      .default(false)
-      .description('启用本地裁判服务，关闭则门控直通。'),
-    baseURL: Schema.string().default('http://127.0.0.1:5070').description('本地裁判服务基础地址。'),
-    apiKey: Schema.string().role('secret').default('').description('裁判服务的 Bearer 令牌。'),
-    model: Schema.string().default('jev-local').hidden(),
-    timeoutMs: Schema.number().default(8000).hidden(),
-  })
-    .description('本地裁判服务配置。')
+    .role('table')
+    .description('管理员'),
+  // ── 3. 订阅表 ─────────────────────────────────────────────────────────
+  //
+  // 控制台这张表**只服务于 yml 用户**：面板写入的覆盖层（`.patchouli/settings.json`
+  // 顶层 `subscriptions`）优先于这里。字段形状与面板保持一致（`targets` 多值），
+  // 历史 `target` 保留为隐藏字段：单值能加载，早期版本写出的字符串数组同样必须过校验
+  // （`flattenConfig` 再把它摊成每个元素一行）。
+  //
+  // 列头就是字段 description，文案只留最短的一行（`监听群` / `投递群` / `词条` / `周报`）：
+  // 表格上方那段多行说明纯噪音，语义都在候选本身与 README 里。
+  subscriptions: Schema.array(
+    Schema.object({
+      source: Schema.string().default('').description('监听群'),
+      targets: SUBSCRIPTION_TARGETS_FIELD,
+      target: Schema.union([Schema.string(), Schema.array(Schema.string())])
+        .description('历史投递目标（单值或字符串数组）')
+        .hidden(),
+      entry: Schema.boolean().default(true).description('词条'),
+      weekly: Schema.boolean().default(false).description('周报'),
+    }),
+  )
+    .role('table')
+    .default([])
+    .max(256),
+  // ── 4. 功能总闸 ───────────────────────────────────────────────────────
+  features: Schema.object(FEATURES_FIELDS).description('功能总闸：关掉即整条链路不跑。'),
+  // ── 5. 知识库目录 ─────────────────────────────────────────────────────
+  storage: STORAGE_FIELDS,
+  // ── 6. 面板密钥 ───────────────────────────────────────────────────────
+  security: SECURITY_FIELDS,
+  /**
+   * 历史字段：`advancedMode` 是 0.8.66 条件表单的判别位，现在只用于让旧配置过校验。
+   * 不渲染、运行时忽略（高级段改由 `settings.json` 覆盖层承载）。
+   */
+  advancedMode: Schema.boolean()
+    .default(false)
+    .description('历史字段：高级设置已移到自建面板。')
     .hidden(),
-  storage: Schema.object({
-    wikiDir: Schema.string().default(DEFAULT_WIKI_SUBDIR).description('知识库根目录路径。'),
-    databasePath: Schema.string().description('索引数据库存储路径。'),
-  }).description('本地存储路径配置。'),
-  observability: Schema.object({
-    discardDumps: Schema.boolean()
-      .default(false)
-      .description(
-        '转储未沉淀讨论至 discards 目录供排障。',
-      ),
-  }).description('运行可观测性与排障留证配置。').hidden(),
+  // ── 已撤出控制台的运行时段（值仍在，旧配置必须能加载）────────────────
+  ...HIDDEN_LEGACY_FIELDS,
 }) as unknown as Schema<PluginOptions>;
+
+/**
+ * 隐藏段的唯一定义处（`HIDDEN_LEGACY_FIELDS` 与 `flattenConfig` 共用）。
+ *
+ * 运行时由 `apply()` 与 `PatchouliKnowledgeSystem` 构造把这一段摊平回顶层字段，
+ * 其余代码照旧读 `config.trigger` 这类顶层键，不需要知道它们藏在哪。
+ */
+function legacySectionsSchema() {
+  return Schema.object({
+    channels: Schema.array(Schema.string()).default([]).description('群聊白名单，留空监听全部群，不是禁用。').hidden(),
+    notifyOnSummarized: Schema.boolean().default(false).description('沉淀完成后是否在群内轻提示。').hidden(),
+    topics: Schema.object({
+      enabled: Schema.boolean().default(true).description('是否启用每日主题校准。'),
+      hour: Schema.number().default(4).description('每日校准触发的小时（0～23）。'),
+      minute: Schema.number().default(0).description('每日校准触发的分钟（0～59）。'),
+      mergeThreshold: Schema.number().default(0.5).description('标签相似度阈值，达到即归入同一主题。'),
+      minEntries: Schema.number().default(1).description('待处理词条少于此数则跳过校准。'),
+      lookbackDays: Schema.number().default(30).description('回看天数，仅处理窗口内未归档词条。'),
+      maxSessionsPerRun: Schema.number().default(20).description('单次校准最多读取的会话数。'),
+      maxMessagesPerSession: Schema.number().default(60).description('单会话最多提交的原始消息条数。'),
+    }).description('每日主题校准，将新词条归入或新建主题。'),
+    albumDelivery: Schema.object({
+      entryEnabled: Schema.boolean()
+        .default(true)
+        .description('每轮沉淀后是否将词条长图发至相册。')
+        .hidden(),
+      entryRedirectChannelId: Schema.string()
+        .default('')
+        .description('改道群号，填群号则发聊天不进相册。')
+        .hidden(),
+      cron: Schema.string()
+        .default(DEFAULT_WEEKLY_CRON)
+        .description(
+          '主题周报定时表达式（五段），由 miyako-delivery 调度；订阅表生效时相册目标由 weekly 行决定，这里是回退默认。',
+        ),
+      albums: Schema.array(Schema.dynamic(ALBUM_SCHEMA_KEY))
+        .default([])
+        .description('词条与主题的目标相册，支持在线刷新。')
+        .hidden(),
+    }).description('相册投递：讨论后发词条，每周发主题。'),
+    query: Schema.object({
+      cardMaxHeight: Schema.number().default(6000).description('词条长图最大像素高度。'),
+    }).description('长图渲染参数。'),
+    media: Schema.object({
+      offline: Schema.boolean()
+        .default(false)
+        .description('离线模式，不抓取新素材，循环复用旧素材。'),
+      lowWater: Schema.number().default(12).description('可用素材低于此数时自动补货。'),
+      batch: Schema.number().default(8).description('单次补货的素材数量。'),
+      cooldownHours: Schema.number().default(6).description('离线复用前已用素材的冷却小时数。'),
+      dir: Schema.string().default('').description('素材目录，留空使用知识库默认目录。'),
+      imageSource: Schema.string()
+        .default('https://uapis.cn/api/v1/random/image?category=acg&type=pc')
+        .description('背景图接口地址，支持 HTTP 重定向。'),
+      sayingSource: Schema.string()
+        .default('https://uapis.cn/api/v1/saying')
+        .description('一言接口地址，需返回含 text 的 JSON。'),
+      apiKey: Schema.string()
+        .role('secret')
+        .default('')
+        .description('素材接口密钥，留空为匿名调用。'),
+    }).description('卡片素材池，管理背景图与一言。'),
+    trigger: Schema.object({
+      windowSizeSeconds: Schema.number().default(60).description('发言速率检测的瞬时滑动窗口（秒）。'),
+      burstMultiplier: Schema.number().default(2.5).description('判定突发讨论的速率倍率阈值。'),
+      minBurstRate: Schema.number().default(6).description('触发突发的最低绝对速率（条/分）。'),
+      quiescenceSeconds: Schema.number().default(300).description('判定讨论平息的静默观察期（秒）。'),
+      coolingRatioThreshold: Schema.number().default(1.1).description('平息回落常态倍率下限。'),
+      minDiscussionMessages: Schema.number().default(12).description('单次有效沉淀的最低消息条数。'),
+      maxBufferMessages: Schema.number().default(500).description('最多缓存的历史消息条数。'),
+      baselineEwmaAlpha: Schema.number().default(0.05).description('动态速率基线的平滑系数。'),
+      triggerMode: Schema.union([
+        Schema.const('potential').description('potential 看信息势能'),
+        Schema.const('rate').description('rate 只看发言频率'),
+        // 历史模式：两套判据并列、只观测。留在枚举里才能加载旧配置，但不作为选项。
+        Schema.const('shadow').hidden(),
+      ]).default('potential'),
+      thetaMin: Schema.number().default(POTENTIAL_SEEDING.thetaMin).description('势能突发阈值下限。'),
+      potentialAutoTuning: Schema.boolean()
+        .default(false)
+        .description('shadow 模式下两套门限同步参与自动调优。'),
+      dispatchMargin: Schema.number()
+        .default(1.2)
+        .description(
+          '调度质量门，过滤弱讨论，0 为关闭。',
+        ),
+      densityMultiplier: Schema.number()
+        .default(1)
+        .description(
+          '密度基线倍率，设为 0 使用固定下限。',
+        ),
+      peakCoolFraction: Schema.number()
+        .default(0.5)
+        .description(
+          '峰值冷却比例，设为 0 仅按基线计算。',
+        ),
+      rhoMin: Schema.number().default(POTENTIAL_SEEDING.rhoMin).description('单条消息的平均信息密度下限。'),
+    }).description('自适应突发与平息触发器配置。'),
+    judge: Schema.object({
+      enabled: Schema.boolean()
+        .default(false)
+        .description('启用本地裁判服务，关闭则门控直通。'),
+      baseURL: Schema.string().default('http://127.0.0.1:5070').description('本地裁判服务基础地址。'),
+      apiKey: Schema.string().role('secret').default('').description('裁判服务的 Bearer 令牌。'),
+      model: Schema.string().default('jev-local').hidden(),
+      timeoutMs: Schema.number().default(8000).hidden(),
+    })
+      .description('本地裁判服务配置。')
+      .hidden(),
+    observability: Schema.object({
+      discardDumps: Schema.boolean()
+        .default(false)
+        .description(
+          '转储未沉淀讨论至 discards 目录供排障。',
+        ),
+    }).description('运行可观测性与排障留证配置。').hidden(),
+  });
+}
+
+/** 功能总闸的缺省值（Schema 默认值之外的第二道兜底：直接构造实例 / 旧配置都能跑）。 */
+const FEATURE_DEFAULTS: PatchouliFeatureToggles = { entries: true, weekly: true, topics: true, media: true };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 键序无关的深比较：只用于识别「这个字段还停在 Schema 默认值」。 */
+function deepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!isPlainRecord(left) || !isPlainRecord(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => deepEqual(left[key], right[key]));
+}
+
+/**
+ * 三块「新版仍可见」的配置（`modelConfig` / `storage` / `security`）在 0.8.66 里住在
+ * `advanced` 段：新版 Schema 解析旧文件时，顶层是 Schema 默认值、旧值还在 `advanced`。
+ * 顶层仍等于默认值 = 用户没在新位置写过，采用旧位置的值；否则新位置优先。
+ *
+ * 这是**升级迁移规则**，不是运行期兜底：只在「旧值存在且新值仍是默认值」时生效，
+ * 两边都写了同样的值时结果也相同，因此不存在双源漂移。
+ */
+function adoptLegacyField(
+  top: unknown,
+  legacy: unknown,
+  fallback: unknown,
+  parse: (value: unknown) => unknown,
+): unknown {
+  if (legacy !== undefined && (top === undefined || deepEqual(top, fallback))) {
+    try {
+      return parse(legacy);
+    } catch {
+      return legacy;
+    }
+  }
+  return top ?? legacy ?? fallback;
+}
+
+/**
+ * 把控制台的隐藏段摊平成顶层字段（`apply()` 与 `PatchouliKnowledgeSystem` 构造共用，
+ * 摊平两次是幂等的）。
+ *
+ * 来源优先级（**逐段独立**判定，不是整包二选一）：
+ * 1. **该段写在顶层**（0.8.4x 之前的扁平配置，或新版控制台把改过的段写回顶层）——原值优先，
+ *    否则升级会把用户每一档设置静默重置成默认值；
+ * 2. 该段只在 `advanced` 里（0.8.66 的容器布局）——取旧位置的值；
+ * 3. `legacySectionsSchema()` 的 Schema 默认值（`Config({})` 不物化隐藏段，运行时在这里补齐）。
+ *
+ * 「有顶层键就整包按旧文件读」会丢掉 `advanced` 里没被搬到顶层的段（典型：
+ * 顶层改了 `trigger`、`channels` 白名单还在 `advanced` → 白名单清空 = 监听所有群）。
+ *
+ * `features` / `adminUsers` 同样在这里补齐：前者是插件页总闸（缺省全开），
+ * 后者是自动书记白名单（缺省 `[]` = 无人可用，fail closed）。
+ */
+export function flattenConfig(rawConfig: PluginOptions): PluginOptions {
+  const raw = rawConfig as unknown as Record<string, unknown>;
+  const legacySchema = legacySectionsSchema();
+  const defaults = legacySchema({}) as unknown as Record<string, unknown>;
+  const nested = isPlainRecord(raw.advanced) ? raw.advanced : {};
+  // **逐段**决策来源（不是「顶层出现了任一隐藏键就整份按旧文件读」）：混写是真实存在的
+  // 形态——新版控制台把 `trigger` 写在顶层，而没动过的 `channels` 还留在 `advanced` 里。
+  // 按单个顶层键决定整包来源会让 `advanced.channels` 的白名单整段丢失 = 退化成监听全部群。
+  const source: Record<string, unknown> = {};
+  for (const key of Object.keys(defaults)) {
+    if (raw[key] !== undefined) source[key] = raw[key];
+    else if (nested[key] !== undefined) source[key] = nested[key];
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = legacySchema({ ...defaults, ...source }) as unknown as Record<string, unknown>;
+  } catch {
+    // 旧配置里有非法取值时不让启动失败：原样透传，由运行时归一化 / 忽略。
+    parsed = { ...defaults, ...source };
+  }
+  const sections: Record<string, unknown> = {};
+  for (const key of Object.keys(defaults)) sections[key] = parsed[key];
+
+  const dispatcherFallback = dispatcherSchema({}) as unknown;
+  const storageFallback = STORAGE_FIELDS({}) as unknown;
+  const securityFallback = SECURITY_FIELDS({}) as unknown;
+  const dispatcher = adoptLegacyField(
+    raw.modelConfig,
+    nested.dispatcher ?? raw.dispatcher,
+    dispatcherFallback,
+    (value) => dispatcherSchema(value as Record<string, unknown>),
+  );
+  const storage = adoptLegacyField(raw.storage, nested.storage, storageFallback, (value) =>
+    STORAGE_FIELDS(value as Record<string, unknown>),
+  );
+  const security = adoptLegacyField(raw.security, nested.security, securityFallback, (value) =>
+    SECURITY_FIELDS(value as Record<string, unknown>),
+  );
+
+  const rawFeatures = isPlainRecord(raw.features) ? raw.features : {};
+  const features: PatchouliFeatureToggles = {
+    entries: rawFeatures.entries !== false,
+    weekly: rawFeatures.weekly !== false,
+    topics: rawFeatures.topics !== false,
+    media: rawFeatures.media !== false,
+  };
+  const adminUsers = Array.isArray(raw.adminUsers)
+    ? raw.adminUsers.filter((item): item is string => typeof item === 'string')
+    : [];
+
+  return {
+    ...(raw as unknown as PluginOptions),
+    ...sections,
+    adminUsers,
+    features,
+    // 订阅表在这里就归一成运行时形状：先投影旧形态（`target` 单值 / 字符串数组，
+    // 字符串数组按元素展开成多行；`targets` 键存在即权威，`[]` 不复活），再归一，
+    // 行数 / 目标数 / 字段长度封顶。下游（含 `plugins` 面板）只认归一后的值。
+    subscriptions: normalizeSubscriptionRows(projectLegacySubscriptionRows(raw.subscriptions)),
+    storage,
+    security,
+    modelConfig: dispatcher,
+    dispatcher,
+  } as PluginOptions;
+}
 
 export class PatchouliKnowledgeSystem {
   public readonly detector: BurstQuiescenceDetector;
@@ -661,6 +1130,53 @@ export class PatchouliKnowledgeSystem {
    * 配置变更并把「停止」翻成 reload（ADR-022）。
    */
   private readonly topicRuntime: PluginOptions['topics'];
+  /**
+   * `settings.json` 覆盖层（自建面板写入的调参面）。
+   *
+   * 构造期同步载入一次——触发器 / 素材池 / 裁判的参数在这里就要定型；`initialize()`
+   * 再异步回灌一次作为真源（写入路径也会用落盘结果覆盖它）。
+   * **绝不写宿主 config**（ADR-022）：覆盖值只存在于本字段与磁盘文件。
+   */
+  private settingsOverrides: SettingsOverrides = {};
+  /**
+   * 上一条设置告警：同一份坏值在构造期与 `initialize()` 回灌期会被读两次，
+   * 只保留「连续重复即丢弃」这一条 O(1) 规则，避免同一行日志刷两遍。
+   */
+  private lastSettingsWarning: string | undefined;
+  /**
+   * 订阅表覆盖层（`settings.json` 顶层 `subscriptions` 键）。
+   *
+   * `null` = 文件里没有覆盖，`subscriptions()` 完全按宿主 config 编译；
+   * 非 `null`（含空数组 = 面板清空了表）**整段顶替** config。构造期同步载入一次，
+   * `initialize()` 再异步回灌；写入只经 `updateSubscriptions`（ADR-022：绝不写宿主 config）。
+   */
+  private subscriptionOverride: readonly SubscriptionRow[] | null = null;
+  /**
+   * 绑定表（`settings.json` 顶层 `targetBindings` 键）：可读名 → `群号/相册ID`。
+   *
+   * **投递期解析名字的唯一真源**：一旦绑定，探测顺序变化 / 同名相册进出 / 相册改名
+   * 都不会改变收件人。只在「保存订阅表」与「首轮迁移」时写入，构造期同步载入一次、
+   * `initialize()` 再异步回灌。
+   */
+  private targetBindings: Record<string, string> = {};
+  /**
+   * 绑定表是否已经「建立」过（首轮迁移或面板保存至少完成一次）。
+   *
+   * 判据来自 `settings.json` 的 `bindingMigration` 标记（与绑定表同一次原子写，
+   * 见 `readTargetBindingMigration`）。它把两类「名字没有绑定」分开：
+   * - **未建立**（升级前只有 yml）→ 名字从没解析过，首轮迁移/首次保存要解析；
+   * - **已建立** → 名字在落盘的行里却没有绑定，只可能是掉绑后留下的（相册消失 /
+   *   歧义 / 改名）→ 不再拿当前候选重解析，等用户重选（见 `resolveTargetBindings` 规则 3）。
+   */
+  private bindingTableEstablished = false;
+  /**
+   * 订阅表变更回调：由 `apply()` 注入。
+   *
+   * 订阅表一变，控制台里跟订阅有关的候选就要重新同步（`albumDelivery.albums` 的
+   * `Schema.dynamic` 重注入；`subscriptions[].targets` 的 const 列表由相册探测刷新）。
+   * 未注入时静默跳过（直接构造本类的测试 / 嵌入方没有控制台）。
+   */
+  public onSubscriptionsChanged?: () => void;
   /** 自定义提示词覆盖（`system` 沉淀用 / `topic` 主题聚合用），同样不写宿主 config。 */
   private readonly promptOverrides: { system: string; topic: string } = { system: '', topic: '' };
   /**
@@ -726,7 +1242,7 @@ export class PatchouliKnowledgeSystem {
   private idleSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    config: PluginOptions,
+    rawConfig: PluginOptions,
     private readonly logger?: {
       info: (msg: string) => void;
       warn: (msg: string) => void;
@@ -735,25 +1251,36 @@ export class PatchouliKnowledgeSystem {
     },
     private readonly onNotify?: (channelId: string, text: string) => Promise<void>,
     dispatcherRuntime?: DispatcherRuntimeOptions,
-    baseDir?: string,
+    /** Koishi 实例根目录：相对路径（wikiDir / 素材目录）一律锚定它，热更新时同样要用。 */
+    private readonly baseDir?: string,
   ) {
+    // 控制台的隐藏段（含 0.8.66 的 `advanced` 容器）摊平回顶层：其余代码只读 `this.config.<顶层键>`。
+    const config: PluginOptions = flattenConfig(rawConfig);
     this.config = config;
-    // 运行时副本：先深拷贝一份宿主配置，之后所有热更新只动它。
-    this.topicRuntime = { ...config.topics };
     this.wikiDir = resolveWikiDir(config.storage.wikiDir, baseDir);
+    // 覆盖层要在构造期同步载入：trigger / media / judge 的实例参数在下面几行就要定型。
+    // 合并基线随读入透传：坏值在读取时整段丢弃并告警，绝不让一份写坏的 settings.json
+    // 变成「插件在挂上管理路由之前就抛错」——那样面板连修复的机会都没有。
+    this.settingsOverrides = readSettingsOverridesSync(this.wikiDir, this.settingsRepairContext());
+    // 订阅表同住一个文件，必须一起回灌：否则「面板改过表 + 重启」会静默退回 yml 配置。
+    this.subscriptionOverride = readSubscriptionOverrideSync(this.wikiDir);
+    // 绑定表与订阅表同一次落盘：名字→地址的对应必须跟着行一起回灌，否则重启后停投。
+    this.targetBindings = readTargetBindingsSync(this.wikiDir);
+    // 主题校准运行时参数：合并后的段值（覆盖层 > config）。调度器持有同一引用，改完即生效。
+    this.topicRuntime = { ...this.mergedSection('topics') };
     this.discardsDir = resolveWikiLayout(this.wikiDir).discardsDir;
-    // 旧配置文件 / 直接构造的实例可能没有 `media` 段：缺省一律按「不联网」处理，
-    // 真实默认值由控制台 Schema 提供。
-    const mediaConfig = config.media;
+    // 素材池参数同样按覆盖层合并；`features.media === false` 时整体停用（不抓素材、出无图版式）。
+    const mediaConfig = this.mergedSection('media');
     this.media = new MediaPool({
-      dir: mediaConfig?.dir.trim() ? resolveWikiDir(mediaConfig.dir, baseDir) : resolveWikiLayout(this.wikiDir).mediaDir,
-      offline: mediaConfig?.offline ?? false,
-      lowWater: mediaConfig?.lowWater ?? 12,
-      batch: mediaConfig?.batch ?? 8,
-      cooldownMs: Math.max(0, mediaConfig?.cooldownHours ?? 6) * 3_600_000,
-      imageSource: mediaConfig?.imageSource ?? '',
-      sayingSource: mediaConfig?.sayingSource ?? '',
-      apiKey: mediaConfig?.apiKey ?? '',
+      dir: mediaConfig.dir.trim() ? resolveWikiDir(mediaConfig.dir, baseDir) : resolveWikiLayout(this.wikiDir).mediaDir,
+      offline: mediaConfig.offline,
+      lowWater: mediaConfig.lowWater,
+      batch: mediaConfig.batch,
+      cooldownMs: Math.max(0, mediaConfig.cooldownHours) * 3_600_000,
+      imageSource: mediaConfig.imageSource,
+      sayingSource: mediaConfig.sayingSource,
+      apiKey: mediaConfig.apiKey,
+      disabled: config.features.media === false,
     });
     const patchouliLayout = resolveWikiLayout(this.wikiDir);
     this.cardSequence = new CardSequence({ file: cardSequencePath(patchouliLayout.patchouliDir) });
@@ -793,7 +1320,7 @@ export class PatchouliKnowledgeSystem {
     });
 
     this.detector = new BurstQuiescenceDetector({
-      options: config.trigger,
+      options: this.resolveTriggerOptions(),
       onQuiescence: async (session: DiscussionSession) => {
         // 先记水位再交付：本片段的消息到此为止，重启恢复不该再交一次。
         this.deliveredWatermarks.set(session.channelId, session.endTime);
@@ -830,7 +1357,7 @@ export class PatchouliKnowledgeSystem {
 
     // 本地 System-1 裁判（§7.3）：构造零 I/O；`judge.enabled` 关闭时两个调用点都直接短路，
     // 因此无条件创建不改变默认行为，也不会发起任何网络请求。
-    this.judgeClient = new JudgeClient(readJudgeOptions(config));
+    this.judgeClient = new JudgeClient(readJudgeOptions(this.mergedSection('judge')));
     this.gate = new PreDispatchGate(this.judgeClient);
     this.boundaryAnnotator = new BoundaryAnnotator(this.judgeClient, {
       noteBoundary: (channelId, at, confidence) => this.detector.noteBoundary(channelId, at, confidence),
@@ -856,6 +1383,19 @@ export class PatchouliKnowledgeSystem {
   }
 
   /**
+   * 词条投递的外层闸：**新表生效时由行决定，表为空（旧配置回退）时才读 `entryEnabled`**。
+   *
+   * 旧实现无条件先看 `albumDelivery.entryEnabled`：用户在新表里勾了「词条」，只要这个旧开关
+   * 是关的（升级前关的 / 旧配置里写的），词条就永远不投——保存成功、日志里也有目标，实际一条不发。
+   * `features.entries` 是功能总闸，关掉就整个不做（投递钩子里还有一道同样的判断）。
+   */
+  private entryCardDeliveryEnabled(): boolean {
+    if (this.entryCardSink === undefined) return false;
+    if (this.config.features.entries === false) return false;
+    return this.subscriptions().active || this.config.albumDelivery?.entryEnabled !== false;
+  }
+
+  /**
    * 启动期异步初始化：建全 llmwiki 骨架，再回灌 `<wikiDir>/.patchouli/custom-prompt.txt`。
    * 两段都自带错误降级，`ready` 恒为 resolve —— 调用方可以安全 `await`。
    */
@@ -864,7 +1404,8 @@ export class PatchouliKnowledgeSystem {
     // 重启后 knownTitles 是空的：不回填会让「改名」只写新标题、旧索引行永久残留。
     const hydrated = await this.wikiEngine.hydrateKnownTitles();
     if (hydrated > 0) this.logger?.info(`[Patchouli] 已从现有词条重建标题索引：${hydrated} 条`);
-    await this.restoreTopicSettings();
+    await this.restoreSettings();
+    await this.migrateTargetBindings();
     await this.restoreCardSettings();
     await this.restoreCustomPrompt();
     // 判据台账的保留期清扫：失败只告警，绝不阻塞启动。
@@ -880,6 +1421,8 @@ export class PatchouliKnowledgeSystem {
       }, 3_600_000);
       this.idleSweepTimer.unref?.();
     }
+    // 启动期覆盖层已回灌、订阅表定型：把生效关系打一次，之后只在保存成功时更新。
+    this.logSubscriptionSummary();
   }
 
   /**
@@ -887,6 +1430,8 @@ export class PatchouliKnowledgeSystem {
    * 失败只记一条警告——素材池是增强项，缺料时卡片自动退化为无图版式。
    */
   public async prefillMedia(): Promise<void> {
+    // 总闸关闭：不抓素材、不补货，渲染侧由 `MediaPool.disabled` 直接返回无图版式。
+    if (this.config.features.media === false) return;
     try {
       const [images, sayings] = await Promise.all([
         this.media.ensureFilled('image'),
@@ -900,21 +1445,336 @@ export class PatchouliKnowledgeSystem {
     }
   }
 
-  /** 回灌阅读面板保存的主题校准运行时参数（覆盖 koishi.yml 的同名字段）。 */
-  private async restoreTopicSettings(): Promise<void> {
+  /**
+   * 启动期回灌设置覆盖层（`<wikiDir>/.patchouli/settings.json`）。
+   *
+   * 两件事：① 异步重读覆盖层（构造期同步载入的版本先顶住实例参数）；② 旧版
+   * `topics-settings.json` 一次性迁移——新文件还没有 `topics` 段时把旧值搬进去，
+   * 之后只有 `settings.json` 一个真源。任何失败只告警，绝不让启动失败。
+   */
+  private async restoreSettings(): Promise<void> {
     try {
-      const overlay = await readTopicSettings(this.wikiDir);
-      Object.assign(this.topicRuntime, overlay);
-      if (Object.keys(overlay).length > 0) {
-        this.logger?.info(
-          `[Patchouli] 已载入主题校准运行时参数: ${Object.entries(overlay)
-            .map(([key, value]) => `${key}=${String(value)}`)
-            .join(', ')}`,
+      let overrides = await readSettingsOverrides(this.wikiDir, this.settingsRepairContext());
+      if (overrides.topics === undefined) {
+        const legacy = validateSettingsPatch('topics', await readTopicSettings(this.wikiDir));
+        if (legacy.ok && Object.keys(legacy.value).length > 0) {
+          overrides = await writeSettingsOverrides(
+            this.wikiDir,
+            'topics',
+            legacy.value,
+            this.settingsRepairContext(),
+          );
+          this.logger?.info('[Patchouli] 已把主题校准参数迁移到 .patchouli/settings.json');
+        }
+      }
+      this.applySettingsOverrides(overrides, 'replay');
+      // 订阅表与标量段同一个文件、同一条读取路径：两处都要回灌，避免读到构造期的旧快照。
+      this.subscriptionOverride = await readSubscriptionOverride(this.wikiDir);
+      this.targetBindings = await readTargetBindings(this.wikiDir);
+      // 覆盖层回灌完成：控制台候选要跟着换（构造期注入时读到的还是空覆盖）。
+      this.onSubscriptionsChanged?.();
+    } catch (error: unknown) {
+      this.logger?.warn(`[Patchouli] 读取运行时设置失败，沿用配置文件与构造期快照: ${String(error)}`);
+    }
+  }
+
+  /**
+   * 首轮绑定迁移：绑定表为空、但订阅表里还有可读名时，用**当前候选**一次性填充并落盘。
+   *
+   * 之后不再自动改写：相册改名 / 别的群出现同名相册都不会动已保存的绑定
+   * （那正是「悄悄换主」的来源）。解析不到的名字不绑定、只 warn——用户在面板重选。
+   *
+   * 幂等：绑定表非空直接返回；一个名字都解析不到时也不写空表（下次启动还能再试）。
+   */
+  private async migrateTargetBindings(): Promise<void> {
+    try {
+      this.targetBindings = await readTargetBindings(this.wikiDir);
+      // 「建立过」判据来自落盘标记（与绑定表同一次原子写）：非空表本身也算建立过。
+      this.bindingTableEstablished =
+        Object.keys(this.targetBindings).length > 0 || (await readTargetBindingMigration(this.wikiDir));
+      if (Object.keys(this.targetBindings).length > 0) return;
+      const rows = resolveRows(this.config, this.subscriptionOverride ?? undefined);
+      const hasNames = rows.some((row) =>
+        row.targets.some((target) => {
+          const name = target.trim();
+          return (
+            name !== '' && name !== CHAT_TARGET && !isTargetGroupHeader(name) && !ALBUM_TARGET_PATTERN.test(name)
+          );
+        }),
+      );
+      if (!hasNames) return;
+      const albums = await readAlbumCache(this.wikiDir);
+      // 掉绑标记只来自「上一次落盘的行」，且只在绑定表**建立过**时才算数：
+      // 升级前只有 yml、还没建立绑定时名字本来就还没解析过，必须照常解析。
+      const previousRows: readonly SubscriptionRow[] = this.bindingTableEstablished
+        ? this.subscriptionOverride ?? []
+        : [];
+      const { bindings, unresolved } = resolveTargetBindings(rows, albums, {}, previousRows);
+      if (Object.keys(bindings).length === 0) {
+        this.logger?.warn(
+          `[Patchouli] 订阅目标尚未建立绑定（投递期会停投）：${unresolved.join('、')} —— 请重新选择相册`,
+        );
+        return;
+      }
+      this.targetBindings = await writeTargetBindings(this.wikiDir, bindings);
+      // 迁移写成（或本来就有标记）= 绑定表已建立：之后的掉绑不再被自动重解析。
+      this.bindingTableEstablished = true;
+      const bound = Object.keys(this.targetBindings).length;
+      this.logger?.info(
+        `[Patchouli] 已为 ${bound} 个订阅目标建立相册绑定（写入 .patchouli/settings.json）` +
+          (unresolved.length > 0 ? `；未绑定：${unresolved.join('、')}` : ''),
+      );
+      this.onSubscriptionsChanged?.();
+    } catch (error: unknown) {
+      this.logger?.warn(`[Patchouli] 订阅目标绑定迁移失败，沿用现有绑定: ${String(error)}`);
+    }
+  }
+
+  /**
+   * 合并后的段值：**覆盖层 > config > Schema 默认值**。
+   *
+   * `config` 已经由 `flattenConfig` 补齐过默认值，所以这里只需叠一层覆盖。
+   * `topics` 特殊：返回 `topicRuntime` 本体（调度器持有同一引用，面板保存即时生效）。
+   */
+  public settings<K extends SettingsSection>(section: K): PatchouliSettingsValues[K] {
+    return (section === 'topics' ? this.topicRuntime : this.mergedSection(section)) as PatchouliSettingsValues[K];
+  }
+
+  /** 纯合并（不碰 `topicRuntime`）：供 `settings()` 与构造期副本初始化使用。 */
+  private mergedSection<K extends SettingsSection>(section: K): PatchouliSettingsValues[K] {
+    const base: unknown =
+      section === 'trigger'
+        ? this.config.trigger
+        : section === 'topics'
+          ? this.config.topics
+          : section === 'media'
+            ? this.config.media
+            : section === 'query'
+              ? this.config.query
+              : this.config.judge;
+    const merged: Record<string, unknown> = {};
+    if (typeof base === 'object' && base !== null) {
+      for (const [key, value] of Object.entries(base)) merged[key] = value;
+    }
+    for (const [key, value] of Object.entries(this.settingsOverrides[section] ?? {})) merged[key] = value;
+    return merged as unknown as PatchouliSettingsValues[K];
+  }
+
+  /**
+   * 覆盖层自愈的合并基线（宿主 config 的段值）。
+   *
+   * 只有 `trigger` 需要基线：`validateMergedSettings` 里其余四段没有跨字段约束，
+   * 它们的非法值在字段级就被挡掉了。突发倍率与回落倍率的关系必须拿 config 的真实值来判，
+   * 拿 Schema 默认值判会误删「单独看越界、合并后合法」的覆盖。
+   */
+  private settingsBase(): SettingsBaseSections {
+    return { trigger: { ...this.config.trigger } as Record<string, unknown> };
+  }
+
+  /** 读取 / 写入覆盖层时的自愈上下文（基线 + 告警出口）。 */
+  private settingsRepairContext(): SettingsRepairContext {
+    return {
+      base: this.settingsBase(),
+      warn: (message: string) => this.warnSettings(message),
+    };
+  }
+
+  /** 设置相关的告警出口：宿主没注入 logger 时静默（与其余可选日志一致）。 */
+  private warnSettings(message: string): void {
+    if (this.lastSettingsWarning === message) return;
+    this.lastSettingsWarning = message;
+    this.logger?.warn(message);
+  }
+
+  /**
+   * 构造器定型用的触发参数：合并值非法时回落到宿主 config（config 也非法则回落 Schema 默认值）。
+   *
+   * 正常情况下 `readSettingsOverridesSync` 已经把非法段摘掉了，这里是第二道闸：
+   * `BurstQuiescenceDetector` 的构造是同步硬断言，抛错就会把整个插件（含管理路由）带倒，
+   * 面板也就永久失去修复入口。宁可降级运行并告警，也不能起不来。
+   */
+  private resolveTriggerOptions(): PluginOptions['trigger'] {
+    const merged = this.mergedSection('trigger');
+    const mergedErrors = validateMergedSettings('trigger', merged);
+    if (mergedErrors.length === 0) return merged;
+    this.warnSettings(
+      `[Patchouli] settings.json 的 trigger 段合并后非法（${mergedErrors.join('；')}），已回落宿主 config`,
+    );
+    const configured = this.config.trigger;
+    const configErrors = validateMergedSettings('trigger', configured);
+    if (configErrors.length === 0) return configured;
+    this.warnSettings(
+      `[Patchouli] 宿主 config.trigger 同样非法（${configErrors.join('；')}），已回落 Schema 默认值`,
+    );
+    return { ...DEFAULT_TRIGGER_OPTIONS };
+  }
+
+  /** 五段合并值的一次性快照（`GET /api/settings` 的响应体）。 */
+  public getSettingsSections(): PatchouliSettingsValues {
+    const sections: PatchouliSettingsValues = {
+      trigger: this.settings('trigger'),
+      topics: this.settings('topics'),
+      media: this.settings('media'),
+      query: this.settings('query'),
+      judge: this.settings('judge'),
+    };
+    // 密钥一律打码：浏览器只拿到空串 + 同段 `secretConfigured`，真值留在运行态与文件里。
+    return {
+      ...sections,
+      media: redactSettingsSection('media', sections.media) as unknown as PatchouliSettingsValues['media'],
+      judge: redactSettingsSection('judge', sections.judge) as unknown as PatchouliSettingsValues['judge'],
+    };
+  }
+
+  /**
+   * 校验并持久化一段覆盖值（面板 `POST /api/settings` 的唯一入口）。
+   *
+   * 两道校验，**都在落盘之前**：① 字段级（白名单 / 类型 / 单字段区间 / 长度上限 / URL 形态）；
+   * ② 合并后的跨字段约束（`config` ⊕ 现有覆盖 ⊕ 本次补丁，判据见
+   * `validateMergedSettings`）。任一不过都返回 `ok:false`（HTTP 层翻 400），
+   * 文件与运行态都不动 —— 绝不允许「写进去了但应用失败」的半截状态。
+   * 密钥字段（`SETTINGS_SECRET_KEYS`）的空串 = 不修改：面板回显的空串不会冲掉已存值。
+   * 落盘成功后直接采用写盘返回的整份覆盖层，避免「写盘成功再读文件」的双读窗口。
+   */
+  public async updateSettings(
+    section: unknown,
+    patch: unknown,
+  ): Promise<{ ok: true; section: SettingsSection; value: PatchouliSettingsValues[SettingsSection] } | { ok: false; error: string }> {
+    const validated = validateSettingsPatch(section, patch);
+    if (!validated.ok) return { ok: false, error: validated.error };
+    const merged: Record<string, unknown> = {
+      ...(this.mergedSection(validated.section) as unknown as Record<string, unknown>),
+      ...validated.value,
+    };
+    const mergedErrors = validateMergedSettings(validated.section, merged);
+    if (mergedErrors.length > 0) return { ok: false, error: mergedErrors.join('；') };
+    let overrides: SettingsOverrides;
+    try {
+      overrides = await writeSettingsOverrides(
+        this.wikiDir,
+        validated.section,
+        validated.value,
+        this.settingsRepairContext(),
+      );
+    } catch (error: unknown) {
+      if (!(error instanceof SettingsConflictError)) throw error;
+      // 文件被外部改写（内存快照滞后）：先把真源读回来，再按**真实合并值**给出可读的 400。
+      // 不这样做的话面板会永远拿同一个冲突文案，而它看到的段值又不是文件里的值。
+      const refreshed = await readSettingsOverrides(this.wikiDir, this.settingsRepairContext());
+      // 文件是外部改写的：运行态直接服从文件真源（整段应用），不是「本次补丁」。
+      this.applySettingsOverrides(refreshed, 'replay');
+      const conflicts = validateMergedSettings(validated.section, {
+        ...(this.mergedSection(validated.section) as unknown as Record<string, unknown>),
+        ...validated.value,
+      });
+      return { ok: false, error: conflicts.length > 0 ? conflicts.join('；') : error.message };
+    }
+    this.applySettingsOverrides(overrides);
+    // 回包与 GET 同构：密钥位置空串 + `secretConfigured`，绝不把明文送回浏览器。
+    return {
+      ok: true,
+      section: validated.section,
+      value: redactSettingsSection(
+        validated.section,
+        this.settings(validated.section) as unknown as Record<string, unknown>,
+      ) as unknown as PatchouliSettingsValues[SettingsSection],
+    };
+  }
+
+  /**
+   * 覆盖层变更的统一生效点：替换内存快照、同步主题副本，并把**本次变化的键**
+   * 落到已建状态的触发器与裁判上（只应用变化的键，不覆盖 AIMD 逐群调校结果）。
+   *
+   * `mode` 决定「变化」怎么算：
+   * - `patch`（默认，面板保存）：只应用 `previous` → `next` 之间真正变了的键。
+   *   落盘的 `trigger` 段是**累积**的（上次保存就把 `minBurstRate` 写进去了），
+   *   整段重放等于把每个群 AIMD 学到的值按老快照改回去——保存一个无关设置也会。
+   * - `replay`（启动回灌 / 文件被外部改写后重读）：整段应用。那时运行态参数本来就该
+   *   服从文件里的真源，没有「本次补丁」可言。
+   *
+   * 触发器热更新按群逐个兜底：文件已经落盘，这里再抛错就只剩「500 + 运行态半截」，
+   * 比「这个群沿用旧参数 + 一条告警」糟得多。
+   */
+  private applySettingsOverrides(next: SettingsOverrides, mode: 'patch' | 'replay' = 'patch'): void {
+    const previous = this.settingsOverrides;
+    this.settingsOverrides = next;
+    // 主题调度器持有 `topicRuntime` 的实时引用：值换了还得重排定时器，
+    // 否则改 `hour` / `minute` 后旧 `setTimeout` 仍按老时刻触发，`enabled` 关掉再打开则永不触发。
+    const topicsBefore = { ...this.topicRuntime };
+    Object.assign(this.topicRuntime, this.mergedSection('topics'));
+    if (!deepEqual(topicsBefore, this.topicRuntime)) this.topicScheduler?.reschedule();
+    const triggerPatch = mode === 'replay' ? next.trigger : this.changedTriggerKeys(previous.trigger, next.trigger);
+    if (triggerPatch !== undefined) {
+      try {
+        this.detector.applyDefaultOptions(triggerPatch);
+      } catch (error: unknown) {
+        this.warnSettings(
+          `[Patchouli] 触发默认参数热更新失败，沿用旧值：${error instanceof Error ? error.message : String(error)}`,
         );
       }
-    } catch (error: unknown) {
-      this.logger?.warn(`[Patchouli] 读取主题校准参数失败，沿用配置文件: ${String(error)}`);
+      for (const channelId of this.detector.channelIds()) {
+        try {
+          this.detector.updateOptions(channelId, triggerPatch);
+        } catch (error: unknown) {
+          this.warnSettings(
+            `[Patchouli] 群 ${channelId} 的触发参数热更新失败，沿用旧值：${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
     }
+    const judgePatch = next.judge;
+    if (judgePatch !== undefined) this.judgeClient.applyOptions(readJudgeOptions(this.mergedSection('judge')));
+    const mediaPatch = next.media;
+    if (mediaPatch !== undefined) {
+      // 目录与其余参数同一真源（合并值）：面板存了新目录就必须换扫描根，否则「显示已保存、
+      // 进程还在读旧目录」。空目录名的语义与构造期一致——回落到 `<wikiDir>/media`。
+      const mediaMerged = this.mergedSection('media');
+      this.media.configure({
+        dir: mediaMerged.dir.trim()
+          ? resolveWikiDir(mediaMerged.dir, this.baseDir)
+          : resolveWikiLayout(this.wikiDir).mediaDir,
+        offline: typeof mediaPatch.offline === 'boolean' ? mediaPatch.offline : undefined,
+        lowWater: typeof mediaPatch.lowWater === 'number' ? mediaPatch.lowWater : undefined,
+        batch: typeof mediaPatch.batch === 'number' ? mediaPatch.batch : undefined,
+        cooldownMs: typeof mediaPatch.cooldownHours === 'number' ? mediaPatch.cooldownHours * 3_600_000 : undefined,
+        imageSource: typeof mediaPatch.imageSource === 'string' ? mediaPatch.imageSource : undefined,
+        sayingSource: typeof mediaPatch.sayingSource === 'string' ? mediaPatch.sayingSource : undefined,
+        apiKey: typeof mediaPatch.apiKey === 'string' ? mediaPatch.apiKey : undefined,
+      });
+    }
+  }
+
+  /**
+   * 两次覆盖层快照之间**真正变了的** `trigger` 键；没有变化返回 `undefined`。
+   *
+   * 删掉的键按「回落到宿主 config 的值」应用（覆盖层里没有它了）——不能塞 `undefined`：
+   * `normalizeTriggerOptions` 只认有值的键。上限 = `trigger` 的字段数（十几个），
+   * 每次保存算一遍的成本可以忽略。
+   */
+  private changedTriggerKeys(
+    previous: SettingsSectionPatch | undefined,
+    next: SettingsSectionPatch | undefined,
+  ): SettingsSectionPatch | undefined {
+    const before = previous ?? {};
+    const after = next ?? {};
+    const patch: SettingsSectionPatch = {};
+    let changed = false;
+    for (const [key, value] of Object.entries(after)) {
+      if (Object.hasOwn(before, key) && deepEqual(before[key], value)) continue;
+      patch[key] = value;
+      changed = true;
+    }
+    const base = this.config.trigger as unknown as Record<string, SettingsValue | undefined>;
+    for (const key of Object.keys(before)) {
+      if (Object.hasOwn(after, key)) continue;
+      const fallback = base[key];
+      if (fallback === undefined) continue;
+      patch[key] = fallback;
+      changed = true;
+    }
+    return changed ? patch : undefined;
   }
 
   /**
@@ -962,6 +1822,99 @@ export class PatchouliKnowledgeSystem {
   }
 
   /**
+   * 订阅表编译快照：表为空时是旧配置（`channels` + `albumDelivery`）的镜像。
+   * 纯函数、无缓存——行数上限 256，每次重算的成本远低于失效风险。
+   *
+   * 值域优先级：`settings.json` 的 `subscriptions` 键 > 宿主 config 的 `subscriptions`。
+   */
+  public subscriptions(): SubscriptionSnapshot {
+    return compileSubscriptions(this.config, this.subscriptionOverride ?? undefined);
+  }
+
+  /**
+   * 订阅表视图（面板 `GET /api/subscriptions` 的 rows + 来源）。
+   *
+   * `source` 明确告诉前端「现在生效的是面板覆盖层还是宿主 yml」，
+   * 面板据此决定是否提示「保存后会接管 yml 里的表」。
+   */
+  public subscriptionTable(): { rows: SubscriptionRow[]; source: 'settings' | 'config' } {
+    const override = this.subscriptionOverride;
+    return {
+      rows: resolveRows(this.config, override ?? undefined),
+      source: override === null ? 'config' : 'settings',
+    };
+  }
+
+  /**
+   * 当前绑定表（只读副本）：`apply()` 注入的变更回调拿它重装投递期解析表。
+   *
+   * 投递期解析只认这张表——它不是候选的反解表，候选怎么变都不影响已绑定的收件人。
+   */
+  public targetBindingsSnapshot(): Record<string, string> {
+    return { ...this.targetBindings };
+  }
+
+  /**
+   * 把**生效**的订阅关系打进插件日志：`监听群 → 投递目标（启用动作）`，每条一行便于 grep。
+   *
+   * 只在启动完成与订阅表保存成功后调用；相册探测只刷新候选标签，关系没变，不重打。
+   */
+  private logSubscriptionSummary(): void {
+    for (const line of formatSubscriptionLogLines(this.subscriptionTable().rows)) {
+      this.logger?.info(line);
+    }
+  }
+
+  /**
+   * 校验并持久化订阅表（面板 `POST /api/subscriptions` 的唯一入口）。
+   *
+   * 落盘位置是 `.patchouli/settings.json` 的顶层 `subscriptions` 键（原子写 + 与标量段
+   * 共用串行链），**绝不写宿主 config**。`allowedTargets` 是候选唯一名 ∪ 稳定地址 ∪
+   * 现有值（空集合时只做形状校验，见 `validateSubscriptionRows` / `targetIssue`）。
+   *
+   * **保存时绑定**：同一行里的可读名用 `albums`（此刻的相册候选）解析成 `群号/相册ID`，
+   * 与订阅表**同一次原子落盘**写进 `targetBindings`。已有绑定只要相册还看得见就原样保留；
+   * 解析不到 / 相册已消失的名字保留在行里但**不绑定**，进 `unresolved` 由面板提示、日志
+   * warn——投递期它会停投，绝不会改投到同名相册。
+   */
+  public async updateSubscriptions(
+    rows: unknown,
+    allowedTargets: ReadonlySet<string>,
+    albums: readonly AlbumCandidate[] = [],
+  ): Promise<{ ok: true; rows: SubscriptionRow[]; unresolved: string[] } | { ok: false; error: string }> {
+    const validated = validateSubscriptionRows(rows, allowedTargets);
+    if (!validated.ok) return { ok: false, error: validated.error };
+    // 已有绑定是「上一次保存时的解析结论」：相册仍可见就原样保留（名字换主也不换收件人），
+    // 看不见了才掉绑并上报 → 停投 + 告警，绝不给同名相册当替身。
+    // `subscriptionOverride` 是上一次**落盘**的行：名字在里面却不在绑定表里 = 上次就掉绑了，
+    // 本次同样的行不再重解析（否则下一次保存会把它绑到新群恰好同名的相册上）。
+    // 只在绑定表建立过时才算标记：升级前只有 yml 时名字还没解析过，必须照常解析。
+    const previousRows: readonly SubscriptionRow[] = this.bindingTableEstablished
+      ? this.subscriptionOverride ?? []
+      : [];
+    const { bindings, unresolved } = resolveTargetBindings(validated.rows, albums, this.targetBindings, previousRows);
+    // 落盘失败是真故障（磁盘 / 权限），直接抛出由 HTTP 层归 500，不能伪装成 400。
+    const stored = await writeSubscriptionOverride(this.wikiDir, validated.rows, bindings);
+    this.subscriptionOverride = stored.rows;
+    // 绑定表整份替换：新表只认本次解析成功的名字。
+    // 这次写盘同时带上迁移完成标记（`writeSubscriptionOverride` 的语义：显式给绑定 = 用户
+    // 对绑定做了选择，删空也算），所以从这一刻起名字没绑上就是掉绑，不再自动重解析。
+    this.targetBindings = stored.bindings;
+    this.bindingTableEstablished = true;
+    if (unresolved.length > 0) {
+      this.logger?.warn(
+        `[Patchouli] 订阅目标未绑定（投递期会停投）：${unresolved.join('、')} —— 请重新选择相册`,
+      );
+    }
+    // 新表可能改变监听范围：白名单群立即登记为已监测（静默群产出真实 0）。
+    this.markWhitelistedChannelsMonitored();
+    // 新表可能引入新目标：立刻重注入候选与解析表，配置页的标签文案不必等下一轮相册探测。
+    this.onSubscriptionsChanged?.();
+    this.logSubscriptionSummary();
+    return { ok: true, rows: resolveRows(this.config, stored.rows ?? undefined), unresolved };
+  }
+
+  /**
    * 主题校准运行时参数的**可变引用**：仅供 `TopicScheduler` 持有以实时读热更新值，
    * 外部（面板 / API）一律走 `updateTopicSettings`，不要直接写。
    */
@@ -969,18 +1922,27 @@ export class PatchouliKnowledgeSystem {
     return this.topicRuntime;
   }
 
-  /** 更新并持久化主题校准运行时参数；未知字段丢弃、数值夹进硬限幅。 */
+  /**
+   * 更新并持久化主题校准参数；未知字段丢弃、数值夹进硬限幅。
+   *
+   * 落盘目标是 `.patchouli/settings.json` 的 `topics` 段（与新的设置面板同源），
+   * 不再写旧的 `topics-settings.json`。宿主 config 保持只读（ADR-022）。
+   */
   public async updateTopicSettings(patch: unknown): Promise<typeof this.config.topics> {
-    const normalized = normalizeTopicSettingsPatch(patch);
-    Object.assign(this.topicRuntime, normalized);
-    await writeTopicSettings(this.wikiDir, {
-      enabled: this.topicRuntime.enabled,
-      hour: this.topicRuntime.hour,
-      minute: this.topicRuntime.minute,
-      lookbackDays: this.topicRuntime.lookbackDays,
-      mergeThreshold: this.topicRuntime.mergeThreshold,
-      minEntries: this.topicRuntime.minEntries,
-    });
+    const checked = validateSettingsPatch('topics', normalizeTopicSettingsPatch(patch));
+    if (checked.ok) {
+      const overrides = await writeSettingsOverrides(
+        this.wikiDir,
+        'topics',
+        checked.value,
+        this.settingsRepairContext(),
+      );
+      this.settingsOverrides = overrides;
+    }
+    // 与 applySettingsOverrides 同一契约：值变了就重排定时器（`/api/topics/settings` 是另一条写入口）。
+    const topicsBefore = { ...this.topicRuntime };
+    Object.assign(this.topicRuntime, this.mergedSection('topics'));
+    if (!deepEqual(topicsBefore, this.topicRuntime)) this.topicScheduler?.reschedule();
     return this.getTopicSettings();
   }
 
@@ -1032,7 +1994,10 @@ export class PatchouliKnowledgeSystem {
   private markWhitelistedChannelsMonitored(): void {
     if (!this.config.enabled) return;
     const startBucket = Math.ceil(Date.now() / TRAFFIC_SAMPLE_MS) * TRAFFIC_SAMPLE_MS;
-    for (const channelId of this.config.channels) {
+    // 订阅表为空时沿用旧白名单；`null` = 全部群，无法预登记，等消息到达自然登记。
+    const channels = listeningGroupIds(this.subscriptions());
+    if (channels === null) return;
+    for (const channelId of channels) {
       if (!this.trafficMonitorStart.has(channelId)) {
         this.trafficMonitorStart.set(channelId, startBucket);
       }
@@ -1178,7 +2143,7 @@ export class PatchouliKnowledgeSystem {
    */
   public async onIncomingMessage(msg: ChatMessage, context?: RichMessageContext): Promise<void> {
     if (!this.config.enabled) return;
-    if (this.config.channels.length > 0 && !this.config.channels.includes(msg.channelId)) {
+    if (!isListening(this.subscriptions(), msg.channelId)) {
       return;
     }
 
@@ -1271,7 +2236,9 @@ export class PatchouliKnowledgeSystem {
     const tuning = updateParameters(
       { ...before, lastUpdated: this.tuningClocks.get(channelId) },
       signal,
-      this.config.trigger,
+      // 锚点是**当前生效值**（覆盖层 > 宿主 config）：拿 `this.config.trigger` 会让面板里
+      // 改过的 `thetaMin` 在每次 AIMD 步进后被时间向心力拉回 yml 基线。
+      this.settings('trigger'),
       Date.now(),
       { target },
     );
@@ -1402,11 +2369,13 @@ export class PatchouliKnowledgeSystem {
 
         // 3. 词条卡片投递：产品决策（2026-11-10）改为「讨论结束即出图」，
         //    不再等周报；投递失败不影响沉淀结果，也不拖慢结算。
-        if (this.config.albumDelivery?.entryEnabled !== false && this.entryCardSink !== undefined) {
+        if (this.entryCardDeliveryEnabled()) {
           const sink = this.entryCardSink;
-          void sink(result.entry.id, session.channelId).catch((error: unknown) => {
-            this.logger?.warn(`[Patchouli] 词条投递异常: ${String(error)}`);
-          });
+          if (sink !== undefined) {
+            void sink(result.entry.id, session.channelId).catch((error: unknown) => {
+              this.logger?.warn(`[Patchouli] 词条投递异常: ${String(error)}`);
+            });
+          }
         }
 
         // 4. 是否在群内轻量播报
@@ -1541,11 +2510,27 @@ export class PatchouliKnowledgeSystem {
    * 直接执行一次主题校准、不写日切水位（调度器与需要绕过水位的场景使用）。
    *
    * 开关 / 幂等 / 零写入语义全部由聚合器把守，这里只透传。
+   *
+   * **功能总闸在这里也要判**：`features.topics === false` 时调度器的 `channels()` 返回空表
+   * （定时轮空），但管理入口 `/api/topics` 走的是 `runTopics` → 调度器 `runChannelNow`
+   * → 本方法，会绕过那张空表照样烧一次模型。返回与聚合器同一形状的 disabled 结果。
    */
   public async runTopicsDirect(
     channelId: string,
     options: { force?: boolean; now?: number } = {},
   ): Promise<TopicRunResult> {
+    if (this.config.features.topics === false) {
+      const result: TopicRunResult = {
+        channelId,
+        dayKey: formatDate(new Date(options.now ?? Date.now())),
+        createdTopicIds: [],
+        updatedTopicIds: [],
+        assignedEntryIds: [],
+        skippedReason: 'disabled',
+      };
+      this.lastTopicRun = result;
+      return result;
+    }
     const result = await this.topicCurator.runChannel(channelId, this.topicRuntime, options);
     this.lastTopicRun = result;
     return result;
@@ -1668,8 +2653,12 @@ export function createWebUiRegistrar(
   };
 }
 
-export function apply(ctx: Context, config: PluginOptions): void {
+export function apply(ctx: Context, rawConfig: PluginOptions): void {
+  // 控制台把高级段折叠在 `advanced` 里：运行时摊平回顶层，下游一律只读顶层键。
+  const config: PluginOptions = flattenConfig(rawConfig);
   const logger = ctx.logger('patchouli');
+  // 旧值无法唯一匹配时的告警出口（归一阶段会丢弃该值，绝不按名字猜投递目标）。
+  installSubscriptionTargetWarnings((message) => logger.warn(`[Patchouli] ${message}`));
   // 历史值 auto / standalone 在运行时归一化为 chatluna / custom（调度器内部同一套映射）。
   const provider = normalizeDispatcherProvider(config.dispatcher.provider);
 
@@ -1791,6 +2780,16 @@ export function apply(ctx: Context, config: PluginOptions): void {
     ctx.baseDir,
   );
   logger.info(`[Patchouli] llmwiki 存储根目录: ${system.wikiDir}`);
+  // 重载即刷新订阅目标候选：模块顶层只求值一次，`require` 缓存让重载跳过它。
+  // 同步能确定的范围只有订阅表里显式写出的监听群；`*` / 空表要枚举机器人所在群，
+  // 那是异步的——先不过滤，`ready` 后的首轮探测会按真实范围收窄。
+  // （不做这步预过滤的话，`albums.json` 里早先探测过的退订群相册会一直挂在候选里。）
+  const startupProbe = subscriptionProbeSources(system.subscriptionTable().rows, config.channels);
+  // 解析表用实例里的绑定表（构造期已读盘）：候选只决定下拉与展示文案。
+  let currentTargets = refreshSubscriptionTargets(
+    { ...readStartupTargetValues(), bindings: system.targetBindingsSnapshot() },
+    startupProbe.listenAll ? undefined : startupProbe.explicit,
+  );
   // 管理面密钥：配置留空且尚未初始化时，引导用户从面板完成（不再要求先上服务器抄 token）。
   if (config.security.apiToken.trim() === '' && !existsSync(system.apiTokenPath)) {
     logger.info(
@@ -1804,19 +2803,27 @@ export function apply(ctx: Context, config: PluginOptions): void {
   // 词条投递：每轮讨论沉淀后立刻出图并投递（相册目标复用「知识周报」的相册选择）。
   // `redirectChannelId` 非空时全部改发该群聊天，用于灰度观察。
   system.setEntryCardSink(async (entryId: string, sourceChannelId: string) => {
+    // 功能总闸：词条投递关闭时直接返回（沉淀与索引照常，只是不外发）。
+    if (config.features.entries === false) return;
     const albumConfig = config.albumDelivery;
-    if (albumConfig.entryEnabled === false) return;
-    const targets = planEntryTargets(
-      albumConfig.albums,
-      albumConfig.entryRedirectChannelId,
-      sourceChannelId,
-    );
+    const snapshot = system.subscriptions();
+    // 订阅表生效时按行投递；表为空时沿用旧的「全量相册 + 灰度改道」语义。
+    const targets = snapshot.active
+      ? entryTargetsFor(snapshot, sourceChannelId)
+      : albumConfig.entryEnabled === false
+        ? []
+        : planEntryTargets(albumConfig.albums, albumConfig.entryRedirectChannelId, sourceChannelId);
     if (targets.length === 0) {
-      logger.warn(`[Patchouli] 词条《${entryId}》未投递：相册未选择且未配置改道目标`);
+      logger.warn(
+        snapshot.active
+          ? `[Patchouli] 词条《${entryId}》未投递：订阅表里来源群 ${sourceChannelId} 没有可用的投递目标`
+          : `[Patchouli] 词条《${entryId}》未投递：相册未选择且未配置改道目标`,
+      );
       return;
     }
     const rendered = await renderEntryCard(ctx, system, entryId, {
       maskNames: system.getCardSettings().maskNames,
+      maxHeight: system.settings('query').cardMaxHeight,
     });
     if (rendered.kind !== 'image') {
       logger.warn(`[Patchouli] 词条《${entryId}》出图失败（${rendered.kind}），本轮不投递`);
@@ -1837,9 +2844,11 @@ export function apply(ctx: Context, config: PluginOptions): void {
         );
       }
     }
+    const targetText = targets
+      .map((target) => (target.kind === 'album' ? `相册 ${target.channelId}/${target.albumId}` : `群 ${target.channelId}`))
+      .join('、');
     logger.info(
-      `[Patchouli] 词条《${entryId}》投递 ${batch.delivered}/${batch.total}（来源群 ${sourceChannelId}，` +
-        `${albumConfig.entryRedirectChannelId.trim() === '' ? '相册' : `改道 ${albumConfig.entryRedirectChannelId.trim()}`}）`,
+      `[Patchouli] 词条《${entryId}》投递 ${batch.delivered}/${batch.total}（来源群 ${sourceChannelId}，目标：${targetText}）`,
     );
   });
 
@@ -1873,41 +2882,99 @@ export function apply(ctx: Context, config: PluginOptions): void {
     disposed = true;
   });
 
-  /** 把候选注入控制台：`Schema.dynamic` 角色按 key 读取，注入后在线页面立即刷新。 */
+  /**
+   * 最近一次注入控制台的相册候选。
+   *
+   * 订阅表变化（面板保存 / 覆盖层回灌）时只拿它重注入，**不再探测一次**：
+   * 控制台不该因为一次保存去打 OneBot。
+   */
+  let lastAlbumCandidates: readonly AlbumCandidate[] = [];
+
+  /**
+   * 把相册候选注入控制台：`Schema.dynamic(ALBUM_SCHEMA_KEY)` 按 key 读取，注入后在线
+   * 页面立即刷新（`albumDelivery.albums`）。
+   *
+   * `subscriptions[].targets` **不在这里**：它是 `.role('table')` 里的静态 union，
+   * 候选在模块加载期就定死（`STARTUP_TARGETS`），运行期注入改不动表格。
+   */
   function applyAlbumSchema(albums: readonly AlbumCandidate[]): void {
     if (disposed) return;
-    const schemaHost = (ctx as unknown as { schema?: { set?: (key: string, value: unknown) => void } }).schema;
-    if (typeof schemaHost?.set !== 'function') return;
-    schemaHost.set(ALBUM_SCHEMA_KEY, albumSchemaUnion(albums, config.albumDelivery.albums));
+    lastAlbumCandidates = albums;
+    // `Schema.dynamic` 的注册表：Koishi 4 的 `ctx.schema`，只在控制台在线时存在。
+    ctx.schema?.set?.(ALBUM_SCHEMA_KEY, albumSchemaUnion(albums, config.albumDelivery.albums));
   }
+
+  // 订阅表 / 绑定表一变（面板保存、覆盖层回灌、首轮迁移）就重装解析表并重注入候选：
+  // 解析只认落盘绑定，候选只决定下拉与标签文案，两者刻意分开刷新。
+  system.onSubscriptionsChanged = () => {
+    // 卸载后不得再碰模块级 schema / 解析表：旧实例会顶掉新实例刚装好的那一份。
+    if (disposed) return;
+    applyAlbumSchema(lastAlbumCandidates);
+    currentTargets = refreshSubscriptionTargets({
+      ...currentTargets,
+      bindings: system.targetBindingsSnapshot(),
+    });
+  };
 
   /**
    * 探测群相册 → 合并旧缓存 → 刷新控制台候选。
    *
-   * 探测范围是「白名单群 ∪ 机器人所在全部群」：相册是投递目标，与监听白名单无关，
-   * 新拉进群并建好相册后无需改 `channels` 也无需重启。
-   * `minGapMs > 0` 时按上次探测时间节流（供控制台连接时按需触发）。
+   * 探测范围只覆盖订阅表里出现的监听群（`albumProbeScope`）；探测拿到的新相册会顺手
+   * 原地刷新订阅表 `targets` 的候选，控制台不必等到下次重载。
+   * 群号上限由 `MAX_PROBE_GROUPS` 兜住（供控制台连接时按需触发）。
+   * 卸载竞态由 `refreshAlbumCandidates` 里的逐 `await` 重查兜住。
    */
   async function refreshAlbumSchema(): Promise<void> {
-    if (disposed) return;
+    await refreshAlbumCandidates({
+      disposed: () => disposed,
+      scope: albumProbeScope,
+      probe: ({ bots, groupIds }) =>
+        probeGroupAlbums({ groupIds: [...groupIds], bots: [...bots], service: deliveryAlbumService() }),
+      readCache: () => readAlbumCache(system.wikiDir),
+      writeCache: (albums) => writeAlbumCache(system.wikiDir, albums),
+      applySchema: applyAlbumSchema,
+      install: (values, groupIds) => {
+        currentTargets = refreshSubscriptionTargets(values, groupIds);
+      },
+      configured: () => currentTargets.configured,
+      bindings: () => system.targetBindingsSnapshot(),
+      log: (message) => logger.info(message),
+    });
+  }
+
+  /**
+   * 相册探测范围：**只探订阅表里的监听群**（`subscriptionTable().rows` 的 `source`）。
+   *
+   * 候选是给订阅表用的，把机器人所在的几十个群全探一遍只会把下拉撑成噪音。
+   * 两种情况仍要覆盖全部群：
+   * - 有 `*` 行（监听全部群）；`get_group_list` 失败时退回显式来源群；
+   * - 表为空且旧白名单也为空（旧配置的 `listening: null` 同样是「全部群」）。
+   */
+  async function albumProbeScope(): Promise<{ bots: AlbumBot[]; groupIds: string[] }> {
     const bots = ctx.bots.filter((bot) => bot.platform === 'onebot') as unknown as AlbumBot[];
-    const groupIds: string[] = channelGroupIds(config.channels);
-    for (const groupId of await listBotGroupIds(bots)) {
-      if (!groupIds.includes(groupId)) groupIds.push(groupId);
+    const { explicit, listenAll } = subscriptionProbeSources(system.subscriptionTable().rows, config.channels);
+    // `get_group_list` 拿不到（掉线 / 平台不支持）时仍用显式来源群，别把候选清空。
+    const listed = listenAll ? await listBotGroupIds(bots) : [];
+    const scope = new Set<string>([...listed, ...explicit]);
+    const groupIds = [...scope].slice(0, MAX_PROBE_GROUPS);
+    if (scope.size > groupIds.length) {
+      logger.warn(
+        `[Patchouli] 待探测群 ${scope.size} 个，超过单轮上限 ${MAX_PROBE_GROUPS}：只探前 ${groupIds.length} 个，其余群的相册不会出现在候选里`,
+      );
     }
-    if (groupIds.length === 0) {
-      applyAlbumSchema(await readAlbumCache(system.wikiDir));
-      return;
-    }
-    const discovered = await probeGroupAlbums({ groupIds, bots, service: deliveryAlbumService() });
-    if (disposed) return;
-    const previous = await readAlbumCache(system.wikiDir);
-    const merged = mergeAlbumCandidates(previous, discovered, groupIds);
-    applyAlbumSchema(merged);
-    if (merged.length > 0) await writeAlbumCache(system.wikiDir, merged);
-    logger.info(
-      `[Patchouli] 群相册候选 ${merged.length} 个（本轮新探测 ${discovered.length} 个 / 覆盖 ${groupIds.length} 个群）`,
-    );
+    return { bots, groupIds };
+  }
+
+  /**
+   * 面板 `GET /api/albums` 的冷启动探测（只探测，不写缓存也不改控制台候选）。
+   *
+   * 探测失败由 HTTP 层降级成 `albums: []`：面板不该因为「机器人掉线」收到 500。
+   */
+  async function probeAlbumsForPanel(): Promise<readonly AlbumCandidate[]> {
+    if (disposed) return [];
+    const { bots, groupIds } = await albumProbeScope();
+    if (groupIds.length === 0) return [];
+    return probeGroupAlbums({ groupIds, bots, service: deliveryAlbumService() });
   }
 
   /** ISO 周键（YYYY-Www），作为 `gateDailySlot` 的周期键。 */
@@ -1921,7 +2988,10 @@ export function apply(ctx: Context, config: PluginOptions): void {
   }
 
   /**
-   * 知识周报上传：把最近 7 天新建 / 更新的主题渲成一张总结卡，逐个目标相册上传。
+   * 知识周报上传：按订阅来源把最近 7 天新建 / 更新的主题渲成总结卡，投到该来源的相册。
+   *
+   * 取材与投递都按 `weekly` 行的来源分组（`*` 行 = 全库）；订阅表为空时退回旧的
+   * 全库口径 + `albumDelivery.albums`。具体编排见 `weekly-album.ts`。
    *
    * 去重键是**本次触发的分钟桶**：同一分钟内插件重载不会重复上传，
    * 而下一次触发（无论 cron 改成每天还是每月）一定是新键。
@@ -1930,15 +3000,18 @@ export function apply(ctx: Context, config: PluginOptions): void {
   async function runWeeklyAlbumUpload(
     options: { force?: boolean; firedAt?: number } = {},
   ): Promise<{ ok: boolean; reason?: string; uploaded: number }> {
-    const albumValues = config.albumDelivery.albums.filter((value) => /^[^/]+\/.+$/u.test(value));
-    if (albumValues.length === 0) {
-      return { ok: false, reason: 'album-not-configured', uploaded: 0 };
-    }
+    // 功能总闸：周报关闭时不跑（也不注册 cron，这里是二次防线：管理入口手工触发同样跳过）。
+    if (config.features.weekly === false) return { ok: false, reason: 'disabled', uploaded: 0 };
     const deliveryHost = ctx as unknown as Record<string, unknown>;
     const delivery = deliveryHost['miyako-delivery'] as { gateDailySlot?: (slot: string, key: string) => Promise<boolean> } | undefined;
     const firedAt = options.firedAt ?? Date.now();
     const weekKey = isoWeekKey(firedAt);
     const fireKey = String(Math.floor(firedAt / 60_000));
+    const snapshot = system.subscriptions();
+    // 没有任何相册目标就别占掉本轮的触发槽（`gateDailySlot` 一旦放行即算跑过）。
+    if (planWeeklyAlbumSources(snapshot, config.albumDelivery.albums).length === 0) {
+      return { ok: false, reason: 'album-not-configured', uploaded: 0 };
+    }
     if (options.force !== true) {
       if (typeof delivery?.gateDailySlot !== 'function') {
         return { ok: false, reason: 'delivery-unavailable', uploaded: 0 };
@@ -1948,62 +3021,52 @@ export function apply(ctx: Context, config: PluginOptions): void {
       }
     }
     const since = firedAt - WEEK_MS;
-    const recent = await system.localStore.getRecentEntries(undefined, 500);
-    const topicIds = recent
-      .filter((record) => record.kind === 'topic' && (record.updatedAt ?? 0) >= since)
-      .map((record) => record.id);
-    if (topicIds.length === 0) {
-      logger.info(`[Patchouli] 知识周报 ${weekKey}: 最近 7 天没有新主题`);
-      return { ok: true, reason: 'no-topics', uploaded: 0 };
-    }
-    const views = await Promise.all(
-      topicIds.map(async (id) => {
-        const record = await system.localStore.getEntry(id);
-        if (record === undefined) return undefined;
+    // 按订阅来源取材与投递（`weekly` 行 = 「该来源参与周报」）；表为空时退回全库 + 旧相册。
+    return runWeeklyAlbumDelivery({
+      weekKey,
+      fireKey,
+      since,
+      snapshot,
+      fallbackAlbums: config.albumDelivery.albums,
+      logger,
+      recentEntries: (channelId, limit) => system.localStore.getRecentEntries(channelId, limit),
+      buildView: async (record) => {
         // 周报图外发前同样要过脱敏：标题 / 摘要可能裸写群友昵称。
-        const view = toPublicView(record, await system.wikiEngine.readEntry(id));
-        const extraNames = [...record.participants, ...collectSessionNames(await system.wikiEngine.readSessionDump(id))];
+        const view = toPublicView(record, await system.wikiEngine.readEntry(record.id));
+        const extraNames = [
+          ...record.participants,
+          ...collectSessionNames(await system.wikiEngine.readSessionDump(record.id)),
+        ];
         return maskPublicView(view, undefined, extraNames);
-      }),
-    );
-    const summaryViews = views.filter((view): view is NonNullable<typeof view> => view !== undefined);
-    const png = await renderWeeklyAlbumSummaryPng(ctx, summaryViews, {
-      maxHeight: config.query.cardMaxHeight,
-      weekLabel: weekKey,
+      },
+      render: (views, weekLabel) =>
+        renderWeeklyAlbumSummaryPng(ctx, views, {
+          maxHeight: system.settings('query').cardMaxHeight,
+          weekLabel,
+        }),
+      deliver: (album, png, dedupeKey) => {
+        const separator = album.indexOf('/');
+        const groupId = album.slice(0, separator).trim();
+        const albumId = album.slice(separator + 1).trim();
+        return deliverCardPng(
+          ctx,
+          { kind: 'album', channelId: `onebot:${groupId}`, albumId },
+          png,
+          { scope: 'patchouli:weekly-album', dedupeKey },
+        );
+      },
     });
-    if (png === null) {
-      logger.warn('[Patchouli] 知识周报渲染失败：宿主未提供 puppeteer 或截图异常');
-      return { ok: false, reason: 'render-failed', uploaded: 0 };
-    }
-    let uploaded = 0;
-    for (const value of albumValues) {
-      const separator = value.indexOf('/');
-      const groupId = value.slice(0, separator).trim();
-      const albumId = value.slice(separator + 1).trim();
-      if (groupId === '' || albumId === '') continue;
-      const outcome = await deliverCardPng(
-        ctx,
-        {
-          kind: 'album',
-          channelId: `onebot:${groupId}`,
-          albumId,
-        },
-        png,
-        { scope: 'patchouli:weekly-album', dedupeKey: `${fireKey}:${value}` },
-      );
-      if (outcome.ok && outcome.skipped === undefined) uploaded += 1;
-      else if (!outcome.ok && outcome.skipped === undefined) {
-        logger.warn(`[Patchouli] 知识周报上传 ${value} 失败: ${outcome.error?.code ?? 'UNKNOWN'} ${outcome.error?.message ?? ''}`);
-      }
-    }
-    logger.info(`[Patchouli] 知识周报 ${weekKey}: ${summaryViews.length} 个主题，上传 ${uploaded}/${albumValues.length} 个相册`);
-    return { ok: uploaded > 0, uploaded, reason: uploaded > 0 ? undefined : 'upload-failed' };
   }
 
   // 每日主题校准：04:00 按群各自归并；失败 30 分钟后重试，日切水位落盘。
   const topicScheduler = new TopicScheduler(system.topicConfig, {
-    channels: async () =>
-      config.channels.length > 0 ? config.channels : await system.localStore.listChannels(),
+    channels: async () => {
+      // 功能总闸：主题校准关闭时没有目标（调度器自己会睡眠到下一个事件）。
+      if (config.features.topics === false) return [];
+      const snapshot = system.subscriptions();
+      if (snapshot.topicGroups !== null) return [...snapshot.topicGroups];
+      return config.channels.length > 0 ? config.channels : await system.localStore.listChannels();
+    },
     run: async (channelId, options) => {
       // 绕过 `runTopics` 的调度器委派，否则会递归回本调度器。
       const result = await system.runTopicsDirect(channelId, options);
@@ -2025,6 +3088,8 @@ export function apply(ctx: Context, config: PluginOptions): void {
   // 知识周报：定时由 miyako-delivery 承载，触发规则（cron 表达式）来自本插件配置；
   // 服务就绪后再注册，避免 apply 顺序导致漏挂。改表达式保存即重载本插件、重新排程。
   ctx.inject(['miyako-delivery'], (deliveryCtx: Context) => {
+    // 功能总闸：周报关闭时连 cron 都不注册（管理入口的手动触发由 runWeeklyAlbumUpload 再挡一次）。
+    if (config.features.weekly === false) return;
     const deliveryHost = deliveryCtx as unknown as Record<string, unknown>;
     const stop = registerWeeklyCron({
       scheduler: deliveryHost['miyako-delivery'] as CronSchedulerLike | undefined,
@@ -2042,7 +3107,7 @@ export function apply(ctx: Context, config: PluginOptions): void {
   // apply 与 ready 都会调用；幂等由 `createWebUiRegistrar` 保证（只成功注册一次）。
   const tryRegisterWeb = createWebUiRegistrar(
     ctx,
-    () => registerWebUi(ctx, system, '/patchouli'),
+    () => registerWebUi(ctx, system, '/patchouli', { probeAlbums: probeAlbumsForPanel }),
     (err: unknown) => logger.warn(`[Patchouli] 挂载 WebUI 路由异常: ${String(err)}`),
   );
   tryRegisterWeb();
@@ -2107,7 +3172,7 @@ export function apply(ctx: Context, config: PluginOptions): void {
   const channelScope = (session: Session): boolean =>
     !session.isDirect &&
     !!session.channelId &&
-    (config.channels.length === 0 || config.channels.includes(session.channelId));
+    isListening(system.subscriptions(), session.channelId);
 
   // 单条群消息的入站处理。注册时机由 `registerMessageListener` 决定（见 ready 阶段）。
   const handleIncomingMessage = async (session: Session): Promise<void> => {

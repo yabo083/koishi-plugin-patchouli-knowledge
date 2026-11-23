@@ -203,16 +203,31 @@ function readAnswers(text: string): SystemOneOutcome {
  * ------------------------------------------------------------------ */
 
 export class JudgeClient {
-  readonly options: Readonly<JudgeOptions>;
+  private current: Readonly<JudgeOptions>;
 
   private readonly fetchImpl: typeof globalThis.fetch;
 
-  private readonly endpoint: string;
+  private endpoint: string;
 
   constructor(options: Partial<JudgeOptions> = {}, deps: JudgeClientDeps = {}) {
-    this.options = resolveJudgeOptions(options);
+    this.current = resolveJudgeOptions(options);
     this.fetchImpl = deps.fetch ?? globalThis.fetch;
-    this.endpoint = `${this.options.baseURL}${SYSTEM_ONE_PATH}`;
+    this.endpoint = `${this.current.baseURL}${SYSTEM_ONE_PATH}`;
+  }
+
+  /** 当前生效参数（只读快照）。 */
+  get options(): Readonly<JudgeOptions> {
+    return this.current;
+  }
+
+  /**
+   * 热更新端点参数（面板设置覆盖层写入后调用）：重建 options 与请求地址。
+   * 入参只应包含校验过的字段；`resolveJudgeOptions` 负责归一化与缺省回落。
+   */
+  applyOptions(patch: Partial<JudgeOptions>): Readonly<JudgeOptions> {
+    this.current = resolveJudgeOptions({ ...this.current, ...patch });
+    this.endpoint = `${this.current.baseURL}${SYSTEM_ONE_PATH}`;
+    return this.current;
   }
 
   /** 门控：一个 noul 问题，返回 P(true)。**永不抛错**。 */

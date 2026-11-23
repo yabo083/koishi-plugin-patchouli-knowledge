@@ -5,12 +5,12 @@ import { WikiEngine, registerWebUi } from '../lib/index.js';
 
 const ENTRY = {
   id: '2026-11-10-card-entry',
-  title: '张三的 123456789 观察',
+  title: '张三的 100000011 观察',
   channelId: 'qq-group-9001',
   date: '2026-11-10',
   status: 'tentative',
   tags: ['长图导出'],
-  summary: '@张三 提出 QQ 123456789 的疑问。',
+  summary: '@张三 提出 QQ 100000011 的疑问。',
   background: '背景。',
   participants: ['张三'],
   debateMatrix: [
@@ -59,7 +59,7 @@ function createFakePage(htmls, shots = []) {
   };
 }
 
-function buildHarness({ puppeteer } = {}) {
+function buildHarness({ puppeteer, cardMaxHeight = 6000 } = {}) {
   const routes = new Map();
   const middlewares = [];
   const router = {
@@ -78,6 +78,8 @@ function buildHarness({ puppeteer } = {}) {
     dispatcher: { route: 'chatluna', model: '', hasExplicitModel: false, chatUrl: '', probe: async () => ({}) },
     // 出图选项：默认匿名化开启（与生产一致）
     getCardSettings: () => ({ maskNames: true }),
+    // 面板设置：长图上限与生产同源（`query.cardMaxHeight`）
+    settings: (section) => (section === 'query' ? { cardMaxHeight } : {}),
   };
   const host = { router };
   if (puppeteer !== undefined) host.puppeteer = puppeteer;
@@ -130,7 +132,25 @@ test('API-CARD-03: 有 puppeteer 时出 JPEG 长图，且渲染内容已脱敏',
 
   const html = htmls[0];
   assert.ok(!html.includes('张三'), '出图前必须脱敏：真实昵称不得出现在 HTML 里');
-  assert.ok(!html.includes('123456789'), '出图前必须脱敏：真实号码不得出现');
+  assert.ok(!html.includes('100000011'), '出图前必须脱敏：真实号码不得出现');
   assert.ok(html.includes('>#1<'), '页眉显示独立自然数序号');
   assert.ok(!/<a\s|https?:\/\//u.test(html), '长图不含任何 URL / 锚点');
+});
+
+test('API-CARD-04: query.cardMaxHeight 钳制超长词条图高度', async () => {
+  const htmls = [];
+  const shots = [];
+  const page = createFakePage(htmls, shots);
+  // 页面实测高度远超面板上限 1200px：必须走视口 + clip 路径并按上限裁剪。
+  page.evaluate = async () => 5000;
+  const { handler } = buildHarness({ puppeteer: { page: async () => page }, cardMaxHeight: 1200 });
+
+  const kCtx = koaContext({ id: ENTRY.id });
+  await handler('GET /patchouli/api/card/:id')(kCtx);
+
+  assert.equal(kCtx.status, 200);
+  assert.equal(shots.length, 1);
+  assert.equal(shots[0].fullPage, undefined, '超限时不得整页截图');
+  assert.equal(shots[0].clip?.height, 1200, '截图高度必须被 query.cardMaxHeight 钳制');
+  assert.equal(shots[0].clip?.width, 720, '宽度不受高度上限影响');
 });

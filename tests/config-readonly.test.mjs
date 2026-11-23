@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 
-import { Config, PatchouliKnowledgeSystem, name as pluginName, reusable } from '../lib/index.js';
+import { Config, PatchouliKnowledgeSystem, flattenConfig, name as pluginName, reusable } from '../lib/index.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -58,7 +58,7 @@ test('CONFIG-READONLY-01: 回灌与热更新不修改宿主 config，且热更�
     assert.equal(JSON.stringify(config), before, '热更新不得写宿主 config');
     assert.equal(system.getTopicSettings().hour, 6);
     assert.ok(system.dispatcher.systemPrompt.includes('改过的沉淀提示词'));
-    assert.equal(system.config.topics.hour, Config({}).topics.hour, '宿主 topics 保持 Schema 默认值');
+    assert.equal(system.config.topics.hour, flattenConfig(Config({})).topics.hour, '宿主 topics 保持 Schema 默认值');
   } finally {
     system.dispose();
     await rm(wikiDir, { recursive: true, force: true });

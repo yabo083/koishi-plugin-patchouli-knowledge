@@ -70,6 +70,8 @@ export async function renderEntryCard(
     masker?: Masker;
     /** 是否脱敏（面板「图片匿名化」开关，默认开启）。关闭时按会话原文昵称出图。 */
     maskNames?: boolean;
+    /** 长图像素高度上限（`query.cardMaxHeight`）；缺省按渲染器内置上限。 */
+    maxHeight?: number;
   } = {},
 ): Promise<EntryCardResult> {
   const trimmed = id.trim();
@@ -108,6 +110,7 @@ export async function renderEntryCard(
     saying,
     index,
     knownNames,
+    maxHeight: options.maxHeight,
   });
   if (image === null) return { kind: 'no-puppeteer' };
   return { kind: 'image', image, view: cardView };

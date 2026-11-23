@@ -202,3 +202,58 @@ test('TOPIC-SCHED-07: 并发写水位后文件仍是完整 JSON（临时名递�
   const leftovers = (await fs.readdir(TEST_DIR)).filter((name) => name.includes('.tmp-'));
   assert.deepEqual(leftovers, [], '临时文件必须被 rename 消费干净');
 });
+
+test('TOPIC-SCHED-08: 改 hour/minute 后 reschedule 按新值重排；禁用只清不设，重新启用后能再触发', async () => {
+  await fs.rm(TEST_DIR, { recursive: true, force: true });
+  const config = { ...CONFIG, hour: 4, minute: 0 };
+  const timers = [];
+  const cleared = [];
+  let now = at(3, 0);
+  let calls = 0;
+  const scheduler = new TopicScheduler(config, {
+    channels: () => ['g1'],
+    run: async (channelId) => (calls += 1, ok(channelId)),
+    statePath: STATE_PATH,
+    now: () => now,
+    retryDelayMs: 30 * 60_000,
+    setTimer: (callback, delayMs) => {
+      timers.push({ callback, delayMs });
+      return timers.length;
+    },
+    clearTimer: (handle) => {
+      cleared.push(handle);
+    },
+  });
+
+  await scheduler.start();
+  assert.equal(timers.length, 1, '启动后按 04:00 排下一个事件');
+  assert.equal(timers[0].delayMs, at(4, 0) - now);
+
+  // 面板把时间改到 06:00：旧定时必须作废，新定时按新值算。
+  config.hour = 6;
+  config.minute = 0;
+  scheduler.reschedule();
+  assert.equal(cleared.length, 1, '重排必须先清掉旧定时');
+  assert.equal(timers.length, 2);
+  assert.equal(timers[1].delayMs, at(6, 0) - now);
+
+  // 关掉：只清不设（否则关掉的调度器还会在旧时刻烧一次模型）。
+  config.enabled = false;
+  scheduler.reschedule();
+  assert.equal(cleared.length, 2, '禁用必须清掉已排的定时');
+  assert.equal(timers.length, 2, '禁用时不得再排');
+
+  // 再打开：旧实现（只在 start 排一次）从此永不触发；reschedule 必须重新定时。
+  config.enabled = true;
+  now = at(6, 1);
+  scheduler.reschedule();
+  assert.equal(timers.length, 3, '重新启用必须重新具备定时入口');
+  assert.equal(timers[2].delayMs, at(6, 0, 3) - now, '已过点则顺延到次日同时刻');
+
+  // 新定时到点后仍按实时配置跑一轮。
+  timers[2].callback();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls, 1, '重新启用后的定时必须真的能触发');
+
+  scheduler.dispose();
+});

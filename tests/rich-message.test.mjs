@@ -11,6 +11,7 @@ import {
   createMediaProxyHandler,
   isAllowedMediaType,
   isPrivateOrLocalHost,
+  isIPv4MappedIPv6,
   isProxyRequiredMediaUrl,
   mapElementMediaUrls,
   parseRichElements,
@@ -281,6 +282,58 @@ test('RICH-02: 媒体地址只放行公网 http(s)，拒绝 data/file/本地/私
   assert.deepEqual(mapElementMediaUrls([{ type: 'image', url: 'http://a.example.com/x.png' }], () => undefined), [
     { type: 'image' },
   ]);
+});
+
+test('RICH-02: IPv4 映射 IPv6 字面量（十六进制 / 全展开 / 大小写混写）判定为私网 / 不可用', () => {
+  // 内嵌私网 / 本机 / 云 metadata 地址（`::ffff:HHHH:HHHH` 拼回 32 位后按 IPv4 段判定）
+  for (const host of [
+    '[::ffff:7f00:1]',
+    '[::ffff:c0a8:101]',
+    '[::ffff:a9fe:a9fe]',
+    '[::ffff:0a00:1]',
+    '[0:0:0:0:0:ffff:7f00:1]',
+    '[0:0:0:0:0:ffff:a9fe:a9fe]',
+    '[::FFFF:7F00:1]',
+  ]) {
+    assert.equal(isPrivateOrLocalHost(host), true, `${host} 必须判定为私网 / 不可用`);
+    assert.equal(sanitizeMediaUrl(`http://${host}/a.png`), undefined, `${host} 必须被拒绝`);
+    assert.equal(new MediaRegistry(4).register('group-a', `http://${host}/a.png`), undefined, `${host} 不得进入登记表`);
+  }
+
+  // 点分写法与十六进制写法等价（点分私网映射同样拒绝）
+  assert.equal(isPrivateOrLocalHost('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateOrLocalHost('::ffff:169.254.169.254'), true);
+
+  // 映射形式识别：点分 / 十六进制 / 全展开 / 大小写混写都算映射（媒体代理由此整体拒绝该写法）
+  for (const host of [
+    '::ffff:7f00:1',
+    '::ffff:c0a8:101',
+    '::ffff:8.8.8.8',
+    '0:0:0:0:0:ffff:8.8.8.8',
+    '::FFFF:A9FE:A9FE',
+    '[::ffff:7f00:1]',
+  ]) {
+    assert.equal(isIPv4MappedIPv6(host), true, `${host} 必须识别为 IPv4 映射形式`);
+  }
+  // 内嵌公网 IPv4 的点分映射按 IPv4 规则不算私网，但仍是映射写法（代理层整体拒绝，见 media-proxy 用例）
+  assert.equal(isPrivateOrLocalHost('::ffff:8.8.8.8'), false);
+
+  // 普通公网 IPv6 不受影响；非 IPv6 一律不是映射形式
+  assert.equal(isPrivateOrLocalHost('[2606:4700:4700::1111]'), false);
+  assert.equal(sanitizeMediaUrl('https://[2606:4700:4700::1111]/a.png'), 'https://[2606:4700:4700::1111]/a.png');
+  for (const host of ['2606:4700:4700::1111', '::1', '::', 'fd00::1', 'fe80::1', 'ff02::1', '93.184.216.34', 'example.com']) {
+    assert.equal(isIPv4MappedIPv6(host), false, `${host} 不是 IPv4 映射形式`);
+  }
+  assert.equal(isPrivateOrLocalHost('fd00::1'), true);
+  assert.equal(isPrivateOrLocalHost('fe80::1'), true);
+
+  // 既有 IPv4 私网 / 本机 / 保留段与公网判定不回归
+  assert.equal(isPrivateOrLocalHost('93.184.216.34'), false);
+  assert.equal(isPrivateOrLocalHost('8.8.8.8'), false);
+  for (const host of ['127.0.0.1', '10.0.0.1', '192.168.1.5', '172.16.3.4', '169.254.169.254', '100.64.1.1', '198.18.1.1', '0.0.0.0', '224.0.0.1']) {
+    assert.equal(isPrivateOrLocalHost(host), true, `${host} 仍必须判定为私网 / 保留段`);
+    assert.equal(sanitizeMediaUrl(`http://${host}/a.png`), undefined);
+  }
 });
 
 /* ------------------------------------------------------------------ *
@@ -903,33 +956,33 @@ test('RICH-07: 晚到的富解析不得覆盖新消息，且 /api/status 元素�
 test('RICH-10: OneBot reply 后面自动附加的被回复内容镜像文本不被重复渲染', async () => {
   const { system, dir } = await makeTmpSystem('rich-reply');
   const rawMessage = [
-    { type: 'reply', data: { id: '929647569' } },
-    { type: 'text', data: { text: '到时候找个理由跟码头异格或者空降一起出\n' } },
-    { type: 'at', data: { qq: '1113935787' } },
-    { type: 'text', data: { text: ' 马头是莱塔尼亚线人了' } },
+    { type: 'reply', data: { id: '100000002' } },
+    { type: 'text', data: { text: '示例回复引用正文\n' } },
+    { type: 'at', data: { qq: '1000000001' } },
+    { type: 'text', data: { text: ' 示例回复正文' } },
   ];
   await system.onIncomingMessage(
-    message({ id: 'msg-reply-1', content: '@成员 马头是莱塔尼亚线人了', userName: '猫' }),
+    message({ id: 'msg-reply-1', content: '@成员 示例回复正文', userName: '猫' }),
     {
       rawMessage,
       quote: {
-        id: '929647569',
+        id: '100000002',
         user: { name: 'Vader' },
-        content: '到时候找个理由跟码头异格或者空降一起出',
+        content: '示例回复引用正文',
       },
     },
   );
   const latest = system.getLatestMessage('group-a');
   assert.ok(latest);
-  // 必须只包含 quote + at + text，绝不包含重复的“到时候找个理由...”单独文本段
+  // 必须只包含 quote + at + text，绝不包含重复的“示例回复引用正文”单独文本段
   assert.equal(latest.elements.length, 3);
   assert.equal(latest.elements[0].type, 'quote');
   assert.equal(latest.elements[0].title, 'Vader');
-  assert.equal(latest.elements[0].text, '到时候找个理由跟码头异格或者空降一起出');
+  assert.equal(latest.elements[0].text, '示例回复引用正文');
   assert.equal(latest.elements[1].type, 'text');
   assert.equal(latest.elements[1].text, '@成员');
   assert.equal(latest.elements[2].type, 'text');
-  assert.equal(latest.elements[2].text, '马头是莱塔尼亚线人了');
+  assert.equal(latest.elements[2].text, '示例回复正文');
 
   system.dispose();
   await fs.rm(dir, { recursive: true, force: true });

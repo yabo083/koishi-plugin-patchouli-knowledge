@@ -41,7 +41,7 @@ export function authBootstrap(basePath: string): string {
   const shell = (inner) => {
     const root = document.createElement('div');
     root.id = OVERLAY_ID;
-    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
+    root.setAttribute('style', 'position:fixed;inset:0;z-index:2147483;display:flex;align-items:center;justify-content:center;background:rgba(5,9,16,.9);backdrop-filter:blur(6px);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif;color:#e8edf7');
     const card = document.createElement('form');
     card.setAttribute('style', 'width:min(440px,88vw);padding:26px 24px;border-radius:16px;background:rgba(19,25,40,.97);border:1px solid rgba(255,255,255,.13);box-shadow:0 24px 70px rgba(0,0,0,.55)');
     card.innerHTML = inner;
@@ -184,9 +184,9 @@ export function authBootstrap(basePath: string): string {
     });
   };
 
-  /**
-   * 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
+  /* 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
    * 独立页面在加载时调用，Console 组件在打开悬浮窗时调用；重复调用幂等。
+   * dismiss 供宿主路由离开本插件页时收起模态——否则遮罩会跟着留在别人的插件页上。
    */
   const gate = (message) => {
     if (overlayOpen) return;
@@ -218,7 +218,7 @@ export function authBootstrap(basePath: string): string {
       .catch(() => undefined);
   };
 
-  window.__ptxAuth = { gate, hasSession: () => session() !== null };
+  window.__ptxAuth = { gate, dismiss: finish, hasSession: () => session() !== null };
 })();`;
 }
 

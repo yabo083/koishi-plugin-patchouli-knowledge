@@ -12,7 +12,7 @@ import {
   restoreScribeSessions,
 } from '../lib/index.js';
 
-const CHANNEL = '900000001';
+const CHANNEL = '100000005';
 
 /** 假时钟 + 假调度器：定时器按逻辑时间排队，测试显式推进。 */
 function createHarness(options = {}, hooks = {}) {

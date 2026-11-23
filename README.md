@@ -43,47 +43,58 @@ pnpm add koishi-plugin-patchouli-knowledge
 
 ## 最小配置
 
-这个例子只监听一个群，用 ChatLuna 的默认模型整理讨论，不需要再填模型密钥。
-把 `123456789` 换成目标群的频道 ID，保留引号：`channels` 接受字符串，不是数字。
+只监听一个群、用 ChatLuna 默认模型、词条发到该群相册：
 
 ```yaml
 plugins:
   patchouli-knowledge:
-    channels:
-      - '123456789'
-    dispatcher:
+    subscriptions:
+      - source: '100000011'
+        targets:
+          - '100000011/<相册ID>'
+        entry: true
+        weekly: false
+    modelConfig:
       provider: chatluna
 ```
 
-如果文件里已有 `plugins:`，只把 `patchouli-knowledge:` 和它下面的内容并入现有配置，不要再写一个 `plugins:`。
-如果控制台已经创建了插件配置，请修改已有实例，不要再启用第二份。
+订阅表里 `source` 填裸群号（`*` 表示所有群）；`targets` 是**多值**：`@chat` 表示发本群聊天，`群号/相册ID`（或控制台候选里的相册名）表示发该群相册，空数组表示只沉淀不投递。一行可以同时挂多个目标（一个群投多个相册），也可以多行指向同一相册。表为空时按旧字段 `channels` 与 `albumDelivery` 运行，升级不改变行为。
+
+订阅表也可以在阅读面板的「订阅」页编辑（目标从订阅表来源群的相册里选，下拉按群分组、群名那一行是不可选的分组标题，相册显示为相册名）；面板保存写入 `.patchouli/settings.json` 覆盖层，优先于 `koishi.yml`。
 
 ### 哪些配置可以省略？
 
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
-| `enabled` | `true` | 开启群聊监听。 |
-| `channels` | `[]` | 空列表表示监听所有群，不是禁用监听。 |
-| `adminUsers` | `[]` | 允许使用管理指令的用户 ID 列表；留空时无人可用。 |
-| `dispatcher.provider` | `chatluna` | 使用 ChatLuna；不使用它时选 `custom`。 |
+| `enabled` | `true` | 总开关。 |
+| `adminUsers` | `[]` | 管理指令与自动书记的用户 ID；留空时无人可用。 |
+| `subscriptions` | `[]` | 空表 = 按旧白名单 / 相册运行。 |
+| `features` | 全开 | `entries` / `weekly` / `topics` / `media` 四个启停总闸，关掉不解构任何参数。 |
+| `modelConfig.provider` | `chatluna` | 使用 ChatLuna；不使用它时选 `custom`。 |
 | `storage.wikiDir` | `data/llmwiki` | 知识库目录，相对于 Koishi 实例目录。 |
+| `security.apiToken` | 空 | 面板与 `/api` 的密钥；为空时所有请求返回 401。 |
 
-**换一个模型**：使用 ChatLuna 时，在插件配置页选择模型，或将 `dispatcher.chatlunaModel` 写成 `平台名/模型名`；省略时继承平台默认模型。
+**换一个模型**：`modelConfig.provider` 为 `chatluna` 时选 ChatLuna 模型，或把 `modelConfig.chatlunaModel` 写成 `平台名/模型名`；省略时继承平台默认模型。
 
-**不用 ChatLuna**：把 `dispatcher.provider` 设为 `custom`，按模型供应商提供的信息填写以下字段：
+**不用 ChatLuna**：把 `modelConfig.provider` 设为 `custom`，填 `baseURL`（API 根地址）、`apiKey`（该服务的密钥，不能用面板登录密钥代替）、`customModel`（服务端识别的模型名，不加平台前缀）。
 
-- `dispatcher.baseURL`：模型服务的 API 根地址。
-- `dispatcher.apiKey`：该服务的密钥，不能用阅读面板的登录密钥代替。
-- `dispatcher.customModel`：服务端识别的模型名，不要额外加 ChatLuna 的平台前缀。
+**深度参数**（触发算法、主题校准、素材池、长图、裁判服务）不在插件页，进 Console 里「LLMWiki」浮窗的齿轮「设置」页调整；它们落在 `.patchouli/settings.json`，不覆盖 `koishi.yml`。
+
+这份文件的读写契约（面板与本文件必须一致）：
+
+- **密钥不回显**：`media.apiKey` / `judge.apiKey` 在 `GET /api/settings` 与 `POST /api/settings` 的回包里恒为空串，同段附带 `secretConfigured: { apiKey: true | false }` 供面板显示「已配置 / 未配置」；真值只存在磁盘与运行态。
+- **空串 = 不修改**：面板把回显的空串原样提交不会清空已配置密钥，提交非空值才覆盖。
+- **校验在落盘之前**：字段级（长度上限 / URL 形态 / 控制字符）与合并后跨字段（`thetaMin ≥ 1e-3`、`coolingRatioThreshold < burstMultiplier`）任一不过都返回 400，文件与运行态都不变；读到历史坏值会整段丢弃并告警，插件照常启动。
+- **权限 0600**：文件同 `security.apiToken` 一样按属主可读写落盘（Windows 无 POSIX 权限位，尽力而为）。
 
 ### 第一次使用怎么看效果？
 
 1. 在白名单群里正常聊天。默认按信息势能触发，不是凑够几条消息就立即生成词条。
 2. 等讨论平息。自动记录默认至少需要 12 条消息，平息观察期默认是 300 秒。
-3. 有新词条后，从知识库的 `index.md` 查看索引；启用 Koishi 网页服务后，也可以打开 `/patchouli` 阅读面板。
+3. 有新词条后，从知识库的 `index.md` 查看索引；启用 Koishi 网页服务后，也可以在 Console 里打开「LLMWiki」浮窗查阅。
 
-想使用面板时，可以在插件配置页设置专用密钥 `security.apiToken`，然后按页面提示登录。
-面板的群聊筛选适合找某个群的讨论；记得原话但忘了标题时，可以用关键词搜索正文。
+想使用浮窗时，可以在插件配置页设置专用密钥 `security.apiToken`，然后按浮窗提示登录。
+浮窗的群聊筛选适合找某个群的讨论；记得原话但忘了标题时，可以用关键词搜索正文。
 
 ### 数据保存在哪里？
 

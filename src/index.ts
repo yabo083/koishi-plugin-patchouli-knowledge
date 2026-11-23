@@ -20,6 +20,9 @@ export * from './wiki/topics';
 export * from './wiki/public-view';
 export * from './wiki/mask';
 export * from './plugin/index';
+// 启动期迁移判据与「读不懂的 settings.json」错误类型：`plugin/index.ts` 的显式转发列表
+// 由插件主入口维护，这里按名补一条，让包入口（以及调用方）能直接引用。
+export { readTargetBindingMigration, SettingsDocumentError } from './plugin/settings-store';
 export * from './plugin/rich-message';
 export * from './plugin/media-registry';
 export * from './plugin/card';
@@ -29,10 +32,9 @@ export * from './plugin/topic-scheduler';
 export * from './plugin/albums';
 export * from './plugin/scribe';
 export * from './plugin/weekly-schedule';
-export * from './web/ui';
+export * from './plugin/weekly-album';
 export * from './web/api';
 export * from './web/media-proxy';
-export * from './web/tactical-dock';
 export * from './telemetry/ring-buffer';
 export * from './telemetry/ledger';
 export * from './telemetry/inspector';

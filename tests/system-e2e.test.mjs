@@ -15,6 +15,16 @@ function responsesPayload(text, tokens = 10) {
   };
 }
 
+/** 有界轮询：等异步沉淀落地。固定 sleep 在全量并行跑时会输给 CPU 争抢（曾稳定报 notifications=0）。 */
+async function waitFor(check, timeoutMs = 10_000, intervalMs = 25) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
 const E2E_WIKI_DIR = path.resolve('tmp/e2e-llmwiki');
 
 test('SYSTEM-E2E: 端到端完整链路 (消息流 -> 突发感应 -> 迟智平息 -> 知识沉淀 -> llmwiki/存储 -> 参数自适应)', async () => {
@@ -130,8 +140,16 @@ test('SYSTEM-E2E: 端到端完整链路 (消息流 -> 突发感应 -> 迟智平�
     timestamp: now,
   });
 
-  // 等待微任务异步沉淀完成
-  await new Promise((r) => setTimeout(r, 100));
+  // 等待异步沉淀落地（调度 → 落盘 → 播报 → 调参）：断言仍要求恰好 1 条播报，只是改成等到。
+  assert.equal(
+    await waitFor(async () => {
+      if (notifications.length === 0) return false;
+      const states = await system.localStore.listCadenceStates();
+      return states.some((state) => state.channelId === channelId);
+    }),
+    true,
+    '沉淀应在 10 秒内完成',
+  );
 
   // 3. 验证轻量播报已产生
   assert.equal(notifications.length, 1);

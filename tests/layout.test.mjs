@@ -7,6 +7,7 @@ import {
   Config,
   DEFAULT_WIKI_SUBDIR,
   ensureWikiLayout,
+  flattenConfig,
   resolveWikiDir,
   resolveWikiLayout,
 } from '../lib/index.js';
@@ -31,7 +32,7 @@ test('LAYOUT-02: 相对路径基于 baseDir 锚定，绝对路径原样使用', 
 });
 
 test('LAYOUT-03: Config 的 storage.wikiDir 默认即 data/llmwiki（相对 baseDir）', () => {
-  const resolved = Config({});
+  const resolved = flattenConfig(Config({}));
   assert.equal(resolved.storage.wikiDir, 'data/llmwiki');
   assert.equal(
     resolveWikiDir(resolved.storage.wikiDir, TEST_BASE_DIR),
