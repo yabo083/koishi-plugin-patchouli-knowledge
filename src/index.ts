@@ -67,7 +67,9 @@ export {
 
 import { name, Config, inject, apply, schema, reusable, PluginOptions, PatchouliKnowledgeSystem } from './plugin/index';
 
-// `reusable` 必须从**包入口**再导出：Koishi 按 package.json 的 main 加载 `lib/index.js`，
-// 只在 `plugin/index` 里声明等于没声明（0.8.55 的漏项，0.8.56 修正）。
+// 绝对不要 `export default apply`：`@koishijs/loader` 的 `unwrapExports` 是
+// `module?.default || module`，一旦存在 default，loader 拿到的是**裸 apply 函数**，
+// `reusable` / `Config` / `inject` / `name` 全部丢失 → `isForkable=false`：控制台黄条
+// 常驻、状态点不跟随、启停作用在共享 runtime 上（ADR-023）。
+// 官方插件的 esbuild 产物都是命名空间导出，没有 default——这里跟随同一形状。
 export { name, Config, schema, inject, apply, reusable, PluginOptions, PatchouliKnowledgeSystem };
-export default apply;

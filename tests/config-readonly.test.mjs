@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 import { Config, PatchouliKnowledgeSystem, name as pluginName, reusable } from '../lib/index.js';
 
@@ -73,4 +74,19 @@ test('PLUGIN-REUSABLE-01: 包入口导出 reusable，消除控制台的「已在
   assert.equal(pluginName, 'patchouli-knowledge');
   // 必须是**入口**导出：只声明在 plugin/index 里 Koishi 看不到。
   assert.equal(reusable, true);
+});
+
+/**
+ * `@koishijs/loader` 的 `unwrapExports(module) = module?.default || module`：一旦入口有
+ * `default` 导出，loader 拿到的是**裸 apply 函数**，`reusable` / `Config` / `inject` / `name`
+ * 全部丢失 → `isForkable=false`（控制台黄条常驻、状态点不跟随）。ADR-023。
+ */
+test('PLUGIN-ENTRY-02: 包入口不得有 default 导出，且元数据挂在模块对象上', () => {
+  const require = createRequire(import.meta.url);
+  const entry = require('../lib/index.js');
+  assert.equal(entry.default, undefined, '入口不得导出 default（会短路 loader 的元数据读取）');
+  assert.equal(typeof entry.apply, 'function', 'loader 从模块对象上取 apply');
+  assert.equal(entry.reusable, true);
+  assert.equal(typeof entry.inject, 'object');
+  assert.ok(entry.Config, 'Config/Schema 必须挂在模块对象上');
 });
