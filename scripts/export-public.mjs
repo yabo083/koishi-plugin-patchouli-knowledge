@@ -82,8 +82,13 @@ async function copyEntry(source, destination, report) {
 }
 
 const report = { files: 0, hits: [] };
-await fs.rm(TARGET, { recursive: true, force: true });
+// 目标目录通常就是公开仓库的工作树：只清内容、保留 `.git`，否则每次导出都会丢掉
+// 提交历史，强制重走 init/fetch（2026-11-23 踩过）。
 await fs.mkdir(TARGET, { recursive: true });
+for (const name of await fs.readdir(TARGET)) {
+  if (name === '.git') continue;
+  await fs.rm(path.join(TARGET, name), { recursive: true, force: true });
+}
 
 for (const entry of WHITELIST) {
   const source = path.join(REPO, entry);
