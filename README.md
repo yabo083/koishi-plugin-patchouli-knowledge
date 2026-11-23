@@ -1,4 +1,4 @@
-# Patchouli Knowledge（不动的大图书馆）
+# 帕秋莉的知识库（Patchouli Knowledge）
 
 一个 Koishi 插件：等群里的讨论告一段落，再把大家的观点、共识和仍有争议的问题整理成可检索的本地 llmwiki 词条。
 
