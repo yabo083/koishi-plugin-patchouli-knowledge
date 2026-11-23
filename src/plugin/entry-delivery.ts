@@ -16,6 +16,13 @@ export type EntryDeliveryTarget =
 /** 相册目标串：`<group_id>/<album_id>`，两侧空白会被裁剪。 */
 const ALBUM_PATTERN = /^([^/]+)\/(.+)$/u;
 
+/** 去掉 `onebot:` 之类的平台前缀，只留群号本身，用于跨形态比较。 */
+function groupIdOf(channelId: string): string {
+  const trimmed = channelId.trim();
+  const index = trimmed.lastIndexOf(':');
+  return index >= 0 ? trimmed.slice(index + 1) : trimmed;
+}
+
 function withPlatform(channelId: string): string {
   return channelId.includes(':') ? channelId : `onebot:${channelId}`;
 }
@@ -30,12 +37,16 @@ function withPlatform(channelId: string): string {
 export function planEntryTargets(
   albums: readonly string[],
   redirectChannelId: string,
+  sourceChannelId = '',
 ): EntryDeliveryTarget[] {
   const redirect = redirectChannelId.trim();
   if (redirect !== '') {
     return [{ kind: 'channel', channelId: withPlatform(redirect) }];
   }
 
+  // 词条只投递到**它自己所属群**的相册：albums 是「哪些群允许收卡片」的白名单，
+  // 不是「所有词条都发到这里」的广播目标。来源群在名单里才投，其余静默跳过。
+  const sourceGroup = groupIdOf(sourceChannelId);
   const targets: EntryDeliveryTarget[] = [];
   const seen = new Set<string>();
   for (const value of albums) {
@@ -44,6 +55,7 @@ export function planEntryTargets(
     const groupId = match[1].trim();
     const albumId = match[2].trim();
     if (groupId === '' || albumId === '') continue;
+    if (sourceGroup !== '' && groupIdOf(groupId) !== sourceGroup) continue;
     const key = `${groupId}/${albumId}`;
     if (seen.has(key)) continue;
     seen.add(key);

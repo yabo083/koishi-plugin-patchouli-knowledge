@@ -33,3 +33,19 @@ test('ENTRY-DELIVER-04: 非法与重复的相册目标被丢弃', () => {
 test('ENTRY-DELIVER-05: 既无相册也未改道时返回空表（调用方据此告警）', () => {
   assert.deepEqual(planEntryTargets([], '   '), []);
 });
+
+test('ENTRY-DELIVER-06: 词条只投递到自身所属群的相册（不跨群广播）', () => {
+  const albums = ['100000001/album-a', '100000003/album-b'];
+
+  // 来源群在名单里：只取它自己的相册
+  assert.deepEqual(planEntryTargets(albums, '', 'onebot:100000003'), [
+    { kind: 'album', channelId: 'onebot:100000003', albumId: 'album-b' },
+  ]);
+  // 平台前缀形态不影响匹配
+  assert.deepEqual(planEntryTargets(albums, '', '100000001'), [
+    { kind: 'album', channelId: 'onebot:100000001', albumId: 'album-a' },
+  ]);
+  // 来源群不在名单里：静默不投递，绝不借用别人群的相册
+  assert.deepEqual(planEntryTargets(albums, '', 'onebot:199999999'), []);
+  assert.deepEqual(planEntryTargets(['100000003/album-b'], '', 'onebot:100000001'), []);
+});

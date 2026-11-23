@@ -413,55 +413,55 @@ export const CHATLUNA_MODEL_INHERIT = '无';
  * （`POST <base>/api/prompt`），控制台配置表单不提供任何提示词项。
  */
 const dispatcherCommonFields = () => ({
-  temperature: Schema.number().default(0.3).description('采样温度（高级覆盖）').hidden(),
-  maxTokens: Schema.number().default(6000).description('单次总结最大生成 Token（高级覆盖）').hidden(),
-  enableAutoTuning: Schema.boolean().default(true).description('允许调度器自动微调触发参数（高级覆盖）').hidden(),
+  temperature: Schema.number().default(0.3).description('模型采样温度。').hidden(),
+  maxTokens: Schema.number().default(6000).description('单次总结最大生成 Token 数。').hidden(),
+  enableAutoTuning: Schema.boolean().default(true).description('允许调度器自动微调触发参数。').hidden(),
 });
 
 /** custom 分支的端点字段：ChatLuna 通道下这些键不渲染、也不被读取。 */
 const dispatcherCustomFields = () => ({
   baseURL: Schema.string()
     .default('https://api.openai.com/v1')
-    .description('端点根地址（OpenAI 兼容 /v1 或 Gemini 原生 /v1beta）；协议自动探测：Responses → Gemini → Chat Completions'),
-  apiKey: Schema.string().role('secret').default('').description('API Key（绝不写入日志或词条）'),
-  customModel: Schema.string().default('').description('端点侧的模型名（如 gpt-5 / gemini-2.5-pro / deepseek-chat）'),
+    .description('接口根地址，支持 OpenAI 或 Gemini 协议。'),
+  apiKey: Schema.string().role('secret').default('').description('API 密钥，绝不入日志，勿与阅读面板密钥混用。'),
+  customModel: Schema.string().default('').description('端点模型名，如 gpt-5 或 deepseek-chat。'),
   protocol: Schema.union(['auto', 'responses', 'gemini', 'chat-completions'] as const)
     .default('auto')
     .hidden()
-    .description('端点协议（高级覆盖；默认 auto 自动探测）'),
+    .description('端点协议，默认 auto 自动探测。'),
   responseFormat: Schema.union(['json_object', 'structured', 'text'] as const)
     .default('json_object')
     .hidden()
-    .description('输出格式（高级覆盖，默认 json_object）'),
+    .description('模型输出格式，默认 json_object。'),
   contractRetries: Schema.number()
     .min(0)
     .max(3)
     .step(1)
     .default(1)
     .hidden()
-    .description('契约校验未通过时的追加重试次数（默认 1；每次都是一次完整模型调用）'),
+    .description('格式校验未通过时的追加重试次数。'),
 });
 
 const dispatcherSchema = Schema.intersect([
   Schema.object({
     provider: Schema.union([
-      Schema.const('chatluna').description('ChatLuna'),
-      Schema.const('custom').description('自定义端点'),
+      Schema.const('chatluna').description('ChatLuna（继承平台配置）'),
+      Schema.const('custom').description('自定义端点（须填 baseURL 与模型名）'),
       // 旧配置里的 `auto` / `standalone`：留在枚举里才能通过配置校验（`.hidden()` 使其不进下拉），
       // 由下面的历史分支认领并原样保留，运行时归一化为 chatluna / custom。
       Schema.const('standalone').hidden(),
       Schema.const('auto').hidden(),
     ])
       .default('chatluna')
-      .description('chatluna = 继承平台模型与凭据；custom = 自定义端点'),
+      .description('custom 须填 baseURL 与模型名；chatluna 继承平台。'),
     // 0.8.43 及以前的单键：同一份值既当 ChatLuna 模型 id 又当端点模型名，控制台切 provider
     // 即互相覆盖。保留声明只为让旧配置过 Schema 校验（不渲染、不可编辑），
     // 运行时由 `resolveDispatcherModels` 只回填**当前**通道。
-    model: Schema.string().default('').hidden().description('历史单键（已废弃，仅用于兼容旧配置）'),
+    model: Schema.string().default('').hidden().description('旧版模型配置，仅用于向下兼容。'),
   })
     // 分区标题挂在这个元素上：intersect 的 meta 会被复制到每个元素（3 个元素 = 3 个重复标题），
     // 所以标题只能放在单个元素上。
-    .description('大模型调度器'),
+    .description('大模型调度器。'),
   Schema.union([
     // 首个分支**不能**写 `.required()`：provider 等于公共默认值 `chatluna` 时控制台会把该键
     // 从表单值里省略，带 required 的 const 会因此判为不匹配、整个分支塌成空白（实测）。
@@ -470,7 +470,7 @@ const dispatcherSchema = Schema.intersect([
       provider: Schema.const('chatluna'),
       chatlunaModel: Schema.dynamic('model')
         .default(CHATLUNA_MODEL_INHERIT)
-        .description('ChatLuna 模型（候选项来自已加载的平台模型；选「无」继承平台默认模型）'),
+        .description('ChatLuna 模型，留空继承平台默认模型。'),
     }),
     Schema.object({
       provider: Schema.const('custom').required(),
@@ -497,120 +497,120 @@ const dispatcherSchema = Schema.intersect([
 });
 
 export const Config: Schema<PluginOptions> = Schema.object({
-  enabled: Schema.boolean().default(true).description('启用沉淀监听'),
-  channels: Schema.array(Schema.string()).default([]).description('群聊白名单，留空监听全部群（公开版本不预置任何真实群号）'),
+  enabled: Schema.boolean().default(true).description('是否启用群聊讨论沉淀。'),
+  channels: Schema.array(Schema.string()).default([]).description('群聊白名单，留空监听全部群，不是禁用。'),
   adminUsers: Schema.array(Schema.string())
     .default([])
     .description(
-      '自动书记（patchouli.logon / .logoff）的管理员 QQ 号白名单；留空表示无人可用（fail closed）',
+      '自动书记管理员 QQ 白名单，留空表示无人可用。',
     ),
-  notifyOnSummarized: Schema.boolean().default(false).description('【绝对静默原则】沉淀完成后是否在群内轻提示（内部常量 false）').hidden(),
+  notifyOnSummarized: Schema.boolean().default(false).description('沉淀完成后是否在群内轻提示。').hidden(),
   topics: Schema.object({
-    enabled: Schema.boolean().default(true).description('是否启用每日「主题校准」作业（把新词条归入长期主题）'),
-    hour: Schema.number().default(4).description('每日触发时刻（本地时区，0~23）'),
-    minute: Schema.number().default(0).description('每日触发分钟（0~59）'),
-    mergeThreshold: Schema.number().default(0.5).description('标签 Jaccard 相似度门限，达到即归入同一主题 / 同簇'),
-    minEntries: Schema.number().default(1).description('窗内待归入词条少于此数则不跑校准'),
-    lookbackDays: Schema.number().default(30).description('回看窗口天数：只看窗口内尚未归入任何主题的词条'),
-    maxSessionsPerRun: Schema.number().default(20).description('单次最多读取多少个原始会话'),
-    maxMessagesPerSession: Schema.number().default(60).description('单个会话最多提交多少条原始消息'),
-  }).description('每日「主题校准」：把窗口内未归档的词条并入已有主题或新建主题（面板可调，控制台不再展示）').hidden(),
+    enabled: Schema.boolean().default(true).description('是否启用每日主题校准。'),
+    hour: Schema.number().default(4).description('每日校准触发的小时（0～23）。'),
+    minute: Schema.number().default(0).description('每日校准触发的分钟（0～59）。'),
+    mergeThreshold: Schema.number().default(0.5).description('标签相似度阈值，达到即归入同一主题。'),
+    minEntries: Schema.number().default(1).description('待处理词条少于此数则跳过校准。'),
+    lookbackDays: Schema.number().default(30).description('回看天数，仅处理窗口内未归档词条。'),
+    maxSessionsPerRun: Schema.number().default(20).description('单次校准最多读取的会话数。'),
+    maxMessagesPerSession: Schema.number().default(60).description('单会话最多提交的原始消息条数。'),
+  }).description('每日主题校准，将新词条归入或新建主题。').hidden(),
   albumDelivery: Schema.object({
     entryEnabled: Schema.boolean()
       .default(true)
-      .description('每轮讨论沉淀后立即把词条长图投到下面的相册（关闭后只沉淀不发图）'),
+      .description('每轮沉淀后是否将词条长图发至相册。'),
     entryRedirectChannelId: Schema.string()
       .default('')
-      .description('灰度改道：填群号则所有词条卡片改发该群聊天、不进相册；留空按相册投递'),
+      .description('改道群号，填群号则发聊天不进相册。'),
     cron: Schema.string()
       .default(DEFAULT_WEEKLY_CRON)
-      .description('主题周报定时表达式（标准五段 cron，默认本地时区）。调度器由 miyako-delivery 提供，改完保存即重新排程'),
+      .description('主题周报定时表达式（五段），由 miyako-delivery 调度。'),
     albums: Schema.array(Schema.dynamic(ALBUM_SCHEMA_KEY))
       .default([])
-      .description('词条与主题共用的目标相册：候选由控制台自动探测（白名单群 ∪ 机器人所在群），在线刷新，无需重启'),
-  }).description('相册投递：讨论后发词条、按周发主题'),
+      .description('词条与主题的目标相册，支持在线刷新。'),
+  }).description('相册投递：讨论后发词条，每周发主题。'),
   query: Schema.object({
-    cardMaxHeight: Schema.number().default(6000).description('词条长图最大高度（CSS px；高级覆盖）').hidden(),
-  }).description('长图渲染参数（内部配置，控制台不展示）').hidden(),
+    cardMaxHeight: Schema.number().default(6000).description('词条长图最大像素高度。').hidden(),
+  }).description('长图渲染参数。').hidden(),
   security: Schema.object({
     apiToken: Schema.string()
       .role('secret')
       .default('')
-      .description('管理面 API 密钥：留空即所有 /patchouli/api 请求 401（公网部署前必须填写）。浏览器只用它换 12h 会话票据'),
-  }).description('管理面鉴权（fail closed）'),
+      .description('管理面密钥，留空则所有 /api 请求返回 401。'),
+  }).description('管理接口鉴权设置。'),
   media: Schema.object({
     offline: Schema.boolean()
       .default(false)
-      .description('离线模式：不抓新素材，已用过的图与一言冷却后回到队列复用（环形缓冲）'),
-    lowWater: Schema.number().default(12).description('可用素材低于此数即补货'),
-    batch: Schema.number().default(8).description('单次补货条数'),
-    cooldownHours: Schema.number().default(6).description('离线模式下已用素材的冷却时长（小时）'),
-    dir: Schema.string().default('').description('素材目录（留空为 <知识库>/.patchouli/media）'),
+      .description('离线模式，不抓取新素材，循环复用旧素材。'),
+    lowWater: Schema.number().default(12).description('可用素材低于此数时自动补货。'),
+    batch: Schema.number().default(8).description('单次补货的素材数量。'),
+    cooldownHours: Schema.number().default(6).description('离线复用前已用素材的冷却小时数。'),
+    dir: Schema.string().default('').description('素材目录，留空使用知识库默认目录。'),
     imageSource: Schema.string()
       .default('https://uapis.cn/api/v1/random/image?category=acg&type=pc')
-      .description('背景图来源（HTTP(S)，允许 302；公开端点无需密钥）'),
+      .description('背景图接口地址，支持 HTTP 重定向。'),
     sayingSource: Schema.string()
       .default('https://uapis.cn/api/v1/saying')
-      .description('一言来源（返回 JSON { text }；公开端点无需密钥）'),
+      .description('一言接口地址，需返回含 text 的 JSON。'),
     apiKey: Schema.string()
       .role('secret')
       .default('')
-      .description('可选：素材来源的 key（留空即匿名调用；填写后作为 key 参数附加到两个来源 URL）'),
-  }).description('卡片素材池：背景图与一言的预取 / 消费 / 离线复用'),
+      .description('素材接口密钥，留空为匿名调用。'),
+  }).description('卡片素材池，管理背景图与一言。'),
   trigger: Schema.object({
-    windowSizeSeconds: Schema.number().default(60).description('瞬时滑动窗口（秒）'),
-    burstMultiplier: Schema.number().default(2.5).description('突发讨论倍率阈值'),
-    minBurstRate: Schema.number().default(6).description('触发突发的最低绝对速率（条/分）'),
-    quiescenceSeconds: Schema.number().default(300).description('平息静默观察期（秒）'),
-    coolingRatioThreshold: Schema.number().default(1.1).description('回落常态倍率下限'),
-    minDiscussionMessages: Schema.number().default(12).description('单次有效沉淀最低消息条数'),
-    maxBufferMessages: Schema.number().default(500).description('最大缓存消息数'),
-    baselineEwmaAlpha: Schema.number().default(0.05).description('动态基线 EWMA 平滑系数'),
-    triggerMode: Schema.union(['rate', 'potential', 'shadow'] as const).default('potential').description('触发判据模式（rate=频率现状 / potential=信息势能 / shadow=影子对照只观测不裁决）'),
-    thetaMin: Schema.number().default(POTENTIAL_SEEDING.thetaMin).description('势能突发门限下限 Θ_min（nat 累加）'),
+    windowSizeSeconds: Schema.number().default(60).description('发言速率检测的瞬时滑动窗口（秒）。'),
+    burstMultiplier: Schema.number().default(2.5).description('判定突发讨论的速率倍率阈值。'),
+    minBurstRate: Schema.number().default(6).description('触发突发的最低绝对速率（条/分）。'),
+    quiescenceSeconds: Schema.number().default(300).description('判定讨论平息的静默观察期（秒）。'),
+    coolingRatioThreshold: Schema.number().default(1.1).description('平息回落常态倍率下限。'),
+    minDiscussionMessages: Schema.number().default(12).description('单次有效沉淀的最低消息条数。'),
+    maxBufferMessages: Schema.number().default(500).description('最多缓存的历史消息条数。'),
+    baselineEwmaAlpha: Schema.number().default(0.05).description('动态速率基线的平滑系数。'),
+    triggerMode: Schema.union(['rate', 'potential', 'shadow'] as const).default('potential').description('rate只看发言频率，potential看信息势能，shadow两套并列只观测。'),
+    thetaMin: Schema.number().default(POTENTIAL_SEEDING.thetaMin).description('势能突发阈值下限。'),
     potentialAutoTuning: Schema.boolean()
       .default(false)
-      .description('shadow 对照时两套判据门限同步参与 AIMD（同一控制器同一时钟；默认关，仅做对照时开启）'),
+      .description('shadow 模式下两套门限同步参与自动调优。'),
     dispatchMargin: Schema.number()
       .default(1.2)
       .description(
-        '调度质量门：结算后 peakQ < Θ_burst × 此值时跳过云端调度（0=关闭）。默认 1.2 与势能默认配套：只放行明显过阈的轮次',
+        '调度质量门，过滤弱讨论，0 为关闭。',
       ),
     densityMultiplier: Schema.number()
       .default(1)
       .description(
-        '密度基线倍率：ρ_eff = max(ρ_min, 此值 × b_ρ)，0=只用固定 ρ_min（默认 1=下限随本群密度量级浮动）',
+        '密度基线倍率，设为 0 使用固定下限。',
       ),
     peakCoolFraction: Schema.number()
       .default(0.5)
       .description(
-        '峰值冷却比例：Θ_cool 抬到 max(基线, 本轮峰值 × 此值)，封顶 Θ_burst×0.99（0=纯基线口径，默认 0.5）',
+        '峰值冷却比例，设为 0 仅按基线计算。',
       ),
-    rhoMin: Schema.number().default(POTENTIAL_SEEDING.rhoMin).description('信息密度下限 ρ_min（每条平均 nat 增量）'),
-  }).description('自适应突发与平息触发器配置（面板按群校准，控制台不展示）').hidden(),
+    rhoMin: Schema.number().default(POTENTIAL_SEEDING.rhoMin).description('单条消息的平均信息密度下限。'),
+  }).description('自适应突发与平息触发器配置。').hidden(),
   dispatcher: dispatcherSchema,
   judge: Schema.object({
     enabled: Schema.boolean()
       .default(false)
-      .description('启用本地 System-1 判决服务（默认关闭；关闭时门控直通、边界裁决不触发）'),
-    baseURL: Schema.string().default('http://127.0.0.1:5070').description('jev.service 基础地址'),
-    apiKey: Schema.string().role('secret').default('').description('Bearer 令牌'),
+      .description('启用本地裁判服务，关闭则门控直通。'),
+    baseURL: Schema.string().default('http://127.0.0.1:5070').description('本地裁判服务基础地址。'),
+    apiKey: Schema.string().role('secret').default('').description('裁判服务的 Bearer 令牌。'),
     model: Schema.string().default('jev-local').hidden(),
     timeoutMs: Schema.number().default(8000).hidden(),
   })
-    .description('本地 System-1 裁判（opt-in）')
+    .description('本地裁判服务配置。')
     .hidden(),
   storage: Schema.object({
-    wikiDir: Schema.string().default(DEFAULT_WIKI_SUBDIR).description('知识库根目录'),
-    databasePath: Schema.string().description('索引存储路径'),
-  }).description('存储'),
+    wikiDir: Schema.string().default(DEFAULT_WIKI_SUBDIR).description('知识库根目录路径。'),
+    databasePath: Schema.string().description('索引数据库存储路径。'),
+  }).description('本地存储路径配置。'),
   observability: Schema.object({
     discardDumps: Schema.boolean()
       .default(false)
       .description(
-        '把被判定不沉淀的整轮讨论留证到 <wikiDir>/.patchouli/discards/（排障用；默认关闭，开启后仍受 40 份 / 8 MiB / 单条 2000 字三重上限）',
+        '转储未沉淀讨论至 discards 目录供排障。',
       ),
-  }).description('可观测性与排障留证（高级覆盖）').hidden(),
+  }).description('运行可观测性与排障留证配置。').hidden(),
 }) as unknown as Schema<PluginOptions>;
 
 export class PatchouliKnowledgeSystem {
@@ -1757,7 +1757,11 @@ export function apply(ctx: Context, config: PluginOptions): void {
   system.setEntryCardSink(async (entryId: string, sourceChannelId: string) => {
     const albumConfig = config.albumDelivery;
     if (albumConfig.entryEnabled === false) return;
-    const targets = planEntryTargets(albumConfig.albums, albumConfig.entryRedirectChannelId);
+    const targets = planEntryTargets(
+      albumConfig.albums,
+      albumConfig.entryRedirectChannelId,
+      sourceChannelId,
+    );
     if (targets.length === 0) {
       logger.warn(`[Patchouli] 词条《${entryId}》未投递：相册未选择且未配置改道目标`);
       return;
@@ -1808,8 +1812,21 @@ export function apply(ctx: Context, config: PluginOptions): void {
     return service !== undefined && typeof service.listAlbums === 'function' ? service : undefined;
   }
 
+  /**
+   * 插件卸载标志。
+   *
+   * 相册探测是异步且可跨秒的：unload 之后探测才返回时，`ctx.schema.set` 会在已销毁的
+   * context 上创建 effect，cordis 抛 `cannot create effect on inactive context`，
+   * 卸载流程被这条异常打断（表现为「无法停止插件」）。
+   */
+  let disposed = false;
+  ctx.on('dispose', () => {
+    disposed = true;
+  });
+
   /** 把候选注入控制台：`Schema.dynamic` 角色按 key 读取，注入后在线页面立即刷新。 */
   function applyAlbumSchema(albums: readonly AlbumCandidate[]): void {
+    if (disposed) return;
     const schemaHost = (ctx as unknown as { schema?: { set?: (key: string, value: unknown) => void } }).schema;
     if (typeof schemaHost?.set !== 'function') return;
     schemaHost.set(ALBUM_SCHEMA_KEY, albumSchemaUnion(albums, config.albumDelivery.albums));
@@ -1823,6 +1840,7 @@ export function apply(ctx: Context, config: PluginOptions): void {
    * `minGapMs > 0` 时按上次探测时间节流（供控制台连接时按需触发）。
    */
   async function refreshAlbumSchema(): Promise<void> {
+    if (disposed) return;
     const bots = ctx.bots.filter((bot) => bot.platform === 'onebot') as unknown as AlbumBot[];
     const groupIds: string[] = channelGroupIds(config.channels);
     for (const groupId of await listBotGroupIds(bots)) {
@@ -1833,6 +1851,7 @@ export function apply(ctx: Context, config: PluginOptions): void {
       return;
     }
     const discovered = await probeGroupAlbums({ groupIds, bots, service: deliveryAlbumService() });
+    if (disposed) return;
     const previous = await readAlbumCache(system.wikiDir);
     const merged = mergeAlbumCandidates(previous, discovered, groupIds);
     applyAlbumSchema(merged);

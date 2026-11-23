@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-patchouli-knowledge",
-  "version": "0.8.50",
+  "version": "0.8.51",
   "description": "东方幻想乡「不动的大图书馆」帕秋莉·诺蕾姬：基于自适应频率触发的迟智群聊思维碰撞沉淀与 llmwiki 知识库插件",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
