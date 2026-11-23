@@ -1561,21 +1561,37 @@ export class PatchouliKnowledgeSystem {
   }
 
   public dispose(): void {
-    if (this.idleSweepTimer !== null) {
-      clearInterval(this.idleSweepTimer);
-      this.idleSweepTimer = null;
-    }
+    // **卸载路径不可抛**：任何一项清理失败都记日志后继续。
+    // 抛出去会让 loader 的 stop 流程在「移除配置项」之前中断，表现为
+    // 「点停止 → 一两秒后又 apply 回来」，同时 yml 被写回启用态。
+    const safe = (label: string, task: () => void): void => {
+      try {
+        task();
+      } catch (error) {
+        this.logger?.warn?.(
+          `[Patchouli] 卸载清理失败（${label}）: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    };
+    safe('idleSweepTimer', () => {
+      if (this.idleSweepTimer !== null) {
+        clearInterval(this.idleSweepTimer);
+        this.idleSweepTimer = null;
+      }
+    });
     // 先还原猴子补丁，再销毁被织入对象：保证卸载过程中不会调用到已清空的遥测状态。
-    this.inspector.dispose();
-    this.trafficBuckets.clear();
-    this.trafficMonitorStart.clear();
-    this.latestMessages.clear();
-    this.mediaRegistry.clear();
-    this.tuningClocks.clear();
-    this.boundaryAnnotator.reset();
+    safe('inspector', () => this.inspector.dispose());
+    safe('trafficBuckets', () => this.trafficBuckets.clear());
+    safe('trafficMonitorStart', () => this.trafficMonitorStart.clear());
+    safe('latestMessages', () => this.latestMessages.clear());
+    safe('mediaRegistry', () => this.mediaRegistry.clear());
+    safe('tuningClocks', () => this.tuningClocks.clear());
+    safe('boundaryAnnotator', () => this.boundaryAnnotator.reset());
     // 关闭并排空台账：`close()` 返回排空 Promise，已入队的 digest 残片 / 回执仍会落盘。
-    void this.shadowLedger.close().catch(() => undefined);
-    this.detector.dispose();
+    safe('shadowLedger', () => {
+      void this.shadowLedger.close().catch(() => undefined);
+    });
+    safe('detector', () => this.detector.dispose());
   }
 }
 
@@ -2036,8 +2052,21 @@ export function apply(ctx: Context, config: PluginOptions): void {
   });
 
   ctx.on('dispose', () => {
-    topicScheduler.dispose();
-    system.dispose();
+    // 同样不可抛：调度器与系统各清各的，一个失败不得连累另一个。
+    try {
+      topicScheduler.dispose();
+    } catch (error) {
+      logger.warn(
+        `[Patchouli] 卸载清理失败（topicScheduler）: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      system.dispose();
+    } catch (error) {
+      logger.warn(
+        `[Patchouli] 卸载清理失败（system）: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   });
   // 监听群聊消息：使用 Koishi 框架级作用域过滤（ctx.intersect）。
   // 白名单非空时，只有命中 channels 的群聊上下文才会分发 message 事件到本插件：
