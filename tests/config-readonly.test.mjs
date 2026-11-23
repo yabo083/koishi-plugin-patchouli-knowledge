@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { Config, PatchouliKnowledgeSystem } from '../lib/index.js';
+import * as pluginEntry from '../lib/plugin/index.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -62,4 +63,14 @@ test('CONFIG-READONLY-01: 回灌与热更新不修改宿主 config，且热更�
     system.dispose();
     await rm(wikiDir, { recursive: true, force: true });
   }
+});
+
+/**
+ * 控制台在「已停用」状态下对不可 fork 的插件会报「此插件已在运行且不可重用」。
+ * 插件状态全在实例闭包与 `PatchouliKnowledgeSystem` 里、`dispose()` 逐项还原，
+ * 因此声明 `reusable = true` 是安全且必需的（ADR-022）。
+ */
+test('PLUGIN-REUSABLE-01: 声明 reusable，消除控制台的「已在运行且不可重用」告警', () => {
+  assert.equal(pluginEntry.name, 'patchouli-knowledge');
+  assert.equal(pluginEntry.reusable, true);
 });

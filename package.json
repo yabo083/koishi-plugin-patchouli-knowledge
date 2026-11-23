@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-patchouli-knowledge",
-  "version": "0.8.54",
+  "version": "0.8.55",
   "description": "帕秋莉的知识库（Patchouli Knowledge）：Koishi 插件，讨论平息后把群聊整理成本地可检索的 llmwiki 词条",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

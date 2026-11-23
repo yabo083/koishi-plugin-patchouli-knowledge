@@ -1625,6 +1625,14 @@ export const inject = {
 };
 
 /**
+ * 声明可重入：插件全部状态挂在 `apply()` 的实例闭包与 `PatchouliKnowledgeSystem` 上，
+ * `dispose()` 逐项还原（定时器 / 路由 / 猴子补丁 / 子 scope 订阅）。缺这一条时 loader
+ * 认为实例不可复用，控制台在「已停用」状态下对着仍在注册表里的 runtime 报
+ * 「此插件已在运行且不可重用」——启停看起来就不干净（0.8.55）。
+ */
+export const reusable = true;
+
+/**
  * 宿主是否已有可挂路由的快照面。
  *
  * `registerWebUi` 在 `ctx.server` / 旧宿主自有 `ctx.router` 缺失时静默跳过；这里先判断，
