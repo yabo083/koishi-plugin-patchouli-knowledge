@@ -184,9 +184,9 @@ export function authBootstrap(basePath: string): string {
     });
   };
 
-  /**
-   * 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
+  /* 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
    * 独立页面在加载时调用，Console 组件在打开悬浮窗时调用；重复调用幂等。
+   * dismiss 供宿主路由离开本插件页时收起模态——否则遮罩会跟着留在别人的插件页上。
    */
   const gate = (message) => {
     if (overlayOpen) return;
@@ -218,7 +218,7 @@ export function authBootstrap(basePath: string): string {
       .catch(() => undefined);
   };
 
-  window.__ptxAuth = { gate, hasSession: () => session() !== null };
+  window.__ptxAuth = { gate, dismiss: finish, hasSession: () => session() !== null };
 })();`;
 }
 

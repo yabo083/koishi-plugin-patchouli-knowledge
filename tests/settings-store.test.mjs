@@ -864,3 +864,78 @@ test('SETTINGS-STORE-13: 读不懂的 settings.json 拒绝写入（文件原样�
     await cleanup(wikiDir);
   }
 });
+
+test('SETTINGS-STORE-14: 改 topics 段必须重排主题调度器，其他段与同值写入不重排', async () => {
+  const wikiDir = await makeWiki();
+  try {
+    const system = new PatchouliKnowledgeSystem(Config({ storage: { wikiDir } }), quiet);
+    try {
+      await system.ready;
+      let reschedules = 0;
+      // 调度器接口只用到 reschedule：这里挂一个记账桩，断言的是「何时重排」。
+      system.attachTopicScheduler({
+        reschedule: () => {
+          reschedules += 1;
+        },
+      });
+
+      assert.equal((await system.updateSettings('query', { cardMaxHeight: 7200 })).ok, true);
+      assert.equal(reschedules, 0, '与主题无关的段不得重排定时器');
+
+      assert.equal((await system.updateSettings('topics', { minute: 30 })).ok, true);
+      assert.equal(reschedules, 1, '改 hour/minute 必须按新值重排');
+      assert.equal(system.topicConfig.minute, 30, '调度器持有的实时引用同源');
+
+      assert.equal((await system.updateSettings('topics', { minute: 30 })).ok, true);
+      assert.equal(reschedules, 1, '写入相同值不得重排');
+
+      assert.equal((await system.updateSettings('topics', { enabled: false })).ok, true);
+      assert.equal(reschedules, 2, '禁用同样要重排（只清定时器，不再排）');
+
+      // 旧写入口（`POST /api/topics/settings`）走 updateTopicSettings：同样必须重排。
+      const legacy = await system.updateTopicSettings({ minute: 45 });
+      assert.equal(legacy.minute, 45);
+      assert.equal(reschedules, 3, '旧写入口不得绕过定时器重排');
+    } finally {
+      system.dispose();
+    }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-15: 保存 media.dir 后素材池立即换扫描根', async () => {
+  const wikiDir = await makeWiki();
+  const firstDir = path.join(wikiDir, 'media-a');
+  const secondDir = path.join(wikiDir, 'media-b');
+  try {
+    const system = new PatchouliKnowledgeSystem(
+      Config({ storage: { wikiDir }, media: { dir: firstDir } }),
+      quiet,
+    );
+    try {
+      await system.ready;
+      await mkdir(path.join(firstDir, 'image', 'pending'), { recursive: true });
+      await writeFile(path.join(firstDir, 'image', 'pending', 'a-01.png'), 'png');
+      assert.deepEqual(await system.media.stats('image'), { pending: 1, used: 0 });
+
+      const saved = await system.updateSettings('media', { dir: secondDir });
+      assert.equal(saved.ok, true);
+      await mkdir(path.join(secondDir, 'image', 'pending'), { recursive: true });
+      await writeFile(path.join(secondDir, 'image', 'pending', 'b-01.png'), 'png');
+      assert.deepEqual(
+        await system.media.stats('image'),
+        { pending: 1, used: 0 },
+        '必须在新的扫描根下统计（旧目录里那条不该再算进来）',
+      );
+
+      // 清空新根 → 归零：证明读的确实是新目录，而不是把旧目录的结果缓存下来。
+      await rm(path.join(secondDir, 'image'), { recursive: true, force: true });
+      assert.deepEqual(await system.media.stats('image'), { pending: 0, used: 0 });
+    } finally {
+      system.dispose();
+    }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});

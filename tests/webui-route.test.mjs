@@ -9,9 +9,9 @@ import fs from 'node:fs';
  * 的 `checkRoute()` 里。这里按既有 WEBUI 契约测试的路径把产物当函数体载入（只替换掉 default
  * 导出），用最小 DOM 桩驱动 `checkRoute()`，断言的是「哪些路径会挂载」而非渲染细节。
  *
- * 关键回归点：挂载只看 `/plugins` 前缀，不能绑定某个实例 id —— 宿主换实例、换配置页路径时
- * 仍然必须挂上浮窗，否则那个实例完全没有 UI。软校验（标题 / 面包屑 / 路径里的插件标识）
- * 只决定要不要自动展开，绝不阻止挂载。
+ * 关键回归点：浮窗只认**本插件**的插件页 —— `/plugins/patchouli-knowledge[:实例id]`，或名字是宿主
+ * 生成的随机实例 id 但页面身份文本（标题 / 面包屑 / data-plugin-name）认出本插件。别的插件页一律
+ * 不挂载：宽泛的 `/plugins` 前缀会把全屏鉴权遮罩盖到别人的配置页上。
  */
 const CLIENT_SOURCE = fs.readFileSync(new URL('../client/dist/index.js', import.meta.url), 'utf8');
 
@@ -156,40 +156,42 @@ return {
   );
 }
 
-test('ROUTE-01: /plugins/0848oh 命中软校验并展开面板', () => {
+test('ROUTE-01: 随机实例 id + 页面身份文本命中时挂载并展开（真实部署形态）', () => {
   const api = loadClient({ pathname: '/plugins/0848oh', title: 'Patchouli Knowledge · Koishi' });
   api.checkRoute();
 
-  assert.equal(api.mountCount(), 1, '插件页必须挂载浮窗');
-  assert.equal(api.state.mounted, true);
+  assert.equal(api.routeMatches(), true, '身份文本认出本插件即为本插件页');
+  assert.equal(api.mountCount(), 1, '本插件页必须挂载浮窗');
   assert.equal(api.state.visible, true);
-  assert.equal(api.state.collapsed, false, '软校验命中：面板直接展开');
+  assert.equal(api.state.collapsed, false, '身份命中：面板直接展开');
   assert.equal(api.classes('root').includes('ptx-hidden'), false, '命中后必须摘掉隐藏态');
 });
 
-test('ROUTE-02: 不同实例 id（/plugins/abc123）仍然挂载 —— 回归点', () => {
-  // 路径里既没有 0848oh 也没有插件名，页面文本也读不到任何标识
-  const api = loadClient({ pathname: '/plugins/abc123' });
+test('ROUTE-02: 别的插件的插件页不挂载 —— C1 回归（不得被鉴权遮罩盖住）', () => {
+  const api = loadClient({
+    pathname: '/plugins/adapter-onebot',
+    title: '适配器 · Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置 / onebot',
+  });
   api.checkRoute();
 
-  assert.equal(api.mountCount(), 1, '换实例 id 也必须挂载，否则该实例完全没有入口');
-  assert.equal(api.state.visible, true);
-  assert.equal(api.state.collapsed, true, '认不出本插件页时只保留胶囊');
-  assert.equal(api.classes('frame').includes('is-collapsed'), true, '窗口收回 = 最小胶囊形态');
-  assert.equal(api.classes('pill').includes('is-visible'), true, '胶囊必须是收回态下的唯一入口');
-  assert.equal(api.classes('root').includes('ptx-hidden'), false);
+  assert.equal(api.routeMatches(), false);
+  assert.equal(api.mountCount(), 0, '陌生插件页一律不挂载，否则全屏门禁会盖住宿主页面');
+  assert.equal(api.state.mounted, false);
+  assert.equal(api.state.visible, false);
 });
 
-test('ROUTE-03: /plugins/patchouli-knowledge:xyz 挂载（路径自带插件标识）', () => {
+test('ROUTE-03: /plugins/patchouli-knowledge:实例id 按名字挂载，无需身份文本', () => {
   const api = loadClient({ pathname: '/plugins/patchouli-knowledge:xyz' });
   api.checkRoute();
 
+  assert.equal(api.routeMatches(), true);
   assert.equal(api.mountCount(), 1);
   assert.equal(api.state.visible, true);
-  assert.equal(api.state.collapsed, false, '路径命中插件名即认定为配置页，直接展开');
+  assert.equal(api.state.collapsed, false, '名字命中即认定为配置页，直接展开');
 });
 
-test('ROUTE-04: 非插件页 /other/path 不挂载', () => {
+test('ROUTE-04: 非插件页 /other/path 不挂载（标题里带插件名也不算）', () => {
   const api = loadClient({ pathname: '/other/path', title: 'Patchouli Knowledge' });
   api.checkRoute();
 
@@ -197,57 +199,69 @@ test('ROUTE-04: 非插件页 /other/path 不挂载', () => {
   assert.equal(api.state.visible, false);
 });
 
-test('ROUTE-05: 软校验文本没有任何标识时也不阻止挂载', () => {
+test('ROUTE-05: /plugins/patchouli-knowledge 名字命中，软校验文本为空也照常挂载', () => {
   const api = loadClient({
-    pathname: '/plugins/abc123',
-    title: '插件市场 · Koishi',
-    breadcrumb: '今日运势 / 配置',
+    pathname: '/plugins/patchouli-knowledge',
+    title: 'Koishi',
+    breadcrumb: '插件配置',
   });
   api.checkRoute();
 
-  assert.equal(api.mountCount(), 1, '软校验失败只影响是否自动展开，绝不阻止挂载');
-  assert.equal(api.state.visible, true);
-  assert.equal(api.state.collapsed, true, '不认识的页面保持最小胶囊，不遮挡宿主');
-  assert.equal(api.routeMatches(), true);
+  assert.equal(api.routeMatches(), true, '插件名本身就是唯一身份');
+  assert.equal(api.mountCount(), 1);
+  assert.equal(api.state.collapsed, false);
 });
 
-test('ROUTE-06: hash 路由 /#/plugins/xxx 同样挂载', () => {
-  const api = loadClient({ pathname: '/', hash: '#/plugins/abc123' });
+test('ROUTE-06: hash 路由 /#/plugins/patchouli-knowledge 同样挂载', () => {
+  const api = loadClient({ pathname: '/', hash: '#/plugins/patchouli-knowledge' });
   api.checkRoute();
 
+  assert.equal(api.routeMatches(), true);
   assert.equal(api.mountCount(), 1, 'hash 路由的插件页同样需要入口');
   assert.equal(api.state.visible, true);
 });
 
-test('ROUTE-07: 软校验迟到命中时自动展开一次，且不重复挂载', () => {
+test('ROUTE-07: 身份文本迟到时先不挂载，认出后只挂载一次并自动展开', () => {
   const api = loadClient({ pathname: '/plugins/abc123' });
   api.checkRoute();
-  assert.equal(api.state.collapsed, true, '第一轮读不到标识：先只留胶囊');
+  assert.equal(api.mountCount(), 0, '随机实例 id + 读不到标识：先不认领，别遮住宿主');
 
   // 宿主 SPA 随后画出标题 / 面包屑
   api.doc.title = 'LLMWiki 知识库 · Koishi';
   api.checkRoute();
-  assert.equal(api.state.collapsed, false, '迟到命中：自动展开一次');
-  assert.equal(api.mountCount(), 1, '重复判定不得重复挂载');
+  assert.equal(api.mountCount(), 1, '认出本插件后挂载一次');
+  assert.equal(api.state.collapsed, false, '首帧即展开');
+  assert.equal(api.classes('root').includes('ptx-hidden'), false);
 
-  // 用户手动收回后不再被掀开
+  // 用户手动收回后不再被掀开；重复判定不得重复挂载
   api.state.collapsed = true;
   api.checkRoute();
   assert.equal(api.state.collapsed, true, '自动展开每页只做一次，用户收回后不得再弹开');
+  assert.equal(api.mountCount(), 1, '重复判定不得重复挂载');
 });
 
-test('ROUTE-08: 离开插件页恢复隐藏，返回后重新挂载判定', () => {
-  const api = loadClient({ pathname: '/plugins/abc123' });
+test('ROUTE-08: 离开本插件页恢复隐藏，换到别的插件页仍隐藏，返回后重新显示', () => {
+  const api = loadClient({ pathname: '/plugins/patchouli-knowledge' });
   api.checkRoute();
   assert.equal(api.state.visible, true);
 
   api.win.location.pathname = '/other/path';
+  let dismissed = 0;
+  // 门禁模态由生成块挂在 body 上：离开本插件页必须把它收起来。
+  api.win.__ptxAuth = { dismiss: () => { dismissed += 1; } };
   api.checkRoute();
+  assert.equal(dismissed, 1, '离开本插件页必须收起鉴权模态，别让它跟着盖住别的插件页');
   assert.equal(api.state.visible, false, '离开插件页必须隐藏浮窗');
   assert.equal(api.classes('root').includes('ptx-hidden'), true);
 
-  api.win.location.pathname = '/plugins/abc123';
+  // 换到别的插件的插件页：仍然隐藏 —— 浮窗与鉴权遮罩都不能跟过去。
+  api.doc.title = '适配器 · Koishi';
+  api.win.location.pathname = '/plugins/adapter-onebot';
   api.checkRoute();
-  assert.equal(api.state.visible, true, '回到插件页重新显示');
+  assert.equal(api.state.visible, false, '别的插件页不得恢复浮窗');
+
+  api.win.location.pathname = '/plugins/patchouli-knowledge';
+  api.checkRoute();
+  assert.equal(api.state.visible, true, '回到本插件页重新显示');
   assert.equal(api.mountCount(), 1, '壳层复用，不重复挂载');
 });

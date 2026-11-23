@@ -1251,7 +1251,8 @@ export class PatchouliKnowledgeSystem {
     },
     private readonly onNotify?: (channelId: string, text: string) => Promise<void>,
     dispatcherRuntime?: DispatcherRuntimeOptions,
-    baseDir?: string,
+    /** Koishi 实例根目录：相对路径（wikiDir / 素材目录）一律锚定它，热更新时同样要用。 */
+    private readonly baseDir?: string,
   ) {
     // 控制台的隐藏段（含 0.8.66 的 `advanced` 容器）摊平回顶层：其余代码只读 `this.config.<顶层键>`。
     const config: PluginOptions = flattenConfig(rawConfig);
@@ -1697,7 +1698,11 @@ export class PatchouliKnowledgeSystem {
   private applySettingsOverrides(next: SettingsOverrides, mode: 'patch' | 'replay' = 'patch'): void {
     const previous = this.settingsOverrides;
     this.settingsOverrides = next;
+    // 主题调度器持有 `topicRuntime` 的实时引用：值换了还得重排定时器，
+    // 否则改 `hour` / `minute` 后旧 `setTimeout` 仍按老时刻触发，`enabled` 关掉再打开则永不触发。
+    const topicsBefore = { ...this.topicRuntime };
     Object.assign(this.topicRuntime, this.mergedSection('topics'));
+    if (!deepEqual(topicsBefore, this.topicRuntime)) this.topicScheduler?.reschedule();
     const triggerPatch = mode === 'replay' ? next.trigger : this.changedTriggerKeys(previous.trigger, next.trigger);
     if (triggerPatch !== undefined) {
       try {
@@ -1723,7 +1728,13 @@ export class PatchouliKnowledgeSystem {
     if (judgePatch !== undefined) this.judgeClient.applyOptions(readJudgeOptions(this.mergedSection('judge')));
     const mediaPatch = next.media;
     if (mediaPatch !== undefined) {
+      // 目录与其余参数同一真源（合并值）：面板存了新目录就必须换扫描根，否则「显示已保存、
+      // 进程还在读旧目录」。空目录名的语义与构造期一致——回落到 `<wikiDir>/media`。
+      const mediaMerged = this.mergedSection('media');
       this.media.configure({
+        dir: mediaMerged.dir.trim()
+          ? resolveWikiDir(mediaMerged.dir, this.baseDir)
+          : resolveWikiLayout(this.wikiDir).mediaDir,
         offline: typeof mediaPatch.offline === 'boolean' ? mediaPatch.offline : undefined,
         lowWater: typeof mediaPatch.lowWater === 'number' ? mediaPatch.lowWater : undefined,
         batch: typeof mediaPatch.batch === 'number' ? mediaPatch.batch : undefined,
@@ -1928,7 +1939,10 @@ export class PatchouliKnowledgeSystem {
       );
       this.settingsOverrides = overrides;
     }
+    // 与 applySettingsOverrides 同一契约：值变了就重排定时器（`/api/topics/settings` 是另一条写入口）。
+    const topicsBefore = { ...this.topicRuntime };
     Object.assign(this.topicRuntime, this.mergedSection('topics'));
+    if (!deepEqual(topicsBefore, this.topicRuntime)) this.topicScheduler?.reschedule();
     return this.getTopicSettings();
   }
 
@@ -2222,7 +2236,9 @@ export class PatchouliKnowledgeSystem {
     const tuning = updateParameters(
       { ...before, lastUpdated: this.tuningClocks.get(channelId) },
       signal,
-      this.config.trigger,
+      // 锚点是**当前生效值**（覆盖层 > 宿主 config）：拿 `this.config.trigger` 会让面板里
+      // 改过的 `thetaMin` 在每次 AIMD 步进后被时间向心力拉回 yml 基线。
+      this.settings('trigger'),
       Date.now(),
       { target },
     );
@@ -2807,6 +2823,7 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
     }
     const rendered = await renderEntryCard(ctx, system, entryId, {
       maskNames: system.getCardSettings().maskNames,
+      maxHeight: system.settings('query').cardMaxHeight,
     });
     if (rendered.kind !== 'image') {
       logger.warn(`[Patchouli] 词条《${entryId}》出图失败（${rendered.kind}），本轮不投递`);

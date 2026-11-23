@@ -1286,9 +1286,10 @@ export function registerWebUi(
       kCtx.body = `馆藏中没有《${id}》这篇记载`;
       return;
     }
-    // 与管理面 / 群内投递共用一条出图管线（脱敏 + 素材池 + 序号）。
+    // 与管理面 / 群内投递共用一条出图管线（脱敏 + 素材池 + 序号 + 高度上限）。
     const rendered = await renderEntryCard(ctx, system, id, {
       maskNames: system.getCardSettings().maskNames,
+      maxHeight: system.settings('query').cardMaxHeight,
     });
     if (rendered.kind === 'no-puppeteer') {
       kCtx.status = 503;

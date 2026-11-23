@@ -184,6 +184,19 @@ export class TopicScheduler {
     }
   }
 
+  /**
+   * 配置热更新后按新值重排下一次事件。
+   *
+   * `config` 是本类持有的实时引用：面板改 `hour` / `minute` 后已排的 `setTimeout` 仍是旧
+   * 时刻，`enabled=false` 时 `schedule()` 只清不设——不重排就会出现「改了时间不生效」
+   * 与「关掉再打开后永远不再触发」。这里只重建定时器，不立即补跑（补跑仍由 `tick` 的
+   * 到点 / 重启逻辑负责）。
+   */
+  reschedule(): void {
+    if (this.disposed) return;
+    this.schedule();
+  }
+
   /** 当前水位快照（只读副本，供状态接口 / 测试）。 */
   snapshot(): Record<string, TopicChannelState> {
     const copy: Record<string, TopicChannelState> = {};

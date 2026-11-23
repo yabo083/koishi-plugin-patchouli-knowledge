@@ -55,11 +55,13 @@ const SETTINGS_KEY = 'patchouli.panel-settings';
 const THEME_KEY = 'patchouli-theme';
 const VIEW_KEY = 'patchouli-view-mode';
 const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
-/* 路由前缀：console 的插件页统一挂在 /plugins 下（hash 路由也算）。只看前缀，不认实例 id：
-   实例 id 由宿主的 addEntry 生成，换实例、改配置页路径都可能变，硬编码它等于给某些实例断掉唯一入口。 */
-const ROUTE_PREFIX = '/plugins';
-/* 软校验：只在「要不要自动展开面板」上起作用，绝不参与挂载判定。命中失败最多少一次自动展开，
-   命中失败却阻止挂载才会让整个插件没有 UI。 */
+/* 路由形状：console 的插件页统一挂在 `<uiPath>/<key>`（hash 路由也算），key 通常是插件名，
+   多实例 / 分组时是宿主生成的随机 id。只认「名字就是本插件」或「页面身份文本认出本插件」
+   这两种页——宽泛的 /plugins 前缀会让全屏鉴权门盖住别的插件页。 */
+const ROUTE_SEGMENT = '/plugins/';
+/* 本插件在 console 里的页面名（koishi-plugin- 前缀已去掉）；`:实例 id` 后缀同样命中。 */
+const PLUGIN_ROUTE_NAMES = ['patchouli-knowledge', 'patchouli'];
+/* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」；名字认得出时只影响自动展开。 */
 const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
    面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
@@ -6480,9 +6482,9 @@ function ensureSchemaTagTheme() {
     });
   };
 
-  /**
-   * 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
+  /* 门禁入口：无有效会话时按服务端状态选「首次初始化」或「登录」。
    * 独立页面在加载时调用，Console 组件在打开悬浮窗时调用；重复调用幂等。
+   * dismiss 供宿主路由离开本插件页时收起模态——否则遮罩会跟着留在别人的插件页上。
    */
   const gate = (message) => {
     if (overlayOpen) return;
@@ -6514,7 +6516,7 @@ function ensureSchemaTagTheme() {
       .catch(() => undefined);
   };
 
-  window.__ptxAuth = { gate, hasSession: () => session() !== null };
+  window.__ptxAuth = { gate, dismiss: finish, hasSession: () => session() !== null };
 })();
 // END GENERATED AUTH GATE
 
@@ -6640,12 +6642,33 @@ function unmount() {
   state.restoreStyle = '';
 }
 
-/* 路由判定只认 /plugins 前缀：console 插件页形如 /plugins/:name（多实例时 :name 是实例标识），
-   实例标识与插件名的任何组合都必须挂载，否则那些实例完全没有入口（独立页已删除）。 */
+/* 插件页路由的后半段（`/plugins/<key>` 的 key）；不在插件页返回空串。 */
+function pluginRouteKey() {
+  const routes = [window.location.pathname || '', window.location.hash || ''];
+  for (const route of routes) {
+    const at = route.toLowerCase().indexOf(ROUTE_SEGMENT);
+    if (at < 0) continue;
+    const key = route.slice(at + ROUTE_SEGMENT.length).split(/[/?#]/)[0].toLowerCase();
+    if (key !== '') return key;
+  }
+  return '';
+}
+
+/* key 直接就是本插件（插件名或 `插件名:实例 id`）。 */
+function routeKeyOwned(key) {
+  if (!key) return false;
+  return PLUGIN_ROUTE_NAMES.some((name) => key === name || key.startsWith(`${name}:`));
+}
+
+/* 路由判定：只认本插件的插件页。
+   名字命中（`/plugins/patchouli-knowledge[:id]`）无条件认领；名字是宿主生成的随机实例 id 时，
+   退回页面身份文本（标题 / 面包屑 / data-plugin-name）——别的插件页不会出现本插件标识，
+   因此既不会挂载，也不会被全屏鉴权门遮罩。 */
 function routeMatches() {
-  const path = (window.location.pathname || '').toLowerCase();
-  const hash = (window.location.hash || '').toLowerCase();
-  return `${path}${hash}`.includes(ROUTE_PREFIX);
+  const key = pluginRouteKey();
+  if (key === '') return false;
+  if (routeKeyOwned(key)) return true;
+  return pageIdentityMatches();
 }
 
 /* 当前路由键：路径 + hash 变了才重新做软校验（宿主是 SPA，pushState 不会重载脚本）。 */
@@ -6707,6 +6730,13 @@ function checkRoute() {
   if (!match) {
     /* 离开插件页：探针清零，回到插件页时重新做一次软校验 */
     resetRouteProbe('');
+    /* 鉴权模态是挂在 body 上的独立节点：路由离开时必须一并收起，
+       否则切到别的插件页后仍被这块全屏遮罩盖住（与「不遮住宿主」同一契约）。 */
+    try {
+      if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
+    } catch (err) {
+      /* 宿主没暴露门禁接口时无事可做 */
+    }
     if (state.visible) {
       if (rootEl) rootEl.classList.add('ptx-hidden');
       state.visible = false;
@@ -6721,7 +6751,8 @@ function checkRoute() {
   if (routeProbe.key !== key) resetRouteProbe(key);
   if (!routeProbe.identified && routeProbe.ticks < IDENTITY_PROBE_TICKS) {
     routeProbe.ticks += 1;
-    routeProbe.identified = pageIdentityMatches();
+    // 名字直接就是本插件：无需等宿主画标题，首帧即展开。
+    routeProbe.identified = routeKeyOwned(pluginRouteKey()) || pageIdentityMatches();
   }
 
   const fresh = !state.mounted;

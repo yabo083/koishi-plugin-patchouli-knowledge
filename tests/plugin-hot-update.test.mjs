@@ -155,6 +155,69 @@ test('HOT-01: 保存无关设置不重放整段 trigger——逐群 AIMD 值不�
   }
 });
 
+test('HOT-05: potential 模式 AIMD 锚点用运行期覆盖的 thetaMin，不被时间衰减拉回 yml 基线', async () => {
+  const wikiDir = tempDir('aimd-anchor');
+  await removeDir(wikiDir);
+  const channelId = 'group-aimd-anchor';
+  const potential = {
+    trigger: {
+      triggerMode: 'potential',
+      windowSizeSeconds: 60,
+      burstMultiplier: 2.5,
+      minBurstRate: 6,
+      quiescenceSeconds: 300,
+      coolingRatioThreshold: 1.1,
+      minDiscussionMessages: 12,
+      maxBufferMessages: 500,
+      baselineEwmaAlpha: 0.05,
+      thetaMin: 20,
+    },
+  };
+
+  // ① 造一份「一小时前校准过」的逐群快照：时间向心力衰减到 ≈0.9，锚点开始决定终值。
+  const seed = makeSystem(wikiDir, { channels: [channelId], ...potential });
+  try {
+    await seed.system.ready;
+    seed.system.detector.updateOptions(channelId, { thetaMin: 22 });
+    await seed.system.localStore.saveCadenceState({
+      channelId,
+      options: seed.system.detector.getOptions(channelId),
+      metrics: seed.system.detector.getStatus(channelId, undefined, { settle: false }),
+      updatedAt: Date.now() - 3_600_000,
+    });
+  } finally {
+    seed.system.dispose();
+  }
+
+  const { system, logs } = makeSystem(wikiDir, { channels: [channelId], ...potential });
+  try {
+    await system.ready;
+    // 启动期的快照回灌是异步 `void`：等它把该群选项与 AIMD 时间基准落到一小时前。
+    for (let i = 0; i < 200 && system.detector.getOptions(channelId).thetaMin !== 22; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(system.detector.getOptions(channelId).thetaMin, 22, '前提：一小时前的快照已回灌');
+
+    // 面板把势能门限改到 28（覆盖层 > yml 的 20）。
+    assert.equal((await system.updateSettings('trigger', { thetaMin: 28 })).ok, true);
+    assert.equal(system.detector.getOptions(channelId).thetaMin, 28, '前提：覆盖值已热更新到该群');
+
+    // 高质量讨论触发一轮 AIMD：锚点 28 → 28 - 1.0 = 27；
+    // 若锚点错用 yml 的 20，一小时衰减（×0.85）会把值拉到 20 + 8×0.85 - 1 = 25.8。
+    await system.handleQuiescence(makeSession(channelId));
+    assert.equal(system.detector.getOptions(channelId).thetaMin, 27, 'AIMD 必须围绕运行期覆盖值收敛');
+
+    // 衰减必须真的生效（×1 时锚点不参与运算，这条用例就测不到回漂）。
+    const aimdLog = logs.find((line) => line.includes('AIMD 调节'));
+    assert.ok(aimdLog, '必须产生一轮 AIMD 日志');
+    const decay = Number(/时间衰减 ×([0-9.]+)/u.exec(aimdLog)?.[1]);
+    assert.ok(decay > 0.8 && decay < 0.95, `时间衰减必须生效，实际 ×${decay}`);
+  } finally {
+    system.dispose();
+    await removeDir(wikiDir);
+  }
+});
+
 test('HOT-02: 旧 entryEnabled=false 不压制新表；表为空时旧开关仍然有效', async () => {
   const tableDir = tempDir('entry-table');
   const legacyDir = tempDir('entry-legacy');
