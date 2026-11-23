@@ -4,8 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { Config, PatchouliKnowledgeSystem } from '../lib/index.js';
-import * as pluginEntry from '../lib/plugin/index.js';
+import { Config, PatchouliKnowledgeSystem, name as pluginName, reusable } from '../lib/index.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -70,7 +69,8 @@ test('CONFIG-READONLY-01: 回灌与热更新不修改宿主 config，且热更�
  * 插件状态全在实例闭包与 `PatchouliKnowledgeSystem` 里、`dispose()` 逐项还原，
  * 因此声明 `reusable = true` 是安全且必需的（ADR-022）。
  */
-test('PLUGIN-REUSABLE-01: 声明 reusable，消除控制台的「已在运行且不可重用」告警', () => {
-  assert.equal(pluginEntry.name, 'patchouli-knowledge');
-  assert.equal(pluginEntry.reusable, true);
+test('PLUGIN-REUSABLE-01: 包入口导出 reusable，消除控制台的「已在运行且不可重用」告警', () => {
+  assert.equal(pluginName, 'patchouli-knowledge');
+  // 必须是**入口**导出：只声明在 plugin/index 里 Koishi 看不到。
+  assert.equal(reusable, true);
 });

@@ -65,7 +65,9 @@ export {
   TELEMETRY_TRACE_CAPACITY,
 } from './telemetry/types';
 
-import { name, Config, inject, apply, schema, PluginOptions, PatchouliKnowledgeSystem } from './plugin/index';
+import { name, Config, inject, apply, schema, reusable, PluginOptions, PatchouliKnowledgeSystem } from './plugin/index';
 
-export { name, Config, schema, inject, apply, PluginOptions, PatchouliKnowledgeSystem };
+// `reusable` 必须从**包入口**再导出：Koishi 按 package.json 的 main 加载 `lib/index.js`，
+// 只在 `plugin/index` 里声明等于没声明（0.8.55 的漏项，0.8.56 修正）。
+export { name, Config, schema, inject, apply, reusable, PluginOptions, PatchouliKnowledgeSystem };
 export default apply;
