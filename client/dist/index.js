@@ -85,7 +85,6 @@ const STAGES = [
   { key: 'entries', label: '词条', icon: 'entries', tip: '词条索引' },
   { key: 'topics', label: '主题', icon: 'topics', tip: '跨时间主题聚合' },
   { key: 'metrics', label: '监控', icon: 'metrics', tip: '实时监控' },
-  { key: 'policies', label: '投递策略', icon: 'clock', tip: '目标级定时 / 限量 / 抖动' },
 ];
 
 /* 8 向缩放手柄方向：e=右缘加宽，w=左缘（对边为锚），s=下缘，n=上缘，其余为对角双向 */
@@ -111,8 +110,6 @@ const ICONS = {
   matrix: `<g ${LUCIDE}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></g>`,
   quote: `<g ${LUCIDE}><path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/></g>`,
   metrics: `<g ${LUCIDE}><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></g>`,
-  /* Lucide clock：投递策略——按时间窗口排期的目标级配置 */
-  clock: `<g ${LUCIDE}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></g>`,
   pulse: `<g ${LUCIDE}><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676a.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"/><path d="M3.22 13H9.5l.5-1l2 4.5l2-7l1.5 3.5h5.27"/></g>`,
   sync: `<g ${LUCIDE}><path d="M3 12a9 9 0 0 1 9-9a9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5m5 4a9 9 0 0 1-9 9a9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>`,
   autodock: `<g ${LUCIDE}><path d="M10 2h4m-2 12l3-3"/><circle cx="12" cy="14" r="8"/></g>`,
@@ -899,70 +896,6 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   }
   #patchouli-organic-root .ptx-cfg-row-msg.is-visible { opacity: 1; }
   #patchouli-organic-root .ptx-cfg-row-msg.is-error { color: var(--bio-danger); }
-
-  /* 投递策略：目标表（列头 + 每目标一行）。列宽固定，数值列右对齐等宽；
-     行高 / 卡片材质与设置行一致，读起来是同一张表格里的另一段。 */
-  #patchouli-organic-root .ptx-pol-head,
-  #patchouli-organic-root .ptx-pol-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1.15fr) 74px 74px 74px;
-    gap: 10px;
-    align-items: center;
-  }
-  #patchouli-organic-root .ptx-pol-head {
-    padding: 0 12px 7px;
-    font-family: var(--bio-mono);
-    font-size: 9.5px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    color: var(--bio-ink-4);
-  }
-  #patchouli-organic-root .ptx-pol-head > span:nth-child(n+3) { text-align: right; }
-  #patchouli-organic-root .ptx-pol-row {
-    min-height: 46px;
-    padding: 8px 12px;
-    border-radius: var(--r-card);
-    background: var(--surface);
-    border: 1px solid var(--hairline);
-    box-shadow: var(--shadow-card);
-  }
-  #patchouli-organic-root .ptx-pol-row + .ptx-pol-row { margin-top: 8px; }
-  #patchouli-organic-root .ptx-pol-name { flex: none; font-size: 13px; }
-  #patchouli-organic-root .ptx-pol-name em {
-    font-family: var(--bio-mono);
-    font-size: 10.5px;
-    letter-spacing: 0.01em;
-  }
-  #patchouli-organic-root .ptx-pol-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  /* 列名只由列头承担；窄档表头收起，列名挪进单元格 */
-  #patchouli-organic-root .ptx-pol-cell-h { display: none; font-size: 10px; letter-spacing: 0.04em; color: var(--bio-ink-4); }
-  #patchouli-organic-root .ptx-input.ptx-pol-window { width: 100%; height: 30px; padding: 0 9px; font-size: 12.5px; }
-  #patchouli-organic-root .ptx-input.ptx-pol-num {
-    width: 100%;
-    height: 30px;
-    padding: 0 9px;
-    font-size: 12.5px;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  /* 紧凑档的全局 .ptx-input 定宽（84px）会压扁单元格：策略表按列宽满铺 */
-  #patchouli-organic-root .ptx-window.is-compact .ptx-input.ptx-pol-window,
-  #patchouli-organic-root .ptx-window.is-compact .ptx-input.ptx-pol-num { width: 100%; }
-  /* 保存条：错误独占一行，状态靠左、动作靠右 */
-  #patchouli-organic-root .ptx-pol-foot { padding-top: 10px; }
-  #patchouli-organic-root .ptx-pol-status { margin-right: auto; }
-  #patchouli-organic-root .ptx-pol-error {
-    display: none;
-    flex: 1 1 100%;
-    font-size: 11.5px;
-    line-height: 1.6;
-    color: var(--bio-danger);
-  }
-  #patchouli-organic-root .ptx-pol-error.is-visible { display: block; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-head { display: none; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-name { grid-column: 1 / -1; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-cell-h { display: block; }
 
   /* 知识库维护：危险操作独立成卡，柔和朱红发丝线，二次确认就地展开 */
   #patchouli-organic-root .ptx-maint {
@@ -3163,10 +3096,6 @@ const state = {
   runtimeSettings: { sections: null, meta: [], error: '', loading: false, seq: {}, draftMode: '' },
   /* 出图选项（服务端持久化）：maskNames=false 时按原昵称出图。 */
   cardSettings: { settings: { maskNames: true }, error: '' },
-  /* 投递策略（/api/settings 的 policies + targets）：saved 是服务端真值，
-     未保存的编辑只存在于行内输入框（与运行时参数同一条读值路径，不另立草稿态）。
-     labels 是 /api/albums 的「稳定地址 → 可读名」映射，读不到就显示地址本身。 */
-  policies: { loaded: false, loading: false, error: '', saveError: '', targets: [], saved: {}, labels: {} },
 };
 
 let rootEl = null;
@@ -3981,261 +3910,6 @@ function resetPrompt() {
     })
     .then(() => {
       if (button) button.classList.remove('is-busy');
-    });
-}
-
-/* ---------------- 投递策略（/api/settings 的 policies + targets） ----------------
- * 一个目标一行：窗口 / 词条每日上限 / 周报每周上限 / 抖动分钟。
- * 服务端缺省（空窗口 + 0 + 0 + 0）= 全天不限量：面板照缺省显示，保存时只把与缺省
- * 不同的目标发出去 —— 整表语义下「未出现」与「缺省」等价，少发只是减小写入体积。
- * 目标清单之外仍有策略的键（订阅行删了、绑定暂时解析不出来）原样带回：
- * 在别的目标上保存整表时不会顺手清掉它。
- * 读走 requestJson、写走 writeJson：与其它面板请求共用同一个本页闸口。 */
-const POLICY_FIELD_MAX = { entryPerDay: 999, weeklyPerWeek: 999, jitterMinutes: 1440 };
-const POLICY_WINDOW_PLACEHOLDER = '* 09:00-22:00';
-
-function policyDefault() {
-  return { window: '', entryPerDay: 0, weeklyPerWeek: 0, jitterMinutes: 0 };
-}
-
-function policyIsDefault(policy) {
-  if (!policy) return true;
-  return String(policy.window == null ? '' : policy.window).trim() === ''
-    && num(policy.entryPerDay, 0) === 0
-    && num(policy.weeklyPerWeek, 0) === 0
-    && num(policy.jitterMinutes, 0) === 0;
-}
-
-/* 生效值 = 服务端策略 ⊕ 缺省值：缺键 / 脏值都退回「全天不限量」 */
-function policyOf(key) {
-  const saved = state.policies.saved || {};
-  const raw = Object.prototype.hasOwnProperty.call(saved, key) ? saved[key] : null;
-  if (!raw || typeof raw !== 'object') return policyDefault();
-  return {
-    window: typeof raw.window === 'string' ? raw.window : '',
-    entryPerDay: num(raw.entryPerDay, 0),
-    weeklyPerWeek: num(raw.weeklyPerWeek, 0),
-    jitterMinutes: num(raw.jitterMinutes, 0),
-  };
-}
-
-/* 可读名：@chat 键永远能还原成「本群聊天（群号）」；相册键查 /api/albums 的映射 */
-function policyLabel(key) {
-  const raw = String(key == null ? '' : key);
-  if (raw.startsWith('@chat:')) return `本群聊天（${raw.slice('@chat:'.length)}）`;
-  const labels = state.policies.labels || {};
-  const label = labels[raw];
-  return typeof label === 'string' && label.trim() !== '' ? label : raw;
-}
-
-function policyRows() {
-  return state.policies.targets.map((key) => {
-    const policy = policyOf(key);
-    return {
-      key,
-      label: policyLabel(key),
-      window: policy.window,
-      entryPerDay: policy.entryPerDay,
-      weeklyPerWeek: policy.weeklyPerWeek,
-      jitterMinutes: policy.jitterMinutes,
-    };
-  });
-}
-
-function policyConfiguredCount() {
-  let count = 0;
-  for (const key of state.policies.targets) if (!policyIsDefault(policyOf(key))) count += 1;
-  return count;
-}
-
-/* 差异表：只提交与缺省不同的目标。整表写入下它就是「服务端最终状态」，
-   所以行里出现过的键不再从旧表补回 —— 用户把某项清空 = 删掉这条策略。 */
-function policyPatchOf(rows) {
-  const patch = {};
-  const seen = new Set();
-  for (const row of rows || []) {
-    const key = row && typeof row.key === 'string' ? row.key : '';
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    const policy = {
-      window: String(row.window == null ? '' : row.window).trim(),
-      entryPerDay: num(row.entryPerDay, 0),
-      weeklyPerWeek: num(row.weeklyPerWeek, 0),
-      jitterMinutes: num(row.jitterMinutes, 0),
-    };
-    if (policyIsDefault(policy)) continue;
-    patch[key] = policy;
-  }
-  const saved = state.policies.saved || {};
-  for (const key of Object.keys(saved)) {
-    if (seen.has(key)) continue;
-    const policy = policyOf(key);
-    if (!policyIsDefault(policy)) patch[key] = policy;
-  }
-  return patch;
-}
-
-function policyCell(head, field, value, label) {
-  const numeric = field !== 'window';
-  const attrs = numeric
-    ? ` min="0" max="${POLICY_FIELD_MAX[field]}" step="1"`
-    : ` placeholder="${POLICY_WINDOW_PLACEHOLDER}" autocomplete="off" spellcheck="false"`;
-  return `<label class="ptx-pol-cell">` +
-    `<span class="ptx-pol-cell-h">${escapeHtml(head)}</span>` +
-    `<input class="ptx-input ${numeric ? 'ptx-pol-num' : 'ptx-pol-window'}"` +
-      ` data-pol-field="${field}" type="${numeric ? 'number' : 'text'}"${attrs}` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}"` +
-      ` aria-label="${escapeHtml(label)}">` +
-  `</label>`;
-}
-
-function renderPolicyRow(row) {
-  const key = escapeHtml(row.key);
-  const label = escapeHtml(row.label);
-  const hint = row.label === row.key ? '' : `<em>${key}</em>`;
-  /* 可读名只在这里转义一次：policyCell 负责它自己的 aria-label 转义 */
-  return `<div class="ptx-pol-row" data-pol-row="${key}">` +
-    `<span class="ptx-settings-label ptx-pol-name">${label}${hint}</span>` +
-    policyCell('窗口', 'window', row.window, `${row.label}的投递窗口`) +
-    policyCell('词条/日', 'entryPerDay', row.entryPerDay, `${row.label}每天最多投递几条词条`) +
-    policyCell('周报/周', 'weeklyPerWeek', row.weeklyPerWeek, `${row.label}每周最多投递几份周报`) +
-    policyCell('抖动（分）', 'jitterMinutes', row.jitterMinutes, `${row.label}的投递抖动分钟`) +
-  `</div>`;
-}
-
-function renderPolicyTable() {
-  const box = state.policies;
-  return `<div class="ptx-pol-head" aria-hidden="true">` +
-      `<span>目标</span><span>窗口</span><span>词条/日</span><span>周报/周</span><span>抖动（分）</span>` +
-    `</div>` +
-    `<div class="ptx-pol-rows">${policyRows().map(renderPolicyRow).join('')}</div>` +
-    `<div class="ptx-editor-foot ptx-pol-foot">` +
-      `<span class="ptx-pol-error${box.saveError ? ' is-visible' : ''}" data-pol-error role="alert">${box.saveError ? `保存失败：${escapeHtml(box.saveError)}` : ''}</span>` +
-      `<span class="ptx-prompt-status ptx-pol-status">${escapeHtml(`${box.targets.length} 个目标 · ${policyConfiguredCount()} 项策略生效`)}</span>` +
-      `<button class="ptx-btn" data-act="reload-policies" type="button">重新读取</button>` +
-      `<button class="ptx-btn is-primary" data-action="save-policies" type="button">${organicIcon('check', 13)}<span>保存整表</span></button>` +
-    `</div>` +
-    `<div class="ptx-settings-note">窗口写法：「* 09:00-22:00」每天 / 「1 09:00」周一 / 「20:00-02:00」跨午夜，末尾可加「~15」抖动分钟；留空即全天不限时，次数填 0 表示不限量。</div>`;
-}
-
-function renderPolicies() {
-  const box = state.policies;
-  let inner;
-  if (box.error) {
-    inner = `<div class="ptx-settings-note">读取失败：${escapeHtml(box.error)}</div>` +
-      `<div class="ptx-settings-row"><span class="ptx-settings-label">服务端设置</span>` +
-      `<button class="ptx-btn" data-act="reload-policies" type="button">重新读取</button></div>`;
-  } else if (!box.loaded) {
-    inner = `<div class="ptx-settings-note">正在读取投递策略…</div>`;
-  } else if (!box.targets.length) {
-    inner = `<div class="ptx-settings-note">还没有投递目标，先在订阅表里选择</div>`;
-  } else {
-    inner = renderPolicyTable();
-  }
-  return renderHead('投递策略', box.loaded ? `${box.targets.length} 个目标` : '读取中') +
-    `<div class="ptx-settings-page"><div class="ptx-settings-main">${renderSection('目标策略', inner)}</div></div>`;
-}
-
-/* 相册目录只用来把稳定地址翻成可读名：读不到就显示地址，不影响策略编辑 */
-function loadPolicyLabels() {
-  return requestJson(`${API_BASE}/api/albums`).then((data) => {
-    const labels = {};
-    const albums = data && Array.isArray(data.albums) ? data.albums : [];
-    for (const album of albums) {
-      const value = album && typeof album.value === 'string' ? album.value : '';
-      const label = album && typeof album.label === 'string' ? album.label.trim() : '';
-      if (value && label) labels[value] = label;
-    }
-    state.policies.labels = labels;
-  }, () => {
-    /* 目录读不到：保留上一次的映射（或空表），地址本身仍是稳定可读的标识 */
-  });
-}
-
-function loadPolicies() {
-  const box = state.policies;
-  if (box.loading) return Promise.resolve();
-  box.loading = true;
-  box.error = '';
-  box.saveError = '';
-  const table = requestJson(`${API_BASE}/api/settings`).then((data) => {
-    const payload = data && typeof data === 'object' ? data : {};
-    const targets = Array.isArray(payload.targets) ? payload.targets : [];
-    box.targets = targets.filter((key) => typeof key === 'string' && key.trim() !== '');
-    box.saved = payload.policies && typeof payload.policies === 'object' && !Array.isArray(payload.policies)
-      ? payload.policies
-      : {};
-    box.loaded = true;
-    box.error = '';
-  }, (err) => {
-    box.error = err && err.message ? err.message : '未知错误';
-  });
-  return Promise.all([table, loadPolicyLabels()]).then(() => {
-    box.loading = false;
-    if (state.stage === 'policies') renderStage();
-  });
-}
-
-/* 面板输入是本次编辑的唯一真相：保存前按行收集，服务端归一化后整页重绘回真值 */
-function collectPolicyRows() {
-  const fallback = policyRows();
-  if (!viewportEl || typeof viewportEl.querySelectorAll !== 'function') return fallback;
-  const nodes = viewportEl.querySelectorAll('[data-pol-row]');
-  if (!nodes || !nodes.length) return fallback;
-  const rows = [];
-  for (const node of Array.from(nodes)) {
-    const key = node.getAttribute ? node.getAttribute('data-pol-row') : '';
-    if (!key) continue;
-    const cell = (field) => {
-      const input = node.querySelector(`[data-pol-field="${field}"]`);
-      return input ? input.value : '';
-    };
-    rows.push({
-      key,
-      window: cell('window'),
-      entryPerDay: cell('entryPerDay'),
-      weeklyPerWeek: cell('weeklyPerWeek'),
-      jitterMinutes: cell('jitterMinutes'),
-    });
-  }
-  return rows.length ? rows : fallback;
-}
-
-function syncPolicyError() {
-  if (!viewportEl || typeof viewportEl.querySelector !== 'function') return;
-  const node = viewportEl.querySelector('[data-pol-error]');
-  if (!node) return;
-  const message = state.policies.saveError;
-  node.textContent = message ? `保存失败：${message}` : '';
-  if (node.classList) node.classList.toggle('is-visible', Boolean(message));
-}
-
-/* 整表保存：一次 POST 只带差异项；成功后按服务端回值重绘，失败只就地写原因 */
-function savePolicyTable(rows) {
-  const box = state.policies;
-  const patch = policyPatchOf(rows || policyRows());
-  const button = viewportEl && typeof viewportEl.querySelector === 'function'
-    ? viewportEl.querySelector('[data-action="save-policies"]')
-    : null;
-  if (button && button.classList) button.classList.add('is-busy');
-  box.saveError = '';
-  syncPolicyError();
-  return writeJson(`${API_BASE}/api/settings`, 'POST', { section: 'policies', patch })
-    .then((data) => {
-      const value = data && data.value && typeof data.value === 'object' ? data.value : null;
-      if (value) box.saved = value;
-      box.loaded = true;
-      box.saveError = '';
-      /* 服务端会归一化窗口（「~N」后缀折进抖动字段）：整页重绘回服务端真值 */
-      if (state.stage === 'policies') renderStage();
-      toast('投递策略已保存');
-    }, (err) => {
-      /* 闸口拒绝（非本插件页）由 writeJson 的 toast 说明原因：页面本就不可见，
-         不把「已暂停取数」写成保存失败 */
-      if (!state.own) return;
-      box.saveError = err && err.message ? err.message : '未知错误';
-      /* 输入值与已保存真值都不动，改完可直接重试 */
-      syncPolicyError();
     });
 }
 
@@ -5195,8 +4869,6 @@ function renderStage() {
     html = renderMetrics();
   } else if (state.stage === 'settings') {
     html = renderSettings();
-  } else if (state.stage === 'policies') {
-    html = renderPolicies();
   } else {
     const isTopicList = state.stage === 'topics';
     html = renderHead(isTopicList ? '主题' : '词条索引',
@@ -6589,7 +6261,6 @@ function enterStage(next) {
      非本插件页（数据面没跑）不拉服务端设置 —— 那些请求会被 requestJson 的闸口拦下，
      不如干脆不发起，免得面板里多一行「非本插件页」的假错误。 */
   if (next === 'settings' && state.own) { loadPrompt(); loadRuntimeSettings(); loadCardSettings(); }
-  else if (next === 'policies' && state.own) loadPolicies();
   renderStage();
 }
 
@@ -6604,7 +6275,6 @@ function handleAction(action, node) {
   else if (action === 'cancel-clear-kb') { state.clearArmed = false; renderStage(); }
   else if (action === 'confirm-clear-kb') clearKnowledgeBase().then(() => resetIdleTimer());
   else if (action === 'save-prompt') savePrompt().then(() => resetIdleTimer());
-  else if (action === 'save-policies') savePolicyTable(collectPolicyRows()).then(() => resetIdleTimer());
   else if (action === 'reset-prompt') resetPrompt().then(() => resetIdleTimer());
   else if (action === 'save-topic-prompt') saveTopicPrompt().then(() => resetIdleTimer());
   else if (action === 'reset-topic-prompt') resetTopicPrompt().then(() => resetIdleTimer());
@@ -6724,11 +6394,6 @@ function bindActions() {
 
     if (act === 'reload-runtime') {
       loadRuntimeSettings().then(() => resetIdleTimer());
-      return;
-    }
-
-    if (act === 'reload-policies') {
-      loadPolicies().then(() => resetIdleTimer());
       return;
     }
   });
@@ -7160,8 +6825,6 @@ function startDataFlow() {
   /* 选项先于数据落地：面板此刻已经可见，下拉 / 轮播条数不该等一次往返。 */
   syncSettingsUI();
   scheduleStatusPoll();
-  /* 停留在投递策略页时本页才变真：补一次读取，否则会永远停在「正在读取」 */
-  if (state.stage === 'policies' && !state.policies.loaded) loadPolicies();
   clearInterval(latestTimer);
   latestTimer = setInterval(() => {
     if (!state.visible) return;

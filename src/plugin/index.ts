@@ -6,6 +6,7 @@ import type {
   CadenceStateSnapshot,
   ChatMessage,
   ChatLunaInvoker,
+  DeliveryPolicyRow,
   DiscussionSession,
   DispatcherConfig,
   LatestMessage,
@@ -13,6 +14,7 @@ import type {
   PatchouliPluginConfig,
   RichMessageElement,
   SubscriptionRow,
+  TargetPolicies,
   TrafficPoint,
   TriggerOptions,
   TuningSnapshot,
@@ -73,6 +75,7 @@ import {
   writeSettingsOverrides,
   writeSubscriptionOverride,
   writeTargetBindings,
+  writeTargetPolicies,
   redactSettingsSection,
   SETTINGS_META,
   SETTINGS_SECTIONS,
@@ -101,6 +104,7 @@ import { DeliveryStateStore, deliveryStatePath } from './delivery-state';
 import { maskPublicView } from '../wiki/mask';
 import { toPublicView } from '../wiki/public-view';
 import { TopicScheduler } from './topic-scheduler';
+import { MAX_JITTER_MINUTES, MAX_PERIOD_QUOTA, MAX_TARGET_POLICIES, parsePolicies } from './policy-resolve';
 
 const WEEK_MS = 7 * 86_400_000;
 import {
@@ -681,6 +685,20 @@ const SUBSCRIPTION_TARGETS_SCHEMA = subscriptionTargetsSchema(STARTUP_TARGETS.al
 const SUBSCRIPTION_TARGETS_FIELD = SUBSCRIPTION_TARGETS_SCHEMA.default(undefined as unknown as string[]);
 
 /**
+ * 投递策略表 `target` 的候选：与订阅表 `targets` **同一份候选，独立的 union 实例**。
+ *
+ * 不共用实例只为文案：`description()` 是原地写 `meta`，共用会把「投递群（可多个）」
+ * 或本列的「投递目标」写到对方的列头上。候选刷新时两处一起换 `list`
+ * （见 `refreshSubscriptionTargets`）——它们是同一份 `albumUnionItems` 结果。
+ *
+ * 候选是**可读名**（`@chat` / 相册名），不校验稳定地址：策略行写的是名字，
+ * 名字到 `群号/相册ID` 的解析只在 `initialize()` 里跑一次（绑定表是唯一解析表）。
+ */
+const DELIVERY_POLICY_TARGET_SCHEMA = albumSchemaUnion(STARTUP_TARGETS.albums, STARTUP_TARGETS.configured, {
+  targets: true,
+}).description('投递目标');
+
+/**
  * 重算订阅目标候选：插件重载时与每轮相册探测后各调一次。
  *
  * 静态 union 只在模块顶层求值，而 Koishi 的 `require` 缓存让「重载插件」不重跑顶层——
@@ -712,9 +730,13 @@ function refreshSubscriptionTargets(
   const next: StartupTargetValues = { albums: [...albums], configured: values.configured, bindings: values.bindings };
   // 解析表 = 落盘绑定（不随候选变）；展示表 = 本轮候选。
   installTargetTables(next);
+  const items = albumUnionItems(albums, values.configured, { targets: true });
   const union = Config.dict?.['subscriptions']?.inner?.dict?.['targets']?.inner;
-  if (union === undefined) return next;
-  union.list = albumUnionItems(albums, values.configured, { targets: true });
+  if (union !== undefined) union.list = items;
+  // 投递策略表的 `target` 是同一份候选的另一个 union 实例：两处必须同步换 list，
+  // 否则探测到的新相册只在订阅表下拉里出现（策略表停在首启候选上）。
+  const policyUnion = Config.dict?.['deliveryPolicies']?.inner?.dict?.['target'];
+  if (policyUnion !== undefined) policyUnion.list = items;
   return next;
 }
 
@@ -823,7 +845,7 @@ function subscriptionProbeSources(
 }
 
 /**
- * 插件页配置：只保留七块高频项（模型置顶、启用、管理员、订阅表、功能总闸、知识库目录、面板密钥）。
+ * 插件页配置：只保留八块高频项（模型置顶、启用、管理员、订阅表、投递策略、功能总闸、知识库目录、面板密钥）。
  *
  * 调参面（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）已撤出控制台，改由自建面板写
  * `<wikiDir>/.patchouli/settings.json`（`SETTINGS_META` 是唯一字段表）。旧配置里的值仍然
@@ -867,11 +889,32 @@ export const Config: Schema<PluginOptions> = Schema.object({
     .role('table')
     .default([])
     .max(256),
-  // ── 4. 功能总闸 ───────────────────────────────────────────────────────
+  // ── 4. 投递策略 ───────────────────────────────────────────────────────
+  //
+  // 插件的**唯一**策略入口（浮窗面板的那个页签已撤掉，`POST /api/settings`
+  // 的 `section: 'policies'` 直接 400）。一个投递目标一行：窗口 / 词条每日上限 /
+  // 周报每周上限 / 抖动分钟；`target` 与订阅表 `targets` 同一份候选。
+  //
+  // 这里写可读名，启动时按落盘绑定表解析成稳定地址落盘（`policies` 在
+  // `.patchouli/settings.json`），运行时只认稳定地址——配置面与运行时之间只有这一次翻译。
+  // 四项的 `0` / 空串一律表示「不设限」，所以新增一行的默认值就是「行为不变」。
+  deliveryPolicies: Schema.array(
+    Schema.object({
+      target: DELIVERY_POLICY_TARGET_SCHEMA,
+      window: Schema.string().default('').description('投递窗口，如 * 22:00-23:30；空=全天'),
+      entryPerDay: Schema.number().default(0).min(0).max(1000).description('词条每日上限，0=不限'),
+      weeklyPerWeek: Schema.number().default(0).min(0).max(100).description('周报每周上限，0=不限'),
+      jitterMinutes: Schema.number().default(0).min(0).max(120).description('窗口内随机抖动（分钟），0=不抖动'),
+    }),
+  )
+    .role('table')
+    .default([])
+    .max(256),
+  // ── 5. 功能总闸 ───────────────────────────────────────────────────────
   features: Schema.object(FEATURES_FIELDS).description('功能总闸：关掉即整条链路不跑。'),
-  // ── 5. 知识库目录 ─────────────────────────────────────────────────────
+  // ── 6. 知识库目录 ─────────────────────────────────────────────────────
   storage: STORAGE_FIELDS,
-  // ── 6. 面板密钥 ───────────────────────────────────────────────────────
+  // ── 7. 面板密钥 ───────────────────────────────────────────────────────
   security: SECURITY_FIELDS,
   /**
    * 历史字段：`advancedMode` 是 0.8.66 条件表单的判别位，现在只用于让旧配置过校验。
@@ -1020,6 +1063,44 @@ function deepEqual(left: unknown, right: unknown): boolean {
   return leftKeys.every((key) => deepEqual(left[key], right[key]));
 }
 
+/** 投递窗口文本的长度上限（与 `policy-resolve` 的清洗口径一致：脏值不进解析器）。 */
+const MAX_POLICY_WINDOW_CHARS = 120;
+
+/** 非负整数 + 封顶：`parsePolicies` 会把越界值整条丢弃，这里先归一到同一档。 */
+function boundedCount(value: unknown, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.min(Math.max(0, Math.floor(value)), max);
+}
+
+/**
+ * 插件页「投递策略」表格 → 运行时行（`flattenConfig` 里唯一一次形状归一）。
+ *
+ * 只归一**形状**（去空白 / 取整封顶 / 窗口长度），**不解析名字**：可读名到稳定地址的翻译
+ * 必须等落盘绑定表回灌 + 首轮迁移之后（`initialize()`），那时解析表才是最终那一份。
+ *
+ * 目标为空的行整行丢弃：表格里新加的一行在填目标之前只是「占位」，不是投递到空目标。
+ * 行数封顶与 `.max(256)` 同口径，脏 yml 撑不爆内存。
+ */
+function normalizeDeliveryPolicyRows(rows: unknown): DeliveryPolicyRow[] {
+  if (!Array.isArray(rows)) return [];
+  const out: DeliveryPolicyRow[] = [];
+  for (const raw of rows) {
+    if (out.length >= MAX_TARGET_POLICIES) break;
+    if (!isPlainRecord(raw)) continue;
+    const target = typeof raw.target === 'string' ? raw.target.trim() : '';
+    if (target === '') continue;
+    const window = typeof raw.window === 'string' ? raw.window.trim() : '';
+    out.push({
+      target,
+      window: window.length > MAX_POLICY_WINDOW_CHARS ? window.slice(0, MAX_POLICY_WINDOW_CHARS) : window,
+      entryPerDay: boundedCount(raw.entryPerDay, MAX_PERIOD_QUOTA),
+      weeklyPerWeek: boundedCount(raw.weeklyPerWeek, MAX_PERIOD_QUOTA),
+      jitterMinutes: boundedCount(raw.jitterMinutes, MAX_JITTER_MINUTES),
+    });
+  }
+  return out;
+}
+
 /**
  * 三块「新版仍可见」的配置（`modelConfig` / `storage` / `security`）在 0.8.66 里住在
  * `advanced` 段：新版 Schema 解析旧文件时，顶层是 Schema 默认值、旧值还在 `advanced`。
@@ -1120,6 +1201,9 @@ export function flattenConfig(rawConfig: PluginOptions): PluginOptions {
     // 字符串数组按元素展开成多行；`targets` 键存在即权威，`[]` 不复活），再归一，
     // 行数 / 目标数 / 字段长度封顶。下游（含 `plugins` 面板）只认归一后的值。
     subscriptions: normalizeSubscriptionRows(projectLegacySubscriptionRows(raw.subscriptions)),
+    // 投递策略表同样在这里归一：只做形状（空目标行丢弃 / 整数封顶），名字解析留给
+    // `initialize()`——那时落盘绑定表已回灌、首轮迁移也跑完。历史配置没有这个键 = 空表。
+    deliveryPolicies: normalizeDeliveryPolicyRows(raw.deliveryPolicies),
     storage,
     security,
     modelConfig: dispatcher,
@@ -1451,6 +1535,8 @@ export class PatchouliKnowledgeSystem {
     if (hydrated > 0) this.logger?.info(`[Patchouli] 已从现有词条重建标题索引：${hydrated} 条`);
     await this.restoreSettings();
     await this.migrateTargetBindings();
+    // 绑定表定型之后才翻译策略：可读名 → 稳定地址只在这里发生一次（见 syncDeliveryPolicies）。
+    await this.syncDeliveryPolicies();
     await this.restoreCardSettings();
     await this.restoreCustomPrompt();
     // 判据台账的保留期清扫：失败只告警，绝不阻塞启动。
@@ -1573,6 +1659,113 @@ export class PatchouliKnowledgeSystem {
     } catch (error: unknown) {
       this.logger?.warn(`[Patchouli] 订阅目标绑定迁移失败，沿用现有绑定: ${String(error)}`);
     }
+  }
+
+  /**
+   * 插件页「投递策略」表格 → `.patchouli/settings.json` 的 `policies`（**配置面到运行时的唯一翻译**）。
+   *
+   * 调用点固定在 `initialize()`：`restoreSettings()`（回灌落盘绑定表）与
+   * `migrateTargetBindings()`（首轮迁移补齐绑定）之后。早一步的话「名字 → 相册」的
+   * 绑定表还是空的，每一行都会被判成解析失败。
+   *
+   * 解析只认 `this.targetBindings`（落盘绑定表——投递期用的是同一份真源）：
+   * - `@chat` 需要来源群，而策略行没有来源列：订阅表里**正好一行**投递 `@chat` 时取它的
+   *   来源群（`@chat:<群号>`）；零行 / 多行都按歧义 warn 跳过，不猜是哪个群；
+   * - `@chat:<群号>` / `群号/相册ID` 这类稳定地址按形状直接认（升级前写进 yml 的值仍能用）；
+   * - 其余名字查绑定表，查不到就 warn 跳过（相册改名 / 删除 / 从未绑定过）。
+   *
+   * 写前先过 `parsePolicies`（与写盘同源的归一：去 `~N` 后缀 / 校验窗口 / 数值边界），
+   * 再与磁盘现值深比较——**内容不变就不写盘**。不归一就比较的话，`* 22:00-23:00 ~20`
+   * 这类文本会被判成「每次启动都变了」，白白重写一遍文件。
+   *
+   * 空表 = 单一真源下的「没有策略」：磁盘上残留的旧表（升级前浮窗页签写的）一并清掉，
+   * 否则用户在插件页永远删不掉它。反例保护：**写了行但一行都没落成策略**时不写盘——
+   * 绑定表临时读空 / 相册全部掉线不该把还在用的策略整份抹掉。
+   */
+  private async syncDeliveryPolicies(): Promise<void> {
+    try {
+      // 表格里可能留着「还没填目标」的空行：它们不是策略，也不算「声明了策略」。
+      const declared = (this.config.deliveryPolicies ?? []).filter((row) => row.target !== '');
+      const chatSources = this.chatPolicySources();
+      const table: TargetPolicies = {};
+      for (const row of declared) {
+        const key = this.policyKeyOf(row.target, chatSources);
+        if (key === undefined) continue;
+        table[key] = {
+          window: row.window,
+          entryPerDay: row.entryPerDay,
+          weeklyPerWeek: row.weeklyPerWeek,
+          jitterMinutes: row.jitterMinutes,
+        };
+      }
+      const normalized = parsePolicies(table);
+      for (const key of Object.keys(table)) {
+        if (Object.hasOwn(normalized, key)) continue;
+        this.logger?.warn(`[Patchouli] 投递策略 ${key} 非法（窗口语法 / 数值越界），已忽略该行`);
+      }
+      if (declared.length > 0 && Object.keys(normalized).length === 0) {
+        this.logger?.warn(
+          '[Patchouli] 插件页配置了投递策略，但没有一行能落成策略：本次不改动磁盘上的策略表',
+        );
+        return;
+      }
+      const current = await readTargetPolicies(this.wikiDir);
+      if (deepEqual(current, normalized)) return;
+      const stored = await writeTargetPolicies(this.wikiDir, normalized);
+      const count = Object.keys(stored).length;
+      this.logger?.info(
+        count === 0
+          ? '[Patchouli] 投递策略已清空（插件页没有配置策略）'
+          : `[Patchouli] 投递策略已按插件页配置写入 .patchouli/settings.json：${count} 个目标`,
+      );
+    } catch (error: unknown) {
+      // `ready` 恒为 resolve：读盘 / 写盘点失败不能让插件起不来，运行时继续用磁盘上的旧表。
+      this.logger?.warn(`[Patchouli] 投递策略同步失败，沿用磁盘上的策略表: ${String(error)}`);
+    }
+  }
+
+  /** 订阅表里投递 `@chat` 的来源群（去重；`*` 行不算——它没有确定的来源群）。 */
+  private chatPolicySources(): string[] {
+    const groups = new Set<string>();
+    for (const row of this.subscriptionTable().rows) {
+      if (row.source === '*' || !row.targets.includes(CHAT_TARGET)) continue;
+      const group = bareChannelId(row.source);
+      if (/^\d+$/u.test(group)) groups.add(group);
+    }
+    return [...groups];
+  }
+
+  /** 策略行的可读名 → 稳定地址；解析不到返回 `undefined`（只 warn，绝不回退猜）。 */
+  private policyKeyOf(target: string, chatSources: readonly string[]): string | undefined {
+    const value = target.trim();
+    if (value === '') return undefined;
+    if (value === CHAT_TARGET) {
+      if (chatSources.length === 1) return `${CHAT_TARGET}:${chatSources[0]}`;
+      this.logger?.warn(
+        chatSources.length === 0
+          ? '[Patchouli] 投递策略目标「@chat」无法定值：订阅表里没有投递「本群聊天」的行，已跳过'
+          : `[Patchouli] 投递策略目标「@chat」有 ${chatSources.length} 个来源群（${chatSources.join('、')}），无法定值，已跳过；请改写成 @chat:<群号>`,
+      );
+      return undefined;
+    }
+    if (value.startsWith(`${CHAT_TARGET}:`)) {
+      const group = bareChannelId(value.slice(CHAT_TARGET.length + 1));
+      if (/^\d+$/u.test(group)) return `${CHAT_TARGET}:${group}`;
+      this.logger?.warn(`[Patchouli] 投递策略目标「${value}」的来源群不是群号，已跳过`);
+      return undefined;
+    }
+    if (isTargetGroupHeader(value)) {
+      this.logger?.warn(`[Patchouli] 投递策略目标「${value}」是下拉分组标题，不是投递目标，已跳过`);
+      return undefined;
+    }
+    const bound = this.targetBindings[value];
+    if (typeof bound === 'string' && ALBUM_TARGET_PATTERN.test(bound)) return bound;
+    // 旧稳定地址（升级前写进 yml 的 `群号/相册ID`）按形状直接认，与订阅目标同一条规则。
+    if (ALBUM_TARGET_PATTERN.test(value)) return value;
+    this.logger?.warn(
+      `[Patchouli] 投递策略目标「${value}」没有绑定（相册已改名 / 删除，或从未保存过）：已跳过，请在插件页重新选择`,
+    );
+    return undefined;
   }
 
   /**

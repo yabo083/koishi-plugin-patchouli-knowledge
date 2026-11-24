@@ -384,6 +384,12 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
 投递策略挂在**稳定地址**上（`settings.json` 顶层 `policies`，与 `targetBindings` 同一次原子写）：
 `@chat:<来源群>` 或 `群号/相册ID`；未配置的目标 = 全天、不限量、不抖动（行为与旧版一致）。
 
+- **配置入口 = 插件页表格**：`Config.deliveryPolicies`（订阅表下面那张 `deliveryPolicies` 表，
+  一个目标一行，`target` 与订阅表同一份候选）。写的是**可读名**，启动时
+  `initialize() → syncDeliveryPolicies` 按落盘 `targetBindings` 翻译成稳定地址再落 `policies`；
+  解析不到的行 warn 跳过（不猜），内容不变不写盘。面板只读展示（`GET /api/settings`），
+  `POST section: 'policies'` 一律 400——策略只有一个真源，不存在第二个写入口。
+
 - **入队而非直发**：`handleQuiescence` 结算 → `setEntryCardSink` → `DeliveryGate.offer({kind:'entry'})`；
   周报产物同理（`runWeeklyAlbumUpload` 的 `deliver` 依赖换成 offer）。入队粒度是「事件 × 目标」：
   一条词条投三个相册 = 三条队列项，各自额度、各自窗口。

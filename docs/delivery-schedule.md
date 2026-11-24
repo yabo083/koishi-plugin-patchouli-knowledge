@@ -112,9 +112,10 @@ interface QueuedDelivery {
 
 队列满（1024 条或 1 MiB）时**拒收新事件并 warn**，不淘汰旧项。坏文件按空状态处理并 warn，写路径拒绝覆盖（沿用 `SettingsDocumentError`）。
 
-## 6. 面板呈现
+## 6. 配置面呈现
 
-订阅表本身**不改列**（仍是 监听群 / 投递群 / 词条 / 周报）。策略放在新增的「投递策略」区块（同一面板，`/patchouli/api/settings` 的 `policies` 段）：
+订阅表本身**不改列**（仍是 监听群 / 投递群 / 词条 / 周报）。策略是插件页「订阅表」下面的**第二张表**
+`deliveryPolicies`（`Config.deliveryPolicies`，`.role('table')`），字段：
 
 ```
 目标                     窗口              词条/日  周报/周  抖动
@@ -122,24 +123,34 @@ interface QueuedDelivery {
 群聊（本群聊天）          * 09:00-10:00     0        0        ±5m
 ```
 
-- 列表从当前 `targetBindings` + `@chat:<source>` 生成，只显示实际存在的目标。
-- 未配置目标 = 全天不限时、不限量、无抖动。
-- 保存走 `POST /api/settings` 的 `policies` 段，与 `targetBindings` 同一次原子写。
+- `target` 与订阅表 `targets` **同一份候选**（`@chat` + 相册唯一可读名），但各自一份 union 实例：
+  候选刷新时两处一起换 `list`，列头文案互不覆盖。
+- 配置里写的是**可读名**；启动时（`initialize()` → `syncDeliveryPolicies`）按落盘绑定表
+  `targetBindings` 翻译成**稳定地址** `@chat:<来源群>` / `群号/相册ID`，写进
+  `settings.json` 的 `policies`。这是配置面到运行时唯一一次翻译，跑通后运行时只认稳定地址。
+- 解析不到的行 **warn 并跳过**（相册改名 / 删除 / 从未绑定），绝不回退猜；`@chat` 需要来源群，
+  订阅表里正好一行投递 `@chat` 时才定值，零行 / 多行都按歧义跳过。
+- 未配置目标 = 全天不限时、不限量、无抖动；空表 = 没有策略，磁盘上的旧表一并清空（单一真源）。
+- **内容不变不写盘**：候选先过 `parsePolicies` 归一再与磁盘现值深比较，重启不刷文件。
+- 面板（浮窗）里**不再有**策略页签：`GET /api/settings` 仍只读展示 `policies` / `targets`，
+  `POST /api/settings` 的 `section: 'policies'` 一律 `400`（「投递策略请在插件配置页维护」）。
 
-理由：策略的宿主是「投递目标」而非「订阅行」，表格单元格无法表达多目标多策略；放区块后表格保持紧凑，且删相册绑定即自动失效（不存在悬空）。
+理由：策略的宿主是「投递目标」而非「订阅行」，表格单元格无法表达多目标多策略；放配置页后
+「配置只有一个真源（koishi.yml）」，面板只管看，不会出现两处能改、互相覆盖。
 
 ## 7. 改动点
 
 | 文件 | 改动 |
 | --- | --- |
-| `src/types.ts` | 新增 `TargetPolicy` / `TargetPolicies` |
+| `src/types.ts` | 新增 `DeliveryPolicyRow`（插件页表格行）/ `TargetPolicy` / `TargetPolicies` |
 | `src/plugin/settings-store.ts` | `parseDocument` 增加 `policies` 段清洗（≤256 项、窗口语法校验、数值边界）；`writeTargetPolicies` 与 `writeTargetBindings` 同批落盘 |
 | `src/plugin/policy-resolve.ts`（新） | `parseWindow(text)`、`policyFor(targetKey)`、`periodKey(kind, at)`、`jitterFor(policy, windowStart, at)` |
 | `src/plugin/delivery-gate.ts`（新） | `offer(event)`、`drain(now)`、`nextWakeAt(now)`、`dispose()`；单定时器 |
 | `src/plugin/delivery-state.ts`（新） | 队列/计数读写、上限、原子写、串行队列 |
-| `src/plugin/index.ts` | `handleQuiescence` 结算后改 `gate.offer(...)`；`runWeeklyAlbumUpload` 产物同样 `offer`；`dispose` 里停闸 |
+| `src/plugin/index.ts` | 插件页 `deliveryPolicies` 表格 + `syncDeliveryPolicies`（可读名 → 稳定地址，只在内容变化时写盘）；`handleQuiescence` 结算后改 `gate.offer(...)`；`runWeeklyAlbumUpload` 产物同样 `offer`；`dispose` 里停闸 |
 | `src/plugin/weekly-album.ts` | `planWeeklyAlbumSources` 预筛（最终以占额为准） |
-| `src/web/api.ts` | `settings` 段增加 `policies` 读写；`GET` 返回目标清单供面板渲染 |
+| `src/web/api.ts` | `GET /api/settings` 的 `policies` / `targets` **只读展示**；`POST section: 'policies'` 一律 `400` |
+| `client/dist/index.js` | 撤掉浮窗「投递策略」页签（渲染 / 保存 / 状态 / CSS 一并删除） |
 | `docs/`、`src/plugin/README.md`、`tests/test-suite.md` | 同步 |
 
 不动：`registerWeeklyCron`、`TopicScheduler`、`applySettingsOverrides`、触发器状态机、`delivery.ts`（批量入口复用现有 `deliverCardToTargets`）。

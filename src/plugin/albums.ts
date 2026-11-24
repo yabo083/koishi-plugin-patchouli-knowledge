@@ -1065,6 +1065,18 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
         if (configured.length >= MAX_CONFIGURED_TARGETS) return configured;
       }
     }
+    // 投递策略表的 `target` 与订阅表**同一份候选**：已保存的可读名同样必须留在 union 里，
+    // 否则静态 const union 的严格校验会让整份配置拒载（`deliveryPolicies` 是插件页表格）。
+    const policies = block['deliveryPolicies'];
+    for (const raw of Array.isArray(policies) ? policies : []) {
+      const row = asRecord(raw);
+      const value = row?.['target'];
+      if (typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed === '' || trimmed === CHAT_TARGET || configured.includes(trimmed)) continue;
+      configured.push(trimmed);
+      if (configured.length >= MAX_CONFIGURED_TARGETS) return configured;
+    }
   }
   return configured;
 }
@@ -1084,7 +1096,8 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
  * - `plugins` 树里本插件块的 `storage.wikiDir`（缺省 `data/llmwiki`）；
  * - `<wikiDir>/.patchouli/albums.json`（上次探测结果，即候选）；
  * - `<wikiDir>/.patchouli/settings.json` 的 `targetBindings`（名字 → 稳定地址）；
- * - 同一批插件块的 `subscriptions[].targets`（+ 历史 `target`，供「未探测到」保留项）。
+ * - 同一批插件块的 `subscriptions[].targets`（+ 历史 `target`，供「未探测到」保留项）；
+ * - 同一批插件块的 `deliveryPolicies[].target`（策略表与订阅表共用同一份候选）。
  *
  * `configured` 必须把配置里已有的目标都带上：静态 const union 的校验是严格的，
  * 候选里没有的值会让整个插件配置过不了校验（这正是「表格列无法用动态候选」的代价）。

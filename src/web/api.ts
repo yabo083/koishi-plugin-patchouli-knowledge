@@ -14,8 +14,7 @@ import {
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
-import { SETTINGS_META, readTargetPolicies, writeTargetPolicies } from '../plugin/settings-store';
-import { validatePolicies } from '../plugin/policy-resolve';
+import { SETTINGS_META, readTargetPolicies } from '../plugin/settings-store';
 import { CHAT_TARGET } from '../plugin/subscriptions';
 import { albumTargetValues, albumValue, loadAlbumCatalog, type AlbumCandidate } from '../plugin/albums';
 import {
@@ -1171,12 +1170,13 @@ export function registerWebUi(
     }
   });
 
-  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判 / 投递策略）
+  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）
   //
   // GET 返回**合并后**的五段值（覆盖层 > koishi.yml > Schema 默认值）与字段元数据，
-  // 外加投递策略（`policies`）与当前真实存在的目标清单（`targets`，面板据此渲染区块）。
-  // POST 只接受 {section, patch}，未知键丢弃、非法值 400；`section: 'policies'` 走
-  // 严格的整表校验（键形状 / 窗口语法 / 数值边界）。写入落在
+  // 外加投递策略（`policies`）与当前真实存在的目标清单（`targets`）——纯只读展示。
+  // **策略的写入口只有插件配置页**（`Config.deliveryPolicies`）：浮窗里那个页签已撤掉，
+  // 所以 `section: 'policies'` 一律 400，绝不接受第二个写入口（单一真源，ADR-022 同样适用）。
+  // POST 只接受 {section, patch}，未知键丢弃、非法值 400。写入落在
   // `<wikiDir>/.patchouli/settings.json`，绝不改宿主 config（ADR-022）。
   // 校验分两层且都在落盘之前：字段级 + 「合并后」跨字段（触发器的 `normalizeTriggerOptions`）。
   // 任一层不过都是 400 且文件与运行态都不变——不会再出现「500 但坏值已落盘」。
@@ -1199,27 +1199,11 @@ export function registerWebUi(
       kCtx.body = { ok: false, error: 'Invalid payload' };
       return;
     }
-    // 投递策略是整张结构化表，不是标量段：严格校验后与订阅表 / 绑定表共用同一次原子写。
+    // 投递策略只认插件配置页：面板改不了它，连「合法的整表」也不收（写入口唯一）。
     if (body.section === 'policies') {
       kCtx.type = 'application/json';
-      const checked = validatePolicies(body.patch);
-      if (!checked.ok) {
-        kCtx.status = 400;
-        kCtx.body = { ok: false, error: checked.error };
-        return;
-      }
-      const wikiDir = typeof system.wikiDir === 'string' && system.wikiDir.trim() !== '' ? system.wikiDir : undefined;
-      if (wikiDir === undefined) {
-        kCtx.status = 500;
-        kCtx.body = { ok: false, error: '知识库目录不可用，投递策略无法落盘' };
-        return;
-      }
-      try {
-        kCtx.body = { ok: true, value: await writeTargetPolicies(wikiDir, checked.value) };
-      } catch (err: unknown) {
-        kCtx.status = 500;
-        kCtx.body = { ok: false, error: errorMessage(err) };
-      }
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: '投递策略请在插件配置页维护' };
       return;
     }
     try {

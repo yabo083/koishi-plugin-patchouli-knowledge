@@ -609,6 +609,27 @@ export interface SubscriptionRow {
 }
 
 /**
+ * 插件页「投递策略」表格的一行：一个投递目标 + 它的窗口 / 限量 / 抖动。
+ *
+ * `target` 写的是**可读名**（与订阅表 `targets` 同一份候选：`@chat` 或相册名），
+ * 也兼容历史落盘的稳定地址。启动时由 `apply()` 侧用绑定表解析成稳定地址
+ * （`@chat:<来源群>` / `群号/相册ID`）写进 `.patchouli/settings.json` 的 `policies`——
+ * 这是配置面与运行时之间**唯一**一次翻译，跑通之后运行时只认稳定地址。
+ */
+export interface DeliveryPolicyRow {
+  /** 投递目标（可读名 / `@chat` / 旧稳定地址）。空串 = 表格里还没填的新行，直接丢弃。 */
+  target: string;
+  /** 投递窗口文本；空串 = 全天不限时。语法见 `plugin/policy-resolve.ts`。 */
+  window: string;
+  /** 词条每自然日上限；0 = 不限。 */
+  entryPerDay: number;
+  /** 周报每自然周上限；0 = 不限。 */
+  weeklyPerWeek: number;
+  /** 窗口内随机抖动上界（分钟）；0 = 不抖动。 */
+  jitterMinutes: number;
+}
+
+/**
  * 单个投递目标的策略（定时窗口 / 限量 / 抖动）。
  *
  * 宿主是**投递目标**（稳定地址），不是订阅行：同一行里的不同目标各自独立配置。
@@ -704,6 +725,14 @@ export interface PatchouliPluginConfig extends PatchouliAdvancedConfig {
    * 的旧语义（升级零变化）。
    */
   subscriptions: SubscriptionRow[];
+  /**
+   * 投递策略表（插件页表格）：**单一真源 = 宿主 config**。
+   *
+   * 启动时按落盘绑定表把 `target` 解析成稳定地址，写进 `.patchouli/settings.json`
+   * 的 `policies`；运行时（`DeliveryGate`）只读后者，面板也只读不写（POST 一律 400）。
+   * 缺省 `[]` = 没有策略（全天 / 不限量），磁盘上的旧表会被清空。
+   */
+  deliveryPolicies: DeliveryPolicyRow[];
   /** 插件页的功能总闸。 */
   features: PatchouliFeatureToggles;
   /**

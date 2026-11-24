@@ -1005,7 +1005,7 @@ test('SETTINGS-STORE-16: 策略与绑定表同一次原子写；坏文档读空�
   }
 });
 
-test('SETTINGS-STORE-17: /api/settings 读写 policies 段并给出目标清单', async () => {
+test('SETTINGS-STORE-17: /api/settings 只读展示 policies；写入口收口成 400', async () => {
   const wikiDir = await makeWiki();
   const policy = { window: '* 22:00-23:30', entryPerDay: 3, weeklyPerWeek: 1, jitterMinutes: 15 };
   try {
@@ -1030,35 +1030,23 @@ test('SETTINGS-STORE-17: /api/settings 读写 policies 段并给出目标清单'
       assert.deepEqual(getCtx.body.policies, {}, '未配置 = 空表');
       assert.deepEqual(getCtx.body.targets, ['100/A1', '@chat:200'], '绑定表的稳定地址 + 每个投递 @chat 的行');
 
-      // 合法保存：整张表落盘，响应即新真源。
-      const postCtx = guardKoaCtx({ body: { section: 'policies', patch: { '100/A1': policy } } });
-      await request('POST /patchouli/api/settings', postCtx);
-      assert.equal(postCtx.status, 200);
-      assert.deepEqual(postCtx.body, { ok: true, value: { '100/A1': policy } });
-      assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy });
+      // 写入口只有插件配置页（Config.deliveryPolicies）：面板连合法的整表也不收。
+      for (const patch of [{ '100/A1': policy }, { '@chat:*': policy }, { 'not-a-target': policy }, null]) {
+        const postCtx = guardKoaCtx({ body: { section: 'policies', patch } });
+        await request('POST /patchouli/api/settings', postCtx);
+        assert.equal(postCtx.status, 400, `${JSON.stringify(patch)} 必须 400`);
+        assert.deepEqual(postCtx.body, { ok: false, error: '投递策略请在插件配置页维护' });
+      }
+      assert.deepEqual(await readTargetPolicies(wikiDir), {}, '400 不得改动文件');
 
+      // 只读展示照旧：插件页落盘的策略，面板读得到（这是它唯一的价值）。
+      await writeTargetPolicies(wikiDir, { '100/A1': policy });
       const after = guardKoaCtx();
       await request('GET /patchouli/api/settings', after);
       assert.deepEqual(after.body.policies, { '100/A1': policy });
       assert.deepEqual(after.body.targets, ['100/A1', '@chat:200']);
 
-      // 非法键 / 非法窗口 / 非对象都是 400，且文件不变。
-      for (const patch of [{ '@chat:*': policy }, { 'not-a-target': policy }, { '100/A1': { ...policy, window: '99:00-00:00' } }, null]) {
-        const badCtx = guardKoaCtx({ body: { section: 'policies', patch } });
-        await request('POST /patchouli/api/settings', badCtx);
-        assert.equal(badCtx.status, 400, `${JSON.stringify(patch)} 必须 400`);
-        assert.equal(badCtx.body.ok, false);
-        assert.match(badCtx.body.error, /policies/u);
-      }
-      assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy }, '400 不得改动文件');
-
-      // 清空 = 删除策略；标量段保存不受影响。
-      const clearCtx = guardKoaCtx({ body: { section: 'policies', patch: {} } });
-      await request('POST /patchouli/api/settings', clearCtx);
-      assert.equal(clearCtx.status, 200);
-      assert.deepEqual(clearCtx.body.value, {});
-      assert.deepEqual(await readTargetPolicies(wikiDir), {});
-
+      // 标量段保存不受收口影响。
       const queryCtx = guardKoaCtx({ body: { section: 'query', patch: { cardMaxHeight: 7300 } } });
       await request('POST /patchouli/api/settings', queryCtx);
       assert.equal(queryCtx.status, 200, '原有标量段保存路径不得被 policies 分支影响');

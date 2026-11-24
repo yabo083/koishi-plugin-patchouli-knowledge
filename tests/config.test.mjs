@@ -219,14 +219,24 @@ test('CONFIG-07: provider 写回幂等——custom 反复解析不被覆盖回 c
   assert.equal(legacyCarried.dispatcher.provider, 'custom');
 });
 
-test('CONFIG-10: 插件页顶层七块 + 历史 advancedMode，features 默认全开，隐藏段不物化', () => {
+test('CONFIG-10: 插件页顶层八块 + 历史 advancedMode，features 默认全开，隐藏段不物化', () => {
   assert.equal(Config.type, 'object', '顶层必须是单层 object（不再是条件表单）');
 
   const parsed = Config({});
   assert.deepEqual(
     Object.keys(parsed).sort(),
-    ['adminUsers', 'advancedMode', 'enabled', 'features', 'modelConfig', 'security', 'storage', 'subscriptions'],
-    '空配置只物化这八块：七块可见配置 + 历史判别字段',
+    [
+      'adminUsers',
+      'advancedMode',
+      'deliveryPolicies',
+      'enabled',
+      'features',
+      'modelConfig',
+      'security',
+      'storage',
+      'subscriptions',
+    ],
+    '空配置只物化这九块：八块可见配置 + 历史判别字段',
   );
 
   assert.deepEqual(
@@ -305,6 +315,35 @@ test('CONFIG-10: 插件页顶层七块 + 历史 advancedMode，features 默认�
   assert.equal(subscriptions.inner.dict.weekly.meta.description, '周报');
   assert.equal(targets.meta.role === 'dynamic', false, '不再注册成 dynamic');
   assert.equal(subscriptions.inner.dict.target.meta.hidden, true, '历史单值 target 仍收起');
+
+  // 投递策略表：插件页**唯一**的策略入口（浮窗页签已撤，POST /api/settings 收口成 400）。
+  // 目标列与订阅表同一份候选，但**独立 union 实例**：description() 是原地写 meta，
+  // 共用实例会把两列的列头写成一句。
+  const deliveryPolicies = topField('deliveryPolicies');
+  assert.equal(deliveryPolicies.meta.role, 'table', '策略是一张表（一个目标一行）');
+  assert.deepEqual(deliveryPolicies.meta.default, []);
+  assert.deepEqual(parsed.deliveryPolicies, [], '空配置 = 没有策略（全天 / 不限量）');
+  const policyTarget = deliveryPolicies.inner.dict.target;
+  assert.equal(policyTarget.type, 'union', '目标列是 const union（与订阅表同源候选）');
+  assert.equal(
+    policyTarget.list.every((item) => item.type === 'const'),
+    true,
+    'union 成员必须全是 const',
+  );
+  assert.ok(
+    policyTarget.list.some((item) => item.value === '@chat'),
+    '候选里必须有 @chat（测试进程的 cwd 没有 koishi.yml / 相册缓存）',
+  );
+  assert.equal(policyTarget.meta.description, '投递目标');
+  assert.notEqual(policyTarget, targets.inner, '两列各自一份 union 实例，列头文案互不覆盖');
+  assert.equal(deliveryPolicies.inner.dict.window.meta.default, '');
+  assert.equal(deliveryPolicies.inner.dict.entryPerDay.meta.default, 0);
+  assert.equal(deliveryPolicies.inner.dict.weeklyPerWeek.meta.default, 0);
+  assert.equal(deliveryPolicies.inner.dict.jitterMinutes.meta.default, 0);
+  assert.equal(deliveryPolicies.inner.dict.entryPerDay.meta.max, 1000);
+  assert.equal(deliveryPolicies.inner.dict.weeklyPerWeek.meta.max, 100);
+  assert.equal(deliveryPolicies.inner.dict.jitterMinutes.meta.max, 120);
+
   assert.equal(topField('enabled').meta.default, true);
 
   // 可见的两块：知识库目录与面板密钥。
