@@ -38,14 +38,15 @@ import {
   mergeAlbumCandidates,
   probeGroupAlbums,
   readAlbumCache,
-  readStartupTargetValues,
   resolveTargetBindings,
   scopeAlbumCandidates,
+  startupTargetValues,
   subscriptionTargetsSchema,
   writeAlbumCache,
   type AlbumBot,
   type AlbumCandidate,
   type AlbumServiceLike,
+  type StartupTargetOptions,
   type StartupTargetValues,
 } from './albums';
 import { registerWeeklyCron, type CronSchedulerLike } from './weekly-schedule';
@@ -632,13 +633,23 @@ const HIDDEN_LEGACY_FIELDS: Record<string, Schema> = Object.fromEntries(
 /**
  * 订阅目标候选的初值：**模块加载时**读一次实例目录（`koishi.yml` + 相册缓存）。
  *
+ * 模块顶层没有 `ctx`，这里只能先按 `process.cwd()` 猜一次（`startupTargetValues()` 的
+ * 缺省回退）。`cwd` 不是实例目录时，实例里已配置的目标就不在这份静态 const union 里，
+ * 而 union 的校验是**严格**的 —— 那会让整份配置被拒载。所以候选不是「只读这一次」：
+ *
+ * - `apply()` 拿到 `ctx.baseDir` 后立刻用同一目录**重读**（`startupTargetValues(baseDir,
+ *   { reload: true })`）并原地换掉 union 的 `inner.list`（见 `refreshSubscriptionTargets`）；
+ * - 任何先拿到 `ctx.baseDir` 的时机都可以直接调 `installStartupTargets(baseDir)` 把该实例
+ *   的值补进 union —— 这是「配置校验一定看得见实例值」的兜底入口（测试也走它）；
+ * - 同一个目录只读一次盘（`startupTargetValues` 的进程内缓存，有上界）。
+ *
  * 为什么不能在 `apply()` 里注入 dynamic schema：订阅表是 `.role('table')`，
  * schemastery-vue 的表格列在渲染前就按 `toColumns(schema.inner)` 校验，而
  * `Schema.dynamic()` 那时只是 `Schema.any()`（解析发生在渲染期）→ validate 失败、
  * 退回每行一张卡片。**表格 + 动态候选无法共存**，所以候选是静态 const union，
  * 由 `refreshSubscriptionTargets()` 在每次重载时原地换掉（见该函数）。
  */
-const STARTUP_TARGETS = readStartupTargetValues();
+const STARTUP_TARGETS = startupTargetValues();
 
 /**
  * 解析 / 展示用两张表：`targets` 的 const value 是相册的**唯一可读名**，
@@ -700,6 +711,35 @@ function refreshSubscriptionTargets(
   if (union === undefined) return next;
   union.list = albumUnionItems(albums, values.configured, { targets: true });
   return next;
+}
+
+/**
+ * `installStartupTargets` 的入参：实例目录 + 可选的范围过滤 / 强制重读。
+ */
+export interface InstallStartupTargetsOptions extends StartupTargetOptions {
+  /** 按探测范围过滤候选（异步范围还没问出来时留空 = 不过滤）。 */
+  groupIds?: readonly string[];
+  /** 跳过按目录缓存重读磁盘（`apply()` 每次重载都走，磁盘上的新相册要当轮生效）。 */
+  reload?: boolean;
+}
+
+/**
+ * 把**某个实例目录**的启动期候选装进模块级订阅目标 union。
+ *
+ * 这是「`cwd` 不是实例目录」那条缺口的兜底入口：静态 const union 在模块加载时只能按
+ * `process.cwd()` 读盘，配置校验却是严格的 —— 实例里已配置、但 cwd 下读不到的目标会让
+ * 整份配置被拒载。任何先拿到 `ctx.baseDir` 的时机（`apply()`、宿主钩子、测试）调这个函数，
+ * 该目录的候选与已配置值就进了 union，后续 `Config(value)` 不再拒载。
+ *
+ * `reload` 交回给 `startupTargetValues`：`apply()` 每次重载都要看磁盘上的新相册，
+ * 其余调用共用同一份按目录缓存的快照。读盘失败按空候选降级（`readStartupTargetValues`
+ * 内部吞异常），这里不额外抛。
+ */
+export function installStartupTargets(options: InstallStartupTargetsOptions = {}): StartupTargetValues {
+  return refreshSubscriptionTargets(
+    startupTargetValues(options.baseDir, { reload: options.reload }),
+    options.groupIds,
+  );
 }
 
 /**
@@ -2482,6 +2522,20 @@ export class PatchouliKnowledgeSystem {
     this.tuningClocks.set(channelId, updatedAt);
   }
 
+  /**
+   * 主题校准的目标群——定时调度与 `POST /api/topics` 共用这一份判定。
+   *
+   * 订阅表生效（`topicGroups !== null`）时只跑订阅来源群：`config.channels` 里残留的旧群
+   * 不该被批量校准顺手烧一遍模型。表为空时才回退旧白名单，再回退库里出现过的群。
+   * `features.topics === false` 返回空表（总闸关掉时没有目标）。
+   */
+  public async topicTargets(): Promise<string[]> {
+    if (this.config.features.topics === false) return [];
+    const snapshot = this.subscriptions();
+    if (snapshot.topicGroups !== null) return [...snapshot.topicGroups];
+    return this.config.channels.length > 0 ? [...this.config.channels] : this.localStore.listChannels();
+  }
+
   /** 由 `apply()` 挂入调度器实例；挂入后 `runTopics()` 经调度器执行并记水位。 */
   public attachTopicScheduler(scheduler: TopicScheduler): void {
     this.topicScheduler = scheduler;
@@ -2786,8 +2840,10 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   // （不做这步预过滤的话，`albums.json` 里早先探测过的退订群相册会一直挂在候选里。）
   const startupProbe = subscriptionProbeSources(system.subscriptionTable().rows, config.channels);
   // 解析表用实例里的绑定表（构造期已读盘）：候选只决定下拉与展示文案。
+  // 路径必须锚定 `ctx.baseDir`：进程 cwd 不是实例目录时读错配置会让静态 union 拒载整份配置。
+  // `reload: true` 让重载看见磁盘上的新相册；同一个进程内仍按目录缓存，不重复读盘。
   let currentTargets = refreshSubscriptionTargets(
-    { ...readStartupTargetValues(), bindings: system.targetBindingsSnapshot() },
+    { ...startupTargetValues(ctx.baseDir, { reload: true }), bindings: system.targetBindingsSnapshot() },
     startupProbe.listenAll ? undefined : startupProbe.explicit,
   );
   // 管理面密钥：配置留空且尚未初始化时，引导用户从面板完成（不再要求先上服务器抄 token）。
@@ -2895,7 +2951,9 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
    * 页面立即刷新（`albumDelivery.albums`）。
    *
    * `subscriptions[].targets` **不在这里**：它是 `.role('table')` 里的静态 union，
-   * 候选在模块加载期就定死（`STARTUP_TARGETS`），运行期注入改不动表格。
+   * 候选只能由 `refreshSubscriptionTargets()` **原地换 `inner.list`**（模块加载期先按
+   * `process.cwd()` 读一次，`apply()` 按 `ctx.baseDir` 重读并覆盖），`Schema.dynamic`
+   * 那套注入改不动表格。
    */
   function applyAlbumSchema(albums: readonly AlbumCandidate[]): void {
     if (disposed) return;
@@ -3061,11 +3119,8 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   // 每日主题校准：04:00 按群各自归并；失败 30 分钟后重试，日切水位落盘。
   const topicScheduler = new TopicScheduler(system.topicConfig, {
     channels: async () => {
-      // 功能总闸：主题校准关闭时没有目标（调度器自己会睡眠到下一个事件）。
-      if (config.features.topics === false) return [];
-      const snapshot = system.subscriptions();
-      if (snapshot.topicGroups !== null) return [...snapshot.topicGroups];
-      return config.channels.length > 0 ? config.channels : await system.localStore.listChannels();
+      // 目标群判定只有一份（`topicTargets`）：订阅表生效时就是订阅来源群，总闸关掉时为空。
+      return system.topicTargets();
     },
     run: async (channelId, options) => {
       // 绕过 `runTopics` 的调度器委派，否则会递归回本调度器。

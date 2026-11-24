@@ -290,8 +290,9 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   **宿主 router 不支持 `use` 时插件不注册任何 `/api/*` 路由并告警**——守卫装不上就宁可不提供接口，
   绝不 fail open 成零鉴权（登录 / 自检不受影响）。`/session` 在长期令牌直连（`via === 'token'`）
   时 `session` 恒为 `null`：短票据才会回显，长期令牌绝不经由响应头 / 响应体回传。
-- **前端门禁**：Console 浮窗使用 `src/web/auth-bootstrap.ts`——**打开即弹模态**（本地无未过期票据时
-  不发起任何业务请求）；每个 `/api` 请求自动带 `Authorization: Bearer <sid>`，401 即清票据重新弹。
+- **前端门禁**：Console 浮窗使用 `src/web/auth-bootstrap.ts`——**只在本插件页弹模态**（本地无未过期票据时
+  不发起任何业务请求；别的插件页上浮窗只留胶囊，`mount()` 零请求，生成块里的 401 也只清票据不弹遮罩）；
+  每个 `/api` 请求自动带 `Authorization: Bearer <sid>`，401 清票据，本插件页才重新弹门禁。
   浏览器**永不保存 apiToken**，只存 7 天会话票据（`HttpOnly` Cookie；落盘文件里也只有哈希）。
 - **首次初始化**：`security.apiToken` 留空且没有已落盘密钥时，`/session` 返回 `bootstrapRequired: true`，
   面板弹「首次初始化」——留空由服务端生成 32 字节随机串，或自定义（≥16 字符）；密钥**只显示一次**
@@ -319,7 +320,7 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   错投由三条规则挡死：①枚举内名字唯一——同批重名一律改成 `群名 · 相册名`，群名也重再追加
   `（群号）`，仍重再加 `#n`，相册名缺失回退稳定地址，`@chat` / `#group:` 是保留值（相册名撞上
   时同样走限定名，**名为 `@chat` 的相册在候选里叫 `群名 · @chat`**）；②**保存时绑定**——
-  面板保存订阅表时，把每个 `targets` 里的名字用**当时**的候选解析成 `群号/相册ID`，与订阅表
+  保存订阅表时（`POST /api/subscriptions`），把每个 `targets` 里的名字用**当时**的候选解析成 `群号/相册ID`，与订阅表
   **同一次原子落盘**写进 `settings.json` 顶层的 `targetBindings`（名字 → 地址）；
   ③**投递只查绑定表**——`resolveTarget` / `albumValueOfTarget` 先排除保留值，再查
   `targetBindings`，最后才按旧稳定地址 `群号/相册ID` 的形状直接认。绑定表里没有 = 解析失败：
@@ -337,9 +338,13 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
 - **控制台字段**：`subscriptions` 声明 `role: 'table'`（每行是表格行，列头只有
   `监听群` / `投递群（可多个）` / `词条` / `周报`，没有表级说明）；`targets` 是
   `array(const union)` + `role: 'select'`（候选 `@chat` + 各相册，取值 = 唯一可读名）。
-  候选初值在**模块加载时**由 `readStartupTargetValues()` 读一次（实例配置 + `<wikiDir>/.patchouli/albums.json`，
+  候选初值在**模块加载时**由 `startupTargetValues()` 读一次（实例配置 + `<wikiDir>/.patchouli/albums.json`，
   详见 §2.2），`apply()` 每次重载与每轮探测后由 `refreshSubscriptionTargets()` 原地替换
   `inner.list`——**新增相册重载插件即进候选**（`require` 缓存让重载不重跑模块顶层）。
+  模块顶层没有 `ctx`，那份初值只能按 `process.cwd()` 猜；`cwd` 不是实例目录时用
+  `installStartupTargets({ baseDir })` 兜底：任何先拿到 `ctx.baseDir` 的时机调它，
+  该目录的候选与已配置值立刻进 union（同目录只读一次盘，`reload: true` 强制重读），
+  否则静态 union 的严格校验会把整份配置拒载。`apply()` 就是用 `ctx.baseDir` 走这条路。
 - **为什么候选必须静态（实测，别再试一遍）**：`Schema.dynamic()` = `Schema.any().role('dynamic')`，
   解析在 schemastery-vue 的 `dynamic` **组件**里（`plugin-console` 注册 `{type:'any', role:'dynamic'}`）；
   而表格组件 `{type:'array', role:'table', validate:(v,s)=>!!toColumns(s.inner)}` 在 `schema.vue`
@@ -450,6 +455,7 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
 
 | 日期 | 变更 |
 | :--- | :--- |
+| 2026-11-24 | **审查修复：挂载零请求 + 启动期候选按实例目录兜底**：①`client/dist/index.js` 的 `mount()` 只建壳与绑定事件，**不发任何 `/api` 请求**——首次取数与两条轮询链移入新的 `startDataFlow()`，由 `syncAuthGate()` 在「本插件页」变真时启动、变假时 `stopDataFlow()` 断链；`state.own` 是唯一真源（`gateShown` 撤掉），`requestJson` 在入口按它拦下全部请求；②`src/web/auth-bootstrap.ts` 记住本页标记（`window.__ptxAuth.setOwnPage`），`gate()` 与 401 兜底只在本插件页动作，别的插件页上的 401 只清票据、不盖全屏遮罩；③`readStartupTargetValues()` 之上新增惰性的 `startupTargetValues(baseDir, { reload })`（按目录缓存，上界 8）与 `installStartupTargets({ baseDir })`：`cwd` 不是实例目录时，实例里已配置的目标也能进静态 const union，不再拒载整份配置；`apply()` 走 `ctx.baseDir` + `reload` 重读。 |
 | 2026-11-24 | **审查修复：相册名 / 掉绑标记 / 候选上界 / 摊平与热更新（`B1`~`B8`）**：①`nameAlbumTargets()` 遇到**长得像稳定地址**的相册名（`2026/Spring`）追加 `（群号/相册ID）` 后缀直到不匹配——否则保存时被当「已经是地址」跳过（永不绑定）、投递时又被当地址解析；未命名相册仍回退它自己的地址；②`resolveTargetBindings(rows, albums, previous, previousRows)`：名字在上一次**落盘的行**里却没有绑定 = 上次就掉绑了，本次同样的行不再重解析（此前一次相册消失会让**下一次相同的保存**把名字绑到别的群同名相册）；标记只在绑定表**建立过**（`bindingMigration` 或非空表）时生效，用户改过该行（值变了）才重新解析；③「已配置但未探测到」的候选不再封顶 64：上限改为订阅表自身的硬上限 `MAX_SUBSCRIPTION_ROWS × MAX_TARGETS_PER_ROW`（部分已保存值被截断 = 整份配置过不了严格校验、插件拒载）；④`flattenConfig()` 改为**逐段**判定来源（顶层 → `advanced` → 默认值），顶层写了 `trigger` 时 `advanced.channels` 的白名单不再整段丢失（退化成监听全部群）；⑤`applySettingsOverrides(next, mode)`：面板保存只应用 `previous → next` **真正变化的键**（落盘的 `trigger` 段是累积的，整段重放会把每个群 AIMD 学到的 `minBurstRate` 改回快照值），启动回灌 / 文件被外部改写仍整段应用；⑥词条投递的外层闸改为「新表生效 → 由行决定；表为空回退 → 读 `entryEnabled`」（旧开关不再压制新表已勾的「词条」）；⑦`runTopicsDirect()` 入口先判 `features.topics`（`/api/topics` 绕过调度器空表照样烧模型），关闭时返回既有的 `disabled` 结果；⑧`apply()` 的相册探测提成 `refreshAlbumCandidates()`，**每个 `await` 之后**重查 `disposed`（卸载后不再 `ctx.schema.set` / 不覆盖模块级候选与解析表），`onSubscriptionsChanged` 回调同样早退 |
 | 2026-11-24 | **可读名改为落盘绑定，投递只认绑定表（修两条 BLOCKER）**：①`settings.json` 顶层新增 `targetBindings`（名字 → `群号/相册ID`），与订阅表**同一份文档 / 同一条原子写链 / 同一次落盘**；清洗掉保留值键、超长键与非地址形状，≤1024 项；②`updateSubscriptions(rows, allowed, albums)` 在落盘前用**当时候选**绑定：解析不到的名字保留在行里但**不绑定**并进响应 `unresolved`（面板提示重选）；已有绑定只要相册还在候选里就原样保留，相册消失才掉绑——同群同名相册换探测顺序、唯一名消失后别群出现同名相册，都不再改投（`resolveTarget` / `albumValueOfTarget` 只查绑定表与旧地址形状，保留值优先，绝不回退到实时索引）；③首轮迁移：启动时绑定表为空但订阅表里有名字 → 用当前候选**一次性**填充并落盘，之后不再自动改写（幂等，解析不到不写空表）；④`@chat` / `#group:` 在 `buildTargetNameIndex`、旧别名索引、`albumValueOfTarget`、周报来源规划里全部排除，名为 `@chat` 的相册在候选里改名 `群名 · @chat`，周报行只勾 `@chat` 时上传数为 0；⑤`readStartupTargetMaps` → `readStartupTargetTables` / `installTargetTables`（解析表 = 绑定表，展示表 = 候选），解析失败 warn 改为 `目标未绑定或相册已变更：<值>，请在面板重新选择`；⑥新增测试 BIND-01（交换探测顺序地址不变）/ BIND-02（唯一名消失 + 新群同名 → 停投 + warn，不改投）/ WEEKLY-SCOPE-07a（相册取名 `@chat`）/ BIND-04（绑定落盘、迁移幂等、面板保存掉绑）。 |
 | 2026-11-24 | **安全：IPv4 映射 IPv6 字面量不再能穿透媒体代理**：①`isPrivateIPv6` 换成真正的 IPv6 归一化解析（`::` 展开、内嵌 IPv4 尾段折成两段、大小写不敏感、非法写法保守拒绝），`::ffff:HHHH:HHHH`/点分写法都拼回 32 位再按 IPv4 规则判私网·本机·保留段（`::ffff:7f00:1` = 127.0.0.1、`::ffff:a9fe:a9fe` = 169.254.169.254、`::ffff:c0a8:101` = 192.168.1.1）——旧实现只看首段、遇到 `::` 开头靠「首段为 0」侥幸拦下，判据与实际地址无关；②新增导出 `isIPv4MappedIPv6()`，媒体代理的**字面量直通分支**一律拒绝映射写法（`http://[::ffff:8.8.8.8]/` 经 WHATWG 归一成 `[::ffff:808:808]`，内嵌 IPv4 虽是公网也不放行），与私网同路径 403，绝不进 pinnedLookup / DNS；③主机名归一收敛到 `normalizeHostLiteral()`，`isPrivateOrLocalHost` 与映射判定共用。 |

@@ -964,8 +964,14 @@ export interface StartupTargetValues {
 }
 
 export interface StartupTargetOptions {
-  /** 实例目录（`koishi.yml` 与相对 `wikiDir` 的锚点）；默认 `process.cwd()`。 */
-  cwd?: string;
+  /**
+   * 实例目录（`ctx.baseDir`）：`koishi.yml` 与相对 `wikiDir` 的锚点。
+   *
+   * 必须传插件上下文里的 `ctx.baseDir`，**不能靠 `process.cwd()`**——Koishi 多实例 / 以服务方式
+   * 启动时 cwd 常常不是实例目录，读错目录会让严格 const union 把整份配置拒载。
+   * 留空才回退 `process.cwd()`（单进程脚本 / 测试的直接调用）。
+   */
+  baseDir?: string;
 }
 
 /** `ENOENT`（该文件名不存在）——换下一个候选配置名，不是故障。 */
@@ -981,8 +987,8 @@ function isMissingFile(error: unknown): boolean {
  * 依赖只在 `.pnpm/<pkg>/node_modules` 里可见，从 koishi 出发才看得到）。
  * 一个都解析不到时返回 `undefined`，调用方降级成空候选——少一个可选依赖绝不能连累插件加载。
  */
-function loadYaml(): { load?: (text: string) => unknown } | undefined {
-  const anchors: string[] = [process.cwd(), __dirname];
+function loadYaml(baseDir: string): { load?: (text: string) => unknown } | undefined {
+  const anchors: string[] = [baseDir, __dirname];
   try {
     anchors.push(dirname(createRequire(__filename).resolve('koishi')));
   } catch {
@@ -1074,6 +1080,7 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
  * 渲染期，永远赶不上。
  *
  * 读取内容：
+ * - 全部路径锚定**实例目录**（`ctx.baseDir`，缺省才用 `process.cwd()`），不跟进程 cwd 走；
  * - `plugins` 树里本插件块的 `storage.wikiDir`（缺省 `data/llmwiki`）；
  * - `<wikiDir>/.patchouli/albums.json`（上次探测结果，即候选）；
  * - `<wikiDir>/.patchouli/settings.json` 的 `targetBindings`（名字 → 稳定地址）；
@@ -1088,13 +1095,14 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
 export function readStartupTargetValues(options: StartupTargetOptions = {}): StartupTargetValues {
   const empty: StartupTargetValues = { albums: [], configured: [], bindings: {} };
   try {
-    const cwd = options.cwd ?? process.cwd();
-    const yaml = loadYaml();
+    /* 所有路径锚定实例目录（插件传 `ctx.baseDir`）；只有它为空才退回进程 cwd。 */
+    const baseDir = options.baseDir?.trim() || process.cwd();
+    const yaml = loadYaml(baseDir);
     if (yaml?.load === undefined) return empty;
     let document: unknown = undefined;
     for (const name of STARTUP_CONFIG_FILES) {
       try {
-        document = yaml.load(readFileSync(joinPath(cwd, name), 'utf8'));
+        document = yaml.load(readFileSync(joinPath(baseDir, name), 'utf8'));
         break;
       } catch (error) {
         // 该文件名不存在 → 试下一个；解析失败是真故障 → 外层降级。
@@ -1114,7 +1122,7 @@ export function readStartupTargetValues(options: StartupTargetOptions = {}): Sta
     }
     let albums: AlbumCandidate[] = [];
     try {
-      albums = parseAlbumCandidates(JSON.parse(readFileSync(albumCachePath(resolvePath(cwd, wikiDir)), 'utf8')));
+      albums = parseAlbumCandidates(JSON.parse(readFileSync(albumCachePath(resolvePath(baseDir, wikiDir)), 'utf8')));
     } catch {
       albums = [];
     }
@@ -1122,11 +1130,54 @@ export function readStartupTargetValues(options: StartupTargetOptions = {}): Sta
     return {
       albums,
       configured: configuredFromBlocks(blocks),
-      bindings: readTargetBindingsSync(resolvePath(cwd, wikiDir)),
+      bindings: readTargetBindingsSync(resolvePath(baseDir, wikiDir)),
     };
   } catch {
     return empty;
   }
+}
+
+/**
+ * 实例目录候选的进程内缓存上限。
+ *
+ * 一个 Koishi 进程通常只服务一个实例；上限只防「被反复构造的上下文 / 测试」把 Map
+ * 撑成无界泄漏 —— 触顶时整表清空（下一次调用重读磁盘，不比一次冷读更贵）。
+ */
+export const STARTUP_TARGET_CACHE_LIMIT = 8;
+
+/** `baseDir` → 该实例目录的启动期候选（首次调用读盘，之后命中缓存）。 */
+const startupTargetCache = new Map<string, StartupTargetValues>();
+
+/**
+ * 启动期候选的**惰性**入口：按实例目录首次调用时读一次并缓存（per-baseDir）。
+ *
+ * 为什么需要它：静态 const union 在**模块加载时**求值，那时没有 `ctx`，只能先按
+ * `process.cwd()` 猜一次；`cwd` 不是实例目录时，实例里已配置的目标就不在候选里，
+ * 严格校验会把整份配置拒载。有了这个入口，任何**拿到 `ctx.baseDir` 的时机**
+ * （`apply()`、测试、宿主钩子）都能把正确目录的候选补进 union（见
+ * `installStartupTargets`），而同一个目录只读一次盘。
+ *
+ * `reload` 只给「插件重载」用：`require` 缓存让重载不重跑模块顶层，磁盘上新探测到的
+ * 相册必须当轮就进候选，否则「新增相册」要等整个进程重启。
+ */
+export function startupTargetValues(
+  baseDir?: string,
+  options: { reload?: boolean } = {},
+): StartupTargetValues {
+  const key = baseDir?.trim() || process.cwd();
+  if (options.reload !== true) {
+    const cached = startupTargetCache.get(key);
+    if (cached !== undefined) return cached;
+  }
+  const values = readStartupTargetValues({ baseDir: key });
+  if (startupTargetCache.size >= STARTUP_TARGET_CACHE_LIMIT) startupTargetCache.clear();
+  startupTargetCache.set(key, values);
+  return values;
+}
+
+/** 清空实例目录缓存（测试用：让「首次调用」重新发生）。 */
+export function resetStartupTargetCache(): void {
+  startupTargetCache.clear();
 }
 
 /**

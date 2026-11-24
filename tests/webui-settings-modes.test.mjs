@@ -74,7 +74,9 @@ let __renderStageCalls = 0;
 renderStage = function () { __renderStageCalls += 1; };
 return {
   state, renderRuntimeGroup, RUNTIME_GROUPS, saveRuntimeField, refreshRuntimeGroup,
+  requestJson, postRuntimeSettings, writeJson,
   setViewport(el) { viewportEl = el; },
+  setToast(el) { toastEl = el; },
   renderStageCalls() { return __renderStageCalls; },
 };`,
   );
@@ -84,6 +86,9 @@ return {
   );
   api.clock = clock;
   api.setFetch = (next) => { fetchImpl = next; };
+  /* 产物默认 own=false（首帧路由还没认领本页）；本文件只跑渲染 / 保存内核，不跑路由判定，
+     因此按真实使用形态（用户就在本插件页上点保存）置真。WRITE-01 自己把它翻回 false。 */
+  api.state.own = true;
   return api;
 }
 
@@ -336,3 +341,43 @@ function HTMLOfFirstDetails(html) {
   const end = html.indexOf('</details>', start);
   return html.slice(start, end + '</details>'.length);
 }
+
+/* 写请求（设置 / 提示词 / 出图选项 / 词条修正与删除 / 清空知识库）走同一个受控通道：
+   非本插件页一律 reject，且**一条 fetch 都不发** —— 面板收缩到别人的插件页后，
+   残留的按钮 / 在途回调都不得对 Patchouli 的设置发起写入。 */
+test('WRITE-01: 非本插件页的写请求被拒且不产生 fetch', async () => {
+  const api = loadClient();
+  const calls = [];
+  const toastNode = { innerHTML: '', classList: { add: noop, remove: noop, toggle: noop, contains: () => false } };
+  api.setToast(toastNode);
+  api.setFetch(() => {
+    calls.push('unexpected');
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  });
+
+  api.state.own = false;
+  await assert.rejects(api.postRuntimeSettings('trigger', { thetaMin: 20 }), /非本插件页/);
+  await assert.rejects(api.writeJson('/patchouli/api/prompt', 'POST', { customPrompt: 'x' }), /非本插件页/);
+  await assert.rejects(api.writeJson('/patchouli/api/clear', 'POST', {}), /非本插件页/);
+  await assert.rejects(api.writeJson('/patchouli/api/entries/e1', 'DELETE'), /非本插件页/);
+  assert.deepEqual(calls, [], '非本插件页的写请求不得发到网络');
+  assert.ok(toastNode.innerHTML.includes('当前不在本插件页'), '写请求被拦下必须给出理由');
+
+  // 回到本插件页：同一通道放行，写请求照旧带 JSON 头与补丁体
+  api.state.own = true;
+  const sent = [];
+  api.setFetch((url, init) => {
+    sent.push({ url: String(url), init });
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, value: { thetaMin: 20 } }) });
+  });
+  await api.postRuntimeSettings('trigger', { thetaMin: 20 });
+  assert.equal(sent.length, 1, '本插件页的写请求正常发出');
+  assert.equal(sent[0].url, '/patchouli/api/settings');
+  assert.equal(sent[0].init.method, 'POST');
+  assert.equal(sent[0].init.headers['Content-Type'], 'application/json');
+  assert.equal(sent[0].init.body, JSON.stringify({ section: 'trigger', patch: { thetaMin: 20 } }));
+
+  // 写失败要带上服务端给的原因（HTTP 400 的 body），而不是只有一个状态码
+  api.setFetch(() => Promise.resolve({ ok: false, status: 400, json: async () => ({ ok: false, error: '值超出范围' }) }));
+  await assert.rejects(api.postRuntimeSettings('trigger', { thetaMin: 99 }), /值超出范围/);
+});

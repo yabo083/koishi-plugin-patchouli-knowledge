@@ -421,7 +421,7 @@ test('ALBUM-13: 启动期候选——读实例 koishi.yml + 相册缓存（订�
     [{ groupId: '1', groupName: '群1', albumId: 'a', albumName: '词条' }],
   );
 
-  const values = readStartupTargetValues({ cwd: dir });
+  const values = readStartupTargetValues({ baseDir: dir });
   assert.deepEqual(values.albums.map(albumValue), ['1/a'], '候选来自 `<wikiDir>/.patchouli/albums.json`');
   assert.deepEqual(
     values.configured,
@@ -452,13 +452,13 @@ test('ALBUM-14: 启动期候选——koishi.yml 缺失 / 损坏时静默降级�
   // 缓存存在但实例配置缺失：不去猜 wikiDir，直接空候选。
   const missing = path.resolve('tmp/startup-targets-missing');
   await makeInstance(missing, undefined, cached);
-  assert.deepEqual(readStartupTargetValues({ cwd: missing }), { albums: [], configured: [], bindings: {} });
+  assert.deepEqual(readStartupTargetValues({ baseDir: missing }), { albums: [], configured: [], bindings: {} });
 
   const broken = path.resolve('tmp/startup-targets-broken');
   await makeInstance(broken, ['plugins: [unclosed', '  - {'], cached);
-  assert.deepEqual(readStartupTargetValues({ cwd: broken }), { albums: [], configured: [], bindings: {} });
+  assert.deepEqual(readStartupTargetValues({ baseDir: broken }), { albums: [], configured: [], bindings: {} });
 
-  assert.deepEqual(readStartupTargetValues({ cwd: path.join(missing, 'no-such-dir') }), {
+  assert.deepEqual(readStartupTargetValues({ baseDir: path.join(missing, 'no-such-dir') }), {
     albums: [],
     configured: [],
     bindings: {},
@@ -482,7 +482,7 @@ test('ALBUM-15: 启动期候选——自定义 wikiDir、键名变体（~ 前缀
     [{ groupId: '5', groupName: '群5', albumId: 'z', albumName: '主题' }],
     'alt/wiki',
   );
-  const values = readStartupTargetValues({ cwd: custom });
+  const values = readStartupTargetValues({ baseDir: custom });
   assert.deepEqual(values.albums.map(albumValue), ['5/z'], '相册缓存按自定义 wikiDir（相对实例目录）定位');
   assert.deepEqual(values.configured, ['5/z'], '深层嵌套、带 ~ 前缀与 :id 后缀的插件键也要认');
 
@@ -498,9 +498,55 @@ test('ALBUM-15: 启动期候选——自定义 wikiDir、键名变体（~ 前缀
     ],
     [{ groupId: '9', groupName: '群9', albumId: 'k', albumName: '词条' }],
   );
-  const defaults = readStartupTargetValues({ cwd: fallback });
+  const defaults = readStartupTargetValues({ baseDir: fallback });
   assert.deepEqual(defaults.albums.map(albumValue), ['9/k'], 'storage.wikiDir 缺省 = data/llmwiki');
   assert.deepEqual(defaults.configured, ['9/k']);
+});
+
+test('ALBUM-15b: 候选路径锚定 baseDir——进程 cwd 指向别处时仍读实例目录（baseDir 为空才回退 cwd）', async () => {
+  const baseDir = path.resolve('tmp/startup-targets-basedir');
+  await makeInstance(
+    baseDir,
+    [
+      'plugins:',
+      '  patchouli-knowledge:',
+      '    subscriptions:',
+      "      - source: '7'",
+      "        targets: ['7/q']",
+    ],
+    [{ groupId: '7', groupName: '群7', albumId: 'q', albumName: '周报' }],
+  );
+
+  // 另一个「进程目录」：故意放一份读歪就会露出马脚的配置（不同群 / 不同 wikiDir）
+  const elsewhere = path.resolve('tmp/startup-targets-cwd');
+  await makeInstance(
+    elsewhere,
+    [
+      'plugins:',
+      '  patchouli-knowledge:',
+      '    storage:',
+      '      wikiDir: other/wiki',
+      '    subscriptions:',
+      "      - source: '8'",
+      "        targets: ['8/w']",
+    ],
+    [{ groupId: '8', groupName: '群8', albumId: 'w', albumName: '周报' }],
+    'other/wiki',
+  );
+
+  const previous = process.cwd();
+  try {
+    process.chdir(elsewhere);
+    const values = readStartupTargetValues({ baseDir });
+    assert.deepEqual(values.albums.map(albumValue), ['7/q'], '相册缓存按 baseDir 定位，不跟进程 cwd');
+    assert.deepEqual(values.configured, ['7/q'], 'koishi.yml 同样读 baseDir 里的那份');
+
+    const viaCwd = readStartupTargetValues({ baseDir: '   ' });
+    assert.deepEqual(viaCwd.albums.map(albumValue), ['8/w'], 'baseDir 为空才回退进程 cwd');
+    assert.deepEqual(viaCwd.configured, ['8/w']);
+  } finally {
+    process.chdir(previous);
+  }
 });
 
 test('ALBUM-16: 启动期辅助表——解析只认落盘绑定，候选只给展示文案', async () => {
@@ -514,7 +560,7 @@ test('ALBUM-16: 启动期辅助表——解析只认落盘绑定，候选只给�
       { groupId: '2', groupName: '', albumId: 'c', albumName: '' },
     ],
   );
-  const values = readStartupTargetValues({ cwd: dir });
+  const values = readStartupTargetValues({ baseDir: dir });
   assert.deepEqual(values.bindings, {}, 'settings.json 里没有 targetBindings → 空绑定表（不是候选的反解表）');
 
   const tables = readStartupTargetTables(values);
@@ -607,7 +653,7 @@ test('ALBUM-17: 表外群的历史缓存被丢弃；configured 点名的具体�
     ],
     cached,
   );
-  const values = readStartupTargetValues({ cwd: dir });
+  const values = readStartupTargetValues({ baseDir: dir });
   assert.deepEqual(values.albums.map(albumValue), ['100000001/a1', '100000002/t1', '100000002/t2'], '缓存本身不过滤');
   const items = albumUnionItems(
     scopeAlbumCandidates(values.albums, ['100000001'], values.configured),
@@ -795,7 +841,7 @@ test('ALBUM-19: 5 行 × 13 个未探测目标（第 65 个）全部能通过严
   }
   try {
     await makeInstance(dir, yaml, []);
-    assert.equal(readStartupTargetValues({ cwd: dir }).configured.length, 65, '启动期同样收下全部已配置值');
+    assert.equal(readStartupTargetValues({ baseDir: dir }).configured.length, 65, '启动期同样收下全部已配置值');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

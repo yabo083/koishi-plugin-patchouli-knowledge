@@ -2,15 +2,16 @@
 
 > **实现现状（0.8.72+）**：本文是 0.8.60 的方案稿，字段与实现有差异。现行契约见
 > `src/plugin/README.md` §3.5.2：行形状为 `{ source, targets: string[], entry, weekly }`
-> （**多值目标**，元素只有两种：`@chat` 或相册的**唯一可读名**——可读名在面板保存时按当时
+> （**多值目标**，元素只有两种：`@chat` 或相册的**唯一可读名**——可读名在**保存时**按当时
 > 的候选解析成 `群号/相册ID`，写进 `settings.json` 顶层的 `targetBindings`（名字 → 地址），
 > **投递期只查这张绑定表**，查不到即停投并 warn，绝不按当前候选猜；升级前直接写在 yml 里的
 > 稳定地址 `群号/相册ID` 仍按形状兼容；
 > 下拉另带 `#group:<群号>` 的不可选分组标题，它不是目标、归一与解析都跳过；历史单值 `target`
-> 读取时归一成 `targets: [target]`）；面板写入 `<wikiDir>/.patchouli/settings.json` 顶层
-> `subscriptions`（+ `targetBindings`），
-> 优先级高于宿主 `config.subscriptions`；下文出现的 `listen` / `weeklyCron` / `weeklyAlbum`
-> 等列并未实现。
+> 读取时归一成 `targets: [target]`）。
+> **编辑入口是 Koishi Console 的插件配置页**（保存写回宿主 `config.subscriptions`，即 `koishi.yml`）；
+> `<wikiDir>/.patchouli/settings.json` 顶层的 `subscriptions`（+ `targetBindings`）覆盖层由
+> `POST /api/subscriptions` 写入，优先级高于 `koishi.yml`——但**浮窗没有订阅编辑页**，该接口目前
+> 未接到任何 UI。下文出现的 `listen` / `weeklyCron` / `weeklyAlbum` 等列并未实现。
 
 **方案，基线 0.8.60；不改变阅读器页面。** Koishi 插件配置页首屏只留「讨论沉淀总开关」「订阅表」和一个默认收起的「高级设置」入口。订阅表一行可以监听一个群，将其词条发到群聊，将其周报发到另一个相册；也可以只监听，不向任何地方发送。**旧周报不是分群周报**：迁移要同时保住它的全库选材和全部接收相册，不能只迁移一份相册 ID 列表。
 
