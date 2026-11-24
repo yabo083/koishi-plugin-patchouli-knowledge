@@ -818,3 +818,33 @@ test('ROUTE-28: 切页后 tick 到来前点胶囊 → 上一页的接口失败�
   assert.ok(api.state.apiStreak < 2, `失败账从零累计，实际 ${api.state.apiStreak}`);
   assert.equal(api.state.apiUnavailable, false, '新页要自己的连续失败够数才置位');
 });
+
+test('ROUTE-29: 元数据迟到命中的自动展开不记成用户认领 —— 元数据被撤掉后立刻退场', () => {
+  /* 宿主先挂空壳、随后画出标题：这条自动展开不是用户点的胶囊。
+     若它顺手写了 `userClaimed`，宿主之后撤掉元数据时 `routeMatches()` 会被这个假凭据撑住，
+     数据面与全屏门禁就留在一页已经认不出是本插件的页面上了。 */
+  const api = loadClient({ pathname: '/plugins/abc123' });
+  api.checkRoute();
+  assert.equal(api.state.collapsed, true, '身份没认出：只留胶囊');
+
+  api.doc.title = 'LLMWiki 知识库 · Koishi';
+  api.checkRoute();
+  assert.equal(api.state.collapsed, false, '认出本插件后自动展开');
+  assert.equal(api.state.own, true, '元数据命中即为本插件页');
+  assert.equal(api.probeState().promoted, true, '自动展开每页只做一次');
+  assert.equal(api.probeState().userClaimed, false, '没有人点过胶囊：不能记成用户认领');
+  const gates = api.auth.gates;
+  const requests = api.requests().length;
+
+  /* 路由 key 不变（同一页），宿主把身份元数据撤掉 */
+  api.doc.title = 'Koishi';
+  api.checkRoute();
+
+  assert.equal(api.routeMatches(), false, '剩下的凭据只有元数据：撤掉后本页不再被认作本插件页');
+  assert.equal(api.state.own, false, 'own 必须跟着回落');
+  assert.equal(api.state.dataFlow, false, '不为认不出的页面继续取数');
+  assert.equal(api.auth.ownPage, false, '本页标记同步给生成块');
+  assert.ok(api.auth.dismissals > 0, '门禁必须收起');
+  assert.equal(api.auth.gates, gates, '不重复弹门禁');
+  assert.equal(api.requests().length, requests, '降级后不再发 /api 请求');
+});

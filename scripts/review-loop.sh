@@ -5,7 +5,8 @@
 # 用法：bash scripts/review-loop.sh <pr> [max_rounds]
 # 环境：REVIEW_PUBLIC 指向公开仓库的工作树（导出与推送在那里进行），默认 ../patchouli-knowledge-public-worktree
 # 前提：本地 gh 已认证；omp 在 PATH；主检出工作区干净。
-# 产物：tmp/review-loop/ 下的每轮 prompt 与输出、tmp/review-loop/state（已处理的最大评论 id）。
+# 产物：tmp/review-loop/ 下的每轮 prompt 与输出、tmp/review-loop/state-<pr>（该 PR 已处理的最大评论 id）。
+# 工作目录可用 REVIEW_LOOP_WORK 覆盖（沙箱用例），水位文件永远按 PR 分开。
 set -uo pipefail
 
 REPO="yabo083/koishi-plugin-patchouli-knowledge"
@@ -15,8 +16,10 @@ IO="$PROJECT/scripts/review-loop-io.mjs"
 PUBLIC="${REVIEW_PUBLIC:-$(dirname "$PROJECT")/pk-loop}"
 PR="${1:?usage: review-loop.sh <pr> [max_rounds]}"
 MAX_ROUNDS="${2:-6}"
-WORK="$PROJECT/tmp/review-loop"
-STATE="$WORK/state"
+WORK="${REVIEW_LOOP_WORK:-$PROJECT/tmp/review-loop}"
+# 水位必须按 PR 分开：共用一份时，第二个 PR 上编号更小的意见会被当成「已处理」直接丢掉，
+# 循环还会报「无新意见」当成收敛。
+STATE="$WORK/state-$PR"
 mkdir -p "$WORK"
 [ -f "$STATE" ] || echo 0 > "$STATE"
 
@@ -80,10 +83,23 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
   OMP_STATUS=$?
   tail -5 "$WORK/omp-$ROUND.log"
 
+  # 非零退出码 = 这一轮修复没跑完。工作树里还压着上一轮已发布的改动，VERIFY 会对着旧代码判绿，
+  # 一发布就把本轮意见记成「已处理」。按失败轮处理：不验证、不发布、不推进水位。
+  if [ "$OMP_STATUS" -ne 0 ]; then
+    log "omp 退出码 $OMP_STATUS：本轮修复未完成，保留现场并退出（未提交）"
+    exit 5
+  fi
+
   if ! VERIFY; then
     log "验证未通过，让 omp 再修一次"
-    omp -p --auto-approve "上一轮改动未通过验证（tsc / build / test 之一失败）。请读取 tmp/review-loop/omp-$ROUND.log 的结尾与本轮 diff，修复直到 npx tsc --noEmit、pnpm build、pnpm test 全绿。不要新增无关改动。" \
+    omp -p --auto-approve "上一轮改动未通过验证（tsc / build / test 之一失败）。请读取 $WORK/omp-$ROUND.log 的结尾与本轮 diff，修复直到 npx tsc --noEmit、pnpm build、pnpm test 全绿。不要新增无关改动。" \
       > "$WORK/omp-$ROUND-retry.log" 2>&1
+    RETRY_STATUS=$?
+    # 同上：重试命令失败时第二次 VERIFY 可能对着没被修过的旧代码判绿。
+    if [ "$RETRY_STATUS" -ne 0 ]; then
+      log "重试 omp 退出码 $RETRY_STATUS：修复未完成，保留现场并退出（未提交）"
+      exit 5
+    fi
     if ! VERIFY; then
       log "重试后仍不通过，保留现场并退出（未提交）"
       exit 2
@@ -109,7 +125,12 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
     *) log "本轮无代码改动（可能全部判为已知限制），仍继续下一轮" ;;
   esac
 
-  gh pr comment "$PR" --body "@codex review" >/dev/null 2>&1 && log "已触发下一轮审查"
+  # 触发失败不能当成跑完：水位已推进，退出码却是 0 会让「本轮已发布」看起来像「循环收敛」。
+  if ! gh pr comment "$PR" --body "@codex review" >/dev/null 2>&1; then
+    log "触发下一轮审查失败（gh pr comment 非零退出）：本轮已发布，修好 gh 后重跑"
+    exit 6
+  fi
+  log "已触发下一轮审查"
   wait_review || break
 done
 

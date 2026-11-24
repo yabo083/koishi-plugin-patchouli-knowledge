@@ -5952,14 +5952,16 @@ function collapsePanel() {
   }, 470);
 }
 
-function expandPanel() {
+function expandPanel({ claim = true } = {}) {
   if (!frameEl) return;
   clearIdleTimer();
   /* 点开即认领：胶囊只在本插件的插件页上出现在用户眼前（壳层挂在任何 /plugins/** 页上，
      但未认领的页面只留胶囊）。宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / h1 可能
      一个都读不到 —— 归属是开集问题，正文文本不再参与推断，用户点开胶囊就是唯一凭据：
-     认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。 */
-  if (isPluginPage()) {
+     认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。
+     `claim: false` 只给元数据迟到命中的自动展开用（见 checkRoute）：那条路已经靠页面身份
+     认出来了，再记一笔用户认领，会让宿主随后撤掉元数据时把一页陌生页面留在 own 状态里。 */
+  if (claim && isPluginPage()) {
     /* 认领绑定到**点击时刻**的路由：宿主切页后 700ms 内的点击若记在旧 key 上，
        下一轮 tick 会把它当跨页认领清掉，新页白点一次。
        这一句对已认领的页面同样要跑（`state.own` 还是上一页的判定结果），
@@ -7123,10 +7125,11 @@ function checkRoute() {
   }
 
   /* 软校验迟到命中（宿主先挂壳后画标题）：挂载时只留了胶囊，认出本插件页后自动展开一次。
-     每页只展开一次，用户随后手动收回不会被它掀开。 */
+     每页只展开一次，用户随后手动收回不会被它掀开。
+     这条不是用户点的胶囊，不能记成用户认领（见 expandPanel 的 `claim`）。 */
   if (routeProbe.identified && !routeProbe.promoted) {
     routeProbe.promoted = true;
-    if (!fresh && state.collapsed) expandPanel();
+    if (!fresh && state.collapsed) expandPanel({ claim: false });
   }
 }
 
