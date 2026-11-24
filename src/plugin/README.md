@@ -59,7 +59,7 @@ sequenceDiagram
 - 探测优先 `ctx['miyako-delivery'].listAlbums`，空结果/服务缺失时回退 bot 直查（`get_qun_album_list` + `attach_info` 翻页，兼容顶层与 `data` 两种响应形状）。
 - **隐藏 Bot 不参与探测**：`chatluna-sandbox` 会注册一个 `hidden = true` 的 onebot Bot，其 `internal` 是 Proxy——任何动作都回「NapCat 基线不支持 OneBot action：_get」，不跳过就会每次探测刷一屏 `[E]`；`probeGroupAlbums` / `listBotGroupIds` 都按 `hidden !== true` 过滤（`miyako-delivery` 0.3.1 起 `resolveBot` / `listAlbums` 同样跳过）。
 - 合并规则：本轮有结果的群整体覆盖；本轮为空的群**保留旧候选**（掉线 / 限流不得抹掉下拉项）；退群的群丢弃。合并结果还要按探测范围再过一遍（`scopeAlbumCandidates`）：**表外群的历史缓存直接丢**——缓存按群累积，退订群的相册不砍掉就会一直挂在下拉里；只有 `configured` 里点名的**具体相册**作为例外保留（它们所属群的其它相册照旧丢），因为静态 union 的严格校验不能少一个已保存的值。缓存落 `<wikiDir>/.patchouli/albums.json`（写回的是过滤后的集合），apply 阶段先读缓存填下拉，`ready` 后再真探测，此后每 15 分钟复探；`console/connection`（有人打开控制台）也会按 60 秒节流补探一次——**这只刷新 `albumDelivery.albums` 的在线候选**；订阅表的 `targets` 候选也在每轮探测后原地换成新的 `inner.list`，并在每次插件重载时重算，因此新增相册不再需要重启进程。
-- **订阅表恢复成表格（实测边界）**：`subscriptions` 声明 `.role('table')`。schemastery-vue 的表格在渲染前按 `toColumns(schema.inner)` 校验列，只有**静态** const union 能过；`Schema.dynamic()` = `Schema.any().role('dynamic')`，解析发生在渲染期组件里，`isConstUnion(inner)` 永远为假 → validate 失败 → 退回卡片行。**表格与动态候选互斥**，这里选表格（已与用户确认）；候选由 `apply()` 原地替换 union 的 `inner.list`，新增相册重载插件即出现。已配置但未探测到的目标由 `readStartupTargetValues().configured` 带进 union——否则静态 union 的严格校验会让整个插件配置过不了。
+- **订阅表由自定义 role 组件接管（`ptx-subscriptions`）**：`subscriptions` 声明 `.role('ptx-subscriptions')`，`client/dist/index.js` 的 role 组件用 `h()` 画与表格同一套列，并给每个投递群 chip 挂内联策略面板（role 只写 `meta`，不影响反序列化）。`Schema.dynamic()` = `Schema.any().role('dynamic')`，候选在渲染期才注入，组件读不到任何一项——所以 `targets` 候选仍是**静态** const union，由 `apply()` 原地替换 `inner.list`，新增相册重载插件即出现。已配置但未探测到的目标由 `readStartupTargetValues().configured` 带进 union——否则静态 union 的严格校验会让整个插件配置过不了。
 - **面板候选**：`GET /api/albums` 走 `loadAlbumCatalog(wikiDir, probe)`——缓存有内容直接回（`probedAt` 取文件 mtime），为空才探测一次并回写；失败返回空目录而非 500。`probe` 由 `apply()` 注入（`probeAlbumsForPanel`），探测范围与 `refreshAlbumSchema` 共用 `albumProbeScope()`，不存在两套范围。
 
 ## 2.3 知识周报排程（`src/plugin/weekly-schedule.ts`）
@@ -335,8 +335,9 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
 - **日志可读名**：启动 / 保存时的订阅日志把相册目标写成 `相册名（群号）`
   （`readStartupTargetTables().valueToName` = 当前候选的展示表；值先按绑定表解析成地址再取文案，
   解析不了的原样回显），`@chat` → `本群聊天`，一行多目标仍用 ` + ` 连接。
-- **控制台字段**：`subscriptions` 声明 `role: 'table'`（每行是表格行，列头只有
-  `监听群` / `投递群（可多个）` / `词条` / `周报`，没有表级说明）；`targets` 是
+- **控制台字段**：`subscriptions` 声明 `role: 'ptx-subscriptions'`（客户端产物里的 role
+  组件接管这张表：列头 `监听群` / `投递群` / `词条` / `周报` / `操作`，投递群是 chip 列表，
+  点 chip 在本行下方内联展开投递策略面板，没有表级说明）；`targets` 是
   `array(const union)` + `role: 'select'`（候选 `@chat` + 各相册，取值 = 唯一可读名）。
   候选初值在**模块加载时**由 `startupTargetValues()` 读一次（实例配置 + `<wikiDir>/.patchouli/albums.json`，
   详见 §2.2），`apply()` 每次重载与每轮探测后由 `refreshSubscriptionTargets()` 原地替换
@@ -346,10 +347,10 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   该目录的候选与已配置值立刻进 union（同目录只读一次盘，`reload: true` 强制重读），
   否则静态 union 的严格校验会把整份配置拒载。`apply()` 就是用 `ctx.baseDir` 走这条路。
 - **为什么候选必须静态（实测，别再试一遍）**：`Schema.dynamic()` = `Schema.any().role('dynamic')`，
-  解析在 schemastery-vue 的 `dynamic` **组件**里（`plugin-console` 注册 `{type:'any', role:'dynamic'}`）；
-  而表格组件 `{type:'array', role:'table', validate:(v,s)=>!!toColumns(s.inner)}` 在 `schema.vue`
-  里按 `isConstUnion(schema.inner)` 校验列，此时 inner 恒为 `any` → `toColumns` 返回 `undefined`
-  → validate 必失败。**结论：表格单元格只能放静态 const union，动态候选只能留在卡片里。**
+  解析在 schemastery-vue 的 `dynamic` **组件**里（`plugin-console` 注册 `{type:'any', role:'dynamic'}`），
+  序列化出去的 schema 里 inner 恒为 `any`；订阅表的 role 组件直接从序列化后的
+  `inner.dict.targets.inner.list` 读候选铺「添加目标」下拉，dynamic 的候选它一项都读不到。
+  **结论：`targets` 只能是静态 const union，动态候选只能留在卡片里。**
   静态 union 的校验同样是严格的：yml 里已配置的目标必须出现在候选里，否则整份配置过不了校验
   ——所以 `configured` 必须来自启动期读取的配置本身，而不是「本轮探测结果」。
 - **历史兼容**：宿主 yml 里的单值 `target` 在归一阶段转成 `targets: [target]`；
@@ -488,7 +489,11 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
   `${uiPath}/@plugin-<entry.id>/index.js` 便于实测取证；
 - 注入时机：`ctx.inject(['console'], …)`，仅在控制台服务就绪后注册，避免产生无效条目；
   `inject.optional` 已声明 `console`，未安装控制台时静默跳过；
-- 客户端产物 `client/dist/index.js` 为纯 ESM（`export default function (ctx)`），零外部依赖，
+- 客户端产物 `client/dist/index.js` 为纯 ESM（`export default function (ctx)`），无构建步骤、
+  **不写顶层 `import`**：宿主只在生产模式把裸模块名重写成 `../vue.js`，`devMode` 原样下发文
+  件，顶层 import 会让整份产物解析失败。订阅表 role 组件需要的 `h` / `reactive` / `onMounted`
+  因此按入口固定深度动态 `import('../vue.js')` 取（同一份宿主运行时，两种模式都命中），取不到
+  只 warn 并退回数组卡片；
   不使用 `window.open` 与 iframe，静置 5 秒自动收回为右下角胶囊徽章（可拖动，位置仅当前会话保留）。
 
 ---
@@ -497,6 +502,7 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
 
 | 日期 | 变更 |
 | :--- | :--- |
+| 2026-11-25 | **订阅表改由自定义 role 组件接管（`ptx-subscriptions`）**：①服务端 `subscriptions` 由 `.role('table')` 改为 `.role('ptx-subscriptions')`（role 只写 `meta`，不影响反序列化，界面缺席时宿主退回数组卡片）；②`client/dist/index.js` 新增 `BEGIN/END SUBSCRIPTIONS ROLE` 段：`installSubscriptionsRole()` 在 boot 里用 `ctx.schema({ type:'array', role:'ptx-subscriptions', component })` 注册（`ctx.schema` 还没混入时 `ctx.inject(['$setting'])` 等它上线），组件用 `h()` 画与表格同一套列（监听群 / 投递群 / 词条 / 周报 / 操作），任何编辑都 `emit('update:modelValue', 新数组)`（绝不就地改行对象），`row.targets` 与历史 `row.target` 都读、写回只写 `targets`；③投递群是 chip 列表，右侧显示策略摘要（`22:00·周一 09:00·3/1`），点 chip 在**本行下方**内联展开面板（日词条 / 周主题投递时间 + 预设 + 立即投 + 限量），进入组件 `GET /api/policies` 一次、保存只 `POST` 改动字段并用回执里的 `policies` 替换本地列表（失败保留草稿并显示 body.error），禁用态零 emit 零请求；④「添加目标」在有候选时是下拉（候选从序列化 schema 的 `targets.inner.list` 读，手填候选外的值会让整份配置过校验失败）；⑤旧的标签右键菜单保留但默认关闭（`window.__ptxTagMenuInjection === true` 显式打开，避免两套 UI 抢同一批节点）。测试 `SUBROLE-01`~`SUBROLE-05`（`tests/webui-subscriptions-role.test.mjs`） |
 | 2026-11-25 | **词条 sink 预筛不再把「满额但有下一班」的目标丢掉**（Codex PR #8 P2）：`DeliveryGate` 新增 `wouldDeferPastPeriod(kind, source, targetKey, at?)`——与 `planDueAt` 共用同一段 cron 计算（抽成 `cronDueAt`），返回候选 `dueAt` 的 `periodKeyFor` 是否已翻到下一个周期；`setEntryCardSink` 的渲染前预筛改为「`allows()` 通过 **或** `wouldDeferPastPeriod()` 为真」才保留，只有「本周期内就到期且已满额」的目标才丢弃并 warn——此前某个目标的 `entryCron` 把下一次到点排到明天时，今日满额会让它被剔除，全部目标都被剔除时词条直接丢弃。测试 `SCHED-24` / `SCHED-25` / `ENTRY-QUOTA-02` |
 | 2026-11-24 | **投递时间按投递类型拆分（`entryCron` / `weeklyCron`）**：①`TargetPolicy` 改为 `{ entryCron, weeklyCron, perDay, perWeek }`——日词条与周主题各一条 cron；②读盘时旧的单一 `cron` 视为 `entryCron`、`weeklyCron` 置空（写盘只写新字段），`isDefaultPolicy` 改为四字段全默认；③`policy-resolve` 新增 `cronForKind(policy, kind)`，闸门 `planDueAt` 按 `kind` 取对应 cron 再 `nextCronAt`（额度 / 随机间隔 / 批量不变）；④`POST /api/policies` 改**局部更新**（没给的字段沿用该项现值，出现旧字段 `cron` 直接 400），`GET` 返回两条 cron；⑤订阅表标签右键菜单拆成「日词条投递时间」「周主题投递时间」两块（各带「立即投」与每日 / 每周预设 chips），标签后缀为 `entryCron·周weeklyCron·限量`。 |
 | 2026-11-24 | **投递策略改为 cron + （监听群 × 目标）键，入口移到订阅表标签右键菜单**：①`TargetPolicy` 收敛为 `{ cron, perDay, perWeek }`（窗口 / `entryPerDay` / `weeklyPerWeek` / `jitterMinutes` 删除；抖动与同目标 1–3 分钟随机间隔内化为投递逻辑常量）；②策略键 = `<来源群>\u0000<目标键>`，同一个投递群在不同监听群下各有一份独立策略与额度；③`policy-resolve` 用 `parseCron`（5 字段，`*` / 数字 / `a-b` / 步进 / 逗号列表，非法即 `null`）与 `nextCronAt`（上海时区，**严格大于**入队时刻）替换窗口语法；④闸门 `offer` 排定 `dueAt`（cron + 同目标随机间隔，落库不重算），额度改在 `drain` **到点**判定（cron 推后的那一段不占额，重试不重复判额），队列项字段 `deliverAt` → `dueAt`（旧状态文件读回兼容）；⑤删除插件页 `deliveryPolicies` 表格、`normalizeDeliveryPolicyRows` / `syncDeliveryPolicies` 与 `albums.ts` 的候选依赖，`apply()` 只读 `settings.json.policies`；⑥新增 `GET/POST /api/policies`（GET 把键拆成 `{source,target,cron,perDay,perWeek}` 且 `target` 回显订阅表写法；POST 逐项 upsert、三项全缺省 = 删项、400 不改文件，`upsertTargetPolicy` 在同一条串行链上读改写）、`/api/settings.policies` 改数组形状；⑦`planWeeklyAlbumSources` 的 `allowTarget(album, source)` 带上来源群。测试新增 CRON-01..06 / SCHED-18 / POLICY-10..13 / POLICY-API-01。 |
