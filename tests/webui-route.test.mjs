@@ -85,7 +85,7 @@ function fakeMetricsView() {
  * 载入产物并按用例摆好宿主环境。
  * `mount()` 被替换成记账桩：真壳层需要完整 DOM，而本文件只断言挂载 / 收回的判定。
  */
-function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', bodyText = '', bodyNodes = null, panelNode = false }) {
+function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', bodyText = '', bodyNodes = null, panelNode = false, pluginContainerText = '' }) {
   /* 数据面的「零请求」断言靠这个记账桩：产物里的 `fetch` 与生成块抓到的
      `window.fetch` 都指向它，任何一条 /api 请求都躲不过去。 */
   const requests = [];
@@ -161,6 +161,14 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
     getElementById: () => null,
     querySelector: (selector) => {
       if (breadcrumb && selector === '.el-breadcrumb') return { textContent: breadcrumb };
+      /* 宽容器（`[class*="plugin"]`）里的整块设置表单：ROUTE-17/18 用它验证「宽源只认专有名字」。 */
+      if (pluginContainerText && selector === '[class*="plugin"]') {
+        return {
+          textContent: pluginContainerText,
+          id: '',
+          parentNode: { nodeName: 'DIV', parentNode: null },
+        };
+      }
       /* 宽取样点可能正好落在浮窗自己的 DOM 里（壳层文案带「LLMWiki 知识阅读器」）：
          这类命中必须被丢弃，否则挂载即自我认领。 */
       if (panelNode && selector === '[class*="plugin"]') {
@@ -658,4 +666,58 @@ test('ROUTE-16: 5000 字正文、专有标识在 600 字之后 → 不认领，�
   const reads = api.probeReads();
   assert.ok(reads.chars <= 600, `取样最多读 600 字，实际读了 ${reads.chars}`);
   assert.ok(reads.nodes <= 12, `凑满 600 字即中断，实际遍历了 ${reads.nodes} 个文本节点`);
+});
+
+test('ROUTE-17: 只有宽容器（[class*="plugin"]）里写着泛化词「知识库」→ 不认领、零请求、不弹门', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    // 标题与面包屑都为空：其余精确源读不到任何标识
+    title: '',
+    breadcrumb: '',
+    // 别的插件的整块设置表单里出现的普通设置文案：宽容器不是身份凭据
+    pluginContainerText: '知识库范围 群聊归档 讨论缓存 索引重建',
+  });
+  api.checkRoute();
+
+  assert.equal(api.routeMatches(), false, '宽容器里的泛化词不算页面身份');
+  assert.equal(api.state.own, false);
+  assert.equal(api.mountCount(), 1, '插件页照常挂载（只留胶囊）');
+  assert.equal(api.state.collapsed, true, '未认领：整窗不盖住宿主表单');
+  assert.equal(api.classes('pill').includes('is-visible'), true, '胶囊仍是未认领页面上的唯一入口');
+  assert.equal(api.auth.gates, 0, '宽容器泛化词不得弹全屏鉴权门');
+  assert.equal(api.auth.ownPage, false, '本页标记必须同步给生成块');
+  assert.deepEqual(api.requests(), [], '不认领就一个 /api 请求都不发');
+
+  // 深探测同样只认专有名字：宽容器的泛化词不构成认领凭据
+  api.expandPanel();
+  assert.equal(api.probeState().deepTried, true, '深探测已跑过');
+  assert.equal(api.state.own, false, '宽容器泛化词不得经深探测认领');
+  assert.equal(api.auth.gates, 0, '认不出就不弹门禁');
+  assert.deepEqual(api.requests(), [], '零请求保持不变');
+  assert.equal(api.monitorStatusText(), '当前不是本插件页');
+});
+
+test('ROUTE-18: 同一宽容器里写着专有名字「知识阅读器」→ 认领本页（宽源 + 专有 hint 仍有效）', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: '',
+    breadcrumb: '',
+    // 宿主把插件名画在整块设置表单里：宽源只认专有名字，这种命中仍然要成立
+    pluginContainerText: '知识阅读器 频道白名单 索引重建',
+  });
+  api.checkRoute();
+
+  assert.equal(api.routeMatches(), true, '宽容器命中专有名字即为本插件页');
+  assert.equal(api.state.own, true);
+  assert.equal(api.auth.ownPage, true, '认领结果必须同步给生成块');
+  assert.equal(api.mountCount(), 1);
+  assert.equal(api.state.collapsed, false, '认出本插件页即展开');
+  assert.equal(api.auth.gates, 1, '认领本页即弹门禁');
+  const started = api.requests();
+  assert.ok(started.length > 0, '认领后立刻启动数据面');
+  assert.equal(
+    started.every((url) => url.startsWith('/patchouli/api/')),
+    true,
+    '取数只打 /api',
+  );
 });

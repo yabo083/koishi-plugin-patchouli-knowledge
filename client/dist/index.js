@@ -67,6 +67,11 @@ const PLUGIN_ROUTE_NAMES = ['patchouli-knowledge', 'patchouli'];
 /* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」（展开 + 鉴权门）；名字认得出时
    只影响自动展开。 */
 const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
+/* 专有标识：只认**本插件独有**的名字。泛化词（「知识库」）不在其中 —— 别的插件页正文随口提一句
+   「知识库」，就把整页认领走，全屏门与 /api 请求全落到别人的配置页上。
+   宽容器（h2 / 页头 / header / class 带 plugin 的容器）与页面正文只允许这一集。
+   命中任一即认领（要求多个会漏掉只画了名字的宿主版本）。 */
+const DEEP_PROBE_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识阅读器', '大图书馆'];
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
    面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
 const IDENTITY_PROBE_TICKS = 8;
@@ -6878,21 +6883,29 @@ function currentRouteKey() {
   return `${path}${hash}`;
 }
 
-/* 页面身份文本：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。
+/* 页面身份取样：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。
    宿主各版本画的标题层级不一样（h1 / h2 / el-page-header / 自绘 header），单点取样经常落空，
-   所以按优先级铺开一排取样点；命中任一即算认出，取样多少不影响判定语义。
-   `document.title` 与 `[data-plugin-name]` 排在最前，仍是宿主给得最准的两处。 */
-const IDENTITY_SELECTORS = [
-  '[data-plugin-name]',
-  '[data-plugin]',
-  '.el-breadcrumb',
-  'h1',
+   所以铺开一排取样点 —— 但**按证据强度分级**，不是把文本拼成一条再判一次：容器越宽，里面越可能
+   装着与本插件无关的普通设置文案（别的插件页写着「知识库范围」就被认领走），泛化词一旦进宽容器，
+   全屏门与 /api 请求就落到别人的配置页上。
+   - 精确源：路由 + `document.title` + data-* / 面包屑 / h1，宿主专为页面身份画的，全部标识都算数；
+   - 宽容器：装的是整块设置表单，只认本插件独有的名字（`DEEP_PROBE_HINTS`）；
+   - 页面正文：只在用户点开胶囊后的深探测里读，同样只认专有名字。
+   自动软校验与深探测共用这张表：新增取样点只改这里，不要再写第二份判断。 */
+const IDENTITY_PRECISE_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
+const IDENTITY_WIDE_SELECTORS = [
   'h2',
   '.el-page-header__content',
   '.el-page-header',
   'header',
   '[class*="page-header"]',
   '[class*="plugin"]',
+];
+const IDENTITY_BODY_SOURCE = { hints: DEEP_PROBE_HINTS, body: true };
+const IDENTITY_SOURCES = [
+  { hints: IDENTITY_HINTS, route: true, selectors: IDENTITY_PRECISE_SELECTORS },
+  { hints: DEEP_PROBE_HINTS, selectors: IDENTITY_WIDE_SELECTORS },
+  IDENTITY_BODY_SOURCE,
 ];
 
 /* 取样落在浮窗自己的 DOM 里就丢弃：壳层的文案本身带「LLMWiki 知识阅读器」，
@@ -6906,29 +6919,45 @@ function insideOwnPanel(node) {
   return false;
 }
 
-function pageIdentityText() {
+/* 命中判定：`hints` 是这一档允许的标识集，文本小写后比对。 */
+function identityHits(text, hints) {
+  if (typeof text !== 'string' || !text) return false;
+  const lower = text.toLowerCase();
+  return hints.some((hint) => lower.includes(hint));
+}
+
+/* 一个证据源的文本。路由与 `document.title` 属精确源；`body` 源走页面正文取样（深探测专用）。
+   取样落在浮窗自身子树里一律丢弃 —— 壳层文案带「LLMWiki 知识阅读器」，读进来就是自我认领。 */
+function identitySourceText(source) {
+  if (source.body) return pageBodyText();
   const parts = [];
-  try {
-    parts.push(window.location.pathname || '', window.location.hash || '', window.location.search || '');
-  } catch (err) { /* 宿主没暴露 location 时按「认不出」处理 */ }
-  try {
-    if (typeof document.title === 'string') parts.push(document.title);
-  } catch (err) { /* 同上 */ }
-  for (const selector of IDENTITY_SELECTORS) {
+  if (source.route) {
+    try {
+      parts.push(window.location.pathname || '', window.location.hash || '', window.location.search || '');
+    } catch (err) { /* 宿主没暴露 location 时按「认不出」处理 */ }
+    try {
+      if (typeof document.title === 'string') parts.push(document.title);
+    } catch (err) { /* 同上 */ }
+  }
+  for (const selector of source.selectors) {
     let node = null;
     try { node = document.querySelector(selector); } catch (err) { node = null; }
     if (!node || insideOwnPanel(node)) continue;
     const text = typeof node.textContent === 'string' ? node.textContent : '';
     if (text) parts.push(text);
   }
-  return parts.join(' ').toLowerCase();
+  return parts.join(' ');
 }
 
-/* 软校验：命中任一标识就认为当前页是本插件的配置页。命中失败只影响自动展开，不影响挂载。 */
+/* 软校验：逐个证据源按它允许的标识集比对，命中任一即认为当前页是本插件的配置页。
+   命中失败只影响自动展开，不影响挂载。正文源不在这里读：那是用户点开胶囊后才跑的深探测，
+   600 字取样不该搭在每轮路由判定上。 */
 function pageIdentityMatches() {
-  const text = pageIdentityText();
-  if (!text) return false;
-  return IDENTITY_HINTS.some((hint) => text.includes(hint));
+  for (const source of IDENTITY_SOURCES) {
+    if (source.body) continue;
+    if (identityHits(identitySourceText(source), source.hints)) return true;
+  }
+  return false;
 }
 
 /* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。
@@ -6938,12 +6967,6 @@ let routeProbe = { key: '', identified: false, ticks: 0, promoted: false, deepTr
 function resetRouteProbe(key) {
   routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
 }
-
-/* 深探测的专有标识：只认**本插件独有**的名字。
-   泛化词（「知识库」）留给自动取样（`IDENTITY_HINTS`）：别的插件页正文随口提一句「知识库」，
-   用户点一下胶囊就把整页认领走 —— 全屏门与 /api 请求全落到别人的配置页上。
-   命中任一即认领（要求多个会漏掉只画了名字的宿主版本）。 */
-const DEEP_PROBE_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识阅读器', '大图书馆'];
 
 /* 这些元素的内容不是可见正文：读进来只会制造假命中（脚本里的变量名、样式里的注释文案）。 */
 const DEEP_PROBE_SKIP = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
@@ -6996,9 +7019,8 @@ function probeOwnershipDeep() {
   if (state.own) return true;
   if (routeProbe.deepTried) return false;
   routeProbe.deepTried = true;
-  const text = pageBodyText().toLowerCase();
-  if (!text) return false;
-  if (!DEEP_PROBE_HINTS.some((hint) => text.includes(hint))) return false;
+  /* 正文源与宽容器同一档（`IDENTITY_SOURCES`）：只认专有名字，泛化词不算。 */
+  if (!identityHits(identitySourceText(IDENTITY_BODY_SOURCE), IDENTITY_BODY_SOURCE.hints)) return false;
   /* 认领结果记在本页上：下一次 checkRoute 现算 routeMatches() 时不能把用户刚要到手的页收回去。 */
   routeProbe.deepOwned = true;
   routeProbe.identified = true;
