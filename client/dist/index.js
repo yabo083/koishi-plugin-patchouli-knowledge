@@ -60,15 +60,19 @@ const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
    多实例 / 分组时是宿主生成的随机 id。
    两次判定必须分开，否则随机实例 id 的页面连浮窗都不会出现：
    - `isPluginPage()`：**宽**——只要在某个插件的插件页上就挂载（浮窗与胶囊是只读入口，不遮宿主）；
-   - `routeMatches()`：**窄**——名字或页面身份文本认出本插件才展开、才弹全屏鉴权门。 */
+   - `routeMatches()`：**窄**——名字认出本插件、页面身份元数据命中，或用户点开胶囊认领，才展开、
+     才弹全屏鉴权门。 */
 const ROUTE_SEGMENT = '/plugins/';
 /* 本插件在 console 里的页面名（koishi-plugin- 前缀已去掉）；`:实例 id` 后缀同样命中。 */
 const PLUGIN_ROUTE_NAMES = ['patchouli-knowledge', 'patchouli'];
-/* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」（展开 + 鉴权门）；名字认得出时
-   只影响自动展开。 */
+/* 页面身份只认**元数据**：标题 / 面包屑 / h1 / data-*，全是宿主专为页面身份画的取样点。
+   正文文本一概不读 —— 页面归属是开集问题，靠正文猜永远挡不住下一条反例（SPA 残留的旧视图、
+   隐藏子树、别的插件设置表单里随口写的「知识库」…），取样越宽误认领的代价越大：
+   全屏门与 /api 请求会落到别人的配置页上。随机实例 id 且元数据读不到的页面改由
+   「用户点开胶囊即认领」兜底（见 expandPanel）。 */
 const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
-   面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
+   面包屑，第一轮读不到元数据不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
 const IDENTITY_PROBE_TICKS = 8;
 const ROOT_ID = 'patchouli-organic-root';
 const STYLE_ID = 'patchouli-organic-style';
@@ -218,6 +222,11 @@ const REQUEST_TIMEOUT_MS = 15000;
 /* 非本插件页时请求被拦下的错误文案：调用方的 catch 会把它当普通失败展示。 */
 const NOT_OWN_PAGE = '非本插件页：已暂停取数';
 const NOT_OWN_PAGE_WRITE = '当前不在本插件页';
+/* 「接口不可用」：404 / 405 / 410 与「响应不是 JSON」说明这台宿主上根本没有这套接口（插件没启用 /
+   路径被反代吞掉 / 落到了静态站），和「连不上服务」（网络错误 / 5xx）是两回事：前者重连多少次都
+   不会好，把用户引向网络排查是错误归因。401 不算 —— 那是会话问题，走生成块的 gate() 流程。
+   连续两次才报（单次抖动不改判定）。 */
+const API_UNAVAILABLE_STREAK = 2;
 /* 读写的唯一物理闸口：本页标记 + 超时。
    浮窗挂在**任何** /plugins/** 页上（宿主用随机实例 id 渲染插件页时，不挂就等于用户看不到入口），
    但取数与写入都只属于本插件页 —— 别的插件页既不为其拉数据，也不许改它的设置；
@@ -240,11 +249,38 @@ function guardedFetch(url, options, notify) {
     });
 }
 
+/* 读请求的失败分级：只有「404 / 405 / 410」与「响应不是 JSON」算接口不可用（见
+   `API_UNAVAILABLE_STREAK`）。错误对象上带标记，供 `noteApiRead` 记账。 */
+function readFailure(status) {
+  const err = new Error(status ? `HTTP ${status}` : '响应不是 JSON');
+  err.apiUnavailable = true;
+  return err;
+}
+
 function requestJson(url, options) {
-  return guardedFetch(url, options).then((res) => {
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
-  });
+  return guardedFetch(url, options)
+    .then((res) => {
+      if (!res.ok) {
+        const status = Number(res.status) || 0;
+        /* 401 / 5xx / 网络层是「连接」问题，不在这一档 */
+        if (status === 404 || status === 405 || status === 410) throw readFailure(status);
+        throw new Error('HTTP ' + res.status);
+      }
+      if (typeof res.json !== 'function') return res;
+      return res.json().catch(() => { throw readFailure(0); });
+    })
+    .then((data) => { noteApiRead(null); return data; }, (err) => { noteApiRead(err); throw err; });
+}
+
+/* 接口可用性记账：连续命中「接口不可用」才置位；任何一次成功都清零。
+   置位/清零时重画状态位 —— 监控条与胶囊说的必须是同一件事。 */
+function noteApiRead(err) {
+  state.apiStreak = err && err.apiUnavailable ? state.apiStreak + 1 : 0;
+  const next = state.apiStreak >= API_UNAVAILABLE_STREAK;
+  if (next === state.apiUnavailable) return;
+  state.apiUnavailable = next;
+  refreshPhase();
+  if (state.stage === 'metrics') updateMetrics();
 }
 
 /* 写请求（设置 / 出图选项 / 提示词 / 词条修正与删除 / 清空知识库）一律走同一个闸口：
@@ -311,6 +347,10 @@ const PHASE_LABELS = {
   COOLING: '平息观察',
   SUMMARIZING: '沉淀生成',
   OFFLINE: '连接中断',
+  /* 未认领本页：数据面没启动，不是「连不上」——两者混用会让用户白排查网络。 */
+  UNOWNED: '当前不是本插件页',
+  /* 用户点开胶囊认领的页面上接口整片不存在（404 / 非 JSON）：重连不会好，也不是断线。 */
+  API_UNAVAILABLE: '接口不可用',
 };
 
 function phaseLabel(phase) {
@@ -326,6 +366,8 @@ const PHASE_TIPS = {
   COOLING: '讨论已平息，等待沉淀',
   SUMMARIZING: '正在生成词条',
   OFFLINE: '无法连接服务，请检查后刷新',
+  UNOWNED: '在本插件的插件页打开才取数',
+  API_UNAVAILABLE: '本页没有这套接口：确认插件已启用，且 /patchouli/api 未被反代拦截',
 };
 
 /* 词条状态中文映射：后端只有 verified / tentative / open 三态 */
@@ -1127,12 +1169,16 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   #patchouli-organic-root .ptx-phase[data-phase="SUMMARIZING"] i { background: var(--bio-secondary); }
   #patchouli-organic-root .ptx-phase[data-phase="LOADING"] { color: var(--bio-ink-3); background: var(--surface-track); border-color: var(--hairline-strong); }
   #patchouli-organic-root .ptx-phase[data-phase="LOADING"] i { background: var(--bio-ink-4); animation: ptxPhasePulse 2.6s var(--ease-organic) infinite; }
+  /* 未认领本页：中性态（不是故障），与 OFFLINE 的警示红明确区分 */
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"] { color: var(--bio-ink-3); background: var(--surface-track); border-color: var(--hairline-strong); }
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"] i { background: var(--bio-ink-4); }
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] { color: var(--danger-ink); background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.24); }
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] i { background: var(--bio-danger); }
 
   /* 可点击反馈：只加深描边（各相位用自己的语义色阶），底色与呼吸点一律不动 */
   #patchouli-organic-root .ptx-phase:hover { border-color: rgba(14, 164, 79, 0.36); }
-  #patchouli-organic-root .ptx-phase[data-phase="LOADING"]:hover { border-color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-phase[data-phase="LOADING"]:hover,
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"]:hover { border-color: var(--bio-ink-4); }
   #patchouli-organic-root .ptx-phase[data-phase="BURSTING"]:hover,
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"]:hover { border-color: rgba(196, 72, 92, 0.46); }
   #patchouli-organic-root .ptx-phase[data-phase="COOLING"]:hover { border-color: rgba(184, 121, 30, 0.46); }
@@ -3016,6 +3062,10 @@ const state = {
   detailLoading: false,
   status: null,
   statusChecked: false,
+  /* 接口可用性账：连续命中「404 / 非 JSON」的次数与置位（见 requestJson / noteApiRead）。
+     置位只在用户点开胶囊认领的页面上显示成「接口不可用」，不撤销认领。 */
+  apiStreak: 0,
+  apiUnavailable: false,
   tickerIndex: 0,
   lastView: '',
   idleTimer: null,
@@ -4021,19 +4071,71 @@ function monitorViewport() { return viewportEl; }
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
+  /* 监控条状态文案的唯一真源：**不是本插件页** / **接口不可用** / **真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向；
+     用户点开胶囊认领的页面上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
+     认领不撤销 —— 用户已经明确要用这个面板，能做的只是把原因说准。 */
+  function monitorStatusText() {
+    if (!state.own) return '当前不是本插件页';
+    if (routeProbe.userClaimed && state.apiUnavailable) return '接口不可用';
+    return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
+  }
+
+  /* 显示态与缓存是两回事，必须分开清：
+     - 缓存 = state.status（最近一次拿到的快照）。离开本页**不清**：回来立刻可重画，不闪空态。
+     - 显示态 = 下面这些变量 + 屏上的数字 / 预览 / 曲线 / 消息指纹。本页一变就得清空，
+       否则「当前不是本插件页」的标题下仍挂着**上一页**的指标与图表。
+     清空后的终态 = 空态：指标全 '—'、预览回「等待当前群的新消息」、曲线没有路径、指纹作废。 */
+  function clearTrafficDisplay() {
+    if (trafficFrame) cancelAnimationFrame(trafficFrame);
+    trafficFrame = 0;
+    trafficLastFrame = 0;
+    trafficLastSecond = -1;
+    trafficChannel = '';
+    trafficAnchor = 0;
+    trafficReceived = 0;
+    trafficPoints = [];
+    trafficScale = 10;
+    var root = monitorViewport();
+    var line = root ? root.querySelector('.ptx-ecg-line') : null;
+    if (line) line.setAttribute('d', '');
+    var panel = root ? root.querySelector('.ptx-panel') : null;
+    if (panel) panel.classList.remove('is-burst');
+    trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
+    trafficText('[data-traffic-summary]', '');
+    trafficText('[data-traffic-max]', trafficScale + ' 条');
+    trafficText('[data-traffic-mid]', trafficScale / 2 + ' 条');
+    trafficText('[data-traffic-note]', '');
+    trafficText('[data-traffic-time="0"]', '');
+    trafficText('[data-traffic-time="1"]', '');
+    trafficText('[data-traffic-time="2"]', '');
+    for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+    trafficText('[data-message-author]', '');
+    trafficText('[data-message-time]', '');
+    /* 指纹跟着一起作废：不重置的话，回到本页时同一条消息会被「指纹没变」跳过，预览永远空着。 */
+    resetLatestMessage();
+    trafficText('.ptx-monitor-status', monitorStatusText());
+  }
+
   function updateMetrics() {
     var root = monitorViewport();
     if (!root || !root.querySelector('[data-traffic-summary]')) return;
     var status = state.status;
+    /* 未认领本页：数据面没启动，屏上留着的就是上一页的残留 —— 无条件清空。
+       不能只在「频道变了」时清：同一个群切到别的插件页，trafficChannel 恰好等于当前作用域，
+       原来的判断就整段跳过，指标与图表跟着页走。 */
+    if (!state.own) {
+      clearTrafficDisplay();
+      return;
+    }
     if (!status) {
+      /* 真断线 / 首帧：**同一个群**保留最后一次数据并由文案说明（见 monitorStatusText），
+         换了群才清 —— 上一个群的数字不能贴在这个群上。 */
       if (trafficChannel && trafficChannel !== channelScopeId()) {
-        trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
-        trafficText('[data-message-author]', '');
-        trafficText('[data-message-time]', '');
-        resetLatestMessage();
-        for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+        clearTrafficDisplay();
+        return;
       }
-      trafficText('.ptx-monitor-status', state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务');
+      trafficText('.ptx-monitor-status', monitorStatusText());
       return;
     }
     var channel = String(status.channelId || channelScopeId());
@@ -4090,9 +4192,11 @@ function monitorViewport() { return viewportEl; }
     trafficFrame = requestAnimationFrame(animateTraffic);
   }
 
+  /* 回到前台补一次数据：只在**本插件页**发。未认领的页面上数据面根本没启动，
+     这里不设闸口就等于「切一次标签页 = 一条 /api 请求」。 */
   function resumeTraffic() {
     var root = monitorViewport();
-    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed) return;
+    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed || !state.own) return;
     loadStatus().then(function () { refreshPhase(); updateMetrics(); });
   }
   document.addEventListener('visibilitychange', resumeTraffic);
@@ -4891,7 +4995,13 @@ function startTicker() {
 }
 
 function refreshPhase() {
-  const phase = state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING');
+  /* 两种「不是断线」的态要分开说：未认领本页（数据面没启动）、认领后接口整片不存在
+     （404 / 非 JSON，重连也不会好）。报 OFFLINE 是错误归因。 */
+  const phase = !state.own
+    ? 'UNOWNED'
+    : (routeProbe.userClaimed && state.apiUnavailable
+      ? 'API_UNAVAILABLE'
+      : (state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING')));
   if (frameEl) frameEl.setAttribute('data-phase', phase);
   if (!phaseEl) return;
   phaseEl.setAttribute('data-phase', phase);
@@ -5835,6 +5945,17 @@ function collapsePanel() {
 function expandPanel() {
   if (!frameEl) return;
   clearIdleTimer();
+  /* 点开即认领：胶囊只在本插件的插件页上出现在用户眼前（壳层挂在任何 /plugins/** 页上，
+     但未认领的页面只留胶囊）。宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / h1 可能
+     一个都读不到 —— 归属是开集问题，正文文本不再参与推断，用户点开胶囊就是唯一凭据：
+     认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。 */
+  if (!state.own && isPluginPage()) {
+    /* 认领绑定到**点击时刻**的路由：宿主切页后 700ms 内的点击若记在旧 key 上，
+       下一轮 tick 会把它当跨页认领清掉，新页白点一次。 */
+    routeProbe.key = currentRouteKey();
+    routeProbe.userClaimed = true;
+    syncAuthGate(true);
+  }
   state.collapsed = false;
   if (pillEl) pillEl.classList.remove('is-visible');
   // 先摘除 docked 让面板立即可见，再撤销折叠态播放展开过渡
@@ -5843,6 +5964,12 @@ function expandPanel() {
   /* visibility:hidden 期间宽度读不到，重新可见的这一帧补一次档位判定 */
   syncResponsiveTier();
   setTimeout(resetIdleTimer, 80);
+  /* 没认领本页就没有数据面可拉：直接按「不是本插件页」刷新状态位，
+     不去发注定被闸口拒掉的请求（也就不用把拒绝当断线来报）。 */
+  if (!state.own) {
+    refreshPhase();
+    return;
+  }
   loadStatus().then(() => { refreshPhase(); if (state.stage === 'metrics') updateMetrics(); });
 }
 
@@ -6753,6 +6880,8 @@ function unmount() {
   state.collapsed = false;
   state.own = false;
   state.dataFlow = false;
+  /* 壳层销毁即本次认领作废：重新挂载要重新取样 / 重新走一次用户意图兜底。 */
+  resetRouteProbe('');
   /* 壳层都没了就不再是「本插件页」：生成块的 401 兜底不能还给幽灵面板弹门禁。 */
   syncGateOwnPage(false);
   state.maximized = false;
@@ -6787,13 +6916,15 @@ function isPluginPage() {
 }
 
 /* 窄判定：是不是**本插件**的插件页。
-   名字命中（`/plugins/patchouli-knowledge[:id]`）无条件认领；名字是宿主生成的随机实例 id 时，
-   退回页面身份文本（标题 / 面包屑 / data-plugin-name）。它只影响展开与鉴权门，不影响挂载。 */
+   三条凭据任一成立即认领：路由 key 就是本插件名（`/plugins/patchouli-knowledge[:id]`）、
+   页面身份元数据命中（标题 / 面包屑 / data-* / h1）、用户在胶囊上点开过（`userClaimed`，
+   随机实例 id 的页面唯一可用的凭据）。它只影响展开与鉴权门，不影响挂载。 */
 function routeMatches() {
   const key = pluginRouteKey();
   if (key === '') return false;
   if (routeKeyOwned(key)) return true;
-  return pageIdentityMatches();
+  if (pageIdentityMatches()) return true;
+  return routeProbe.userClaimed;
 }
 
 /* 当前路由键：路径 + hash 变了才重新做软校验（宿主是 SPA，pushState 不会重载脚本）。 */
@@ -6803,38 +6934,58 @@ function currentRouteKey() {
   return `${path}${hash}`;
 }
 
-/* 页面身份文本：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。 */
+/* 页面身份取样：只读**元数据** —— `document.title` 与宿主专为页面身份画的取样点
+   （data-* / 面包屑 / h1）。正文与宽容器一概不读：归属是开集问题，容器越宽越可能装着与本插件
+   无关的普通设置文案（别的插件页写着「知识库范围」就被认领走），全屏门与 /api 请求就落到别人的
+   配置页上。读不到元数据就当作「认不出」而不是「不是本插件」—— 随机实例 id 的页面由用户点开
+   胶囊认领（见 expandPanel），这条路不需要任何文本推断。 */
 const IDENTITY_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
 
-function pageIdentityText() {
+/* 取样落在浮窗自己的 DOM 里就丢弃：壳层的文案本身带「LLMWiki 知识阅读器」，
+   拿它当页面身份会自我认领 —— 别的插件页一挂载就被判成本插件页。 */
+function insideOwnPanel(node) {
+  let cur = node || null;
+  while (cur) {
+    if (cur.id === ROOT_ID) return true;
+    cur = cur.parentNode || null;
+  }
+  return false;
+}
+
+/* 命中判定：文本小写后与 `IDENTITY_HINTS` 比对（不区分大小写，包含即算）。 */
+function identityHits(text) {
+  if (typeof text !== 'string' || !text) return false;
+  const lower = text.toLowerCase();
+  return IDENTITY_HINTS.some((hint) => lower.includes(hint));
+}
+
+/* 软校验：元数据命中任一标识即认为当前页是本插件的配置页。命中失败只影响自动展开，不影响挂载。
+   取样量恒有界（一个标题 + 四个节点的 textContent），不遍历页面、不读正文。 */
+function pageIdentityMatches() {
   const parts = [];
   try {
-    parts.push(window.location.pathname || '', window.location.hash || '', window.location.search || '');
-  } catch (err) { /* 宿主没暴露 location 时按「认不出」处理 */ }
-  try {
     if (typeof document.title === 'string') parts.push(document.title);
-  } catch (err) { /* 同上 */ }
+  } catch (err) { /* 宿主没暴露 title 时按「认不出」处理 */ }
   for (const selector of IDENTITY_SELECTORS) {
     let node = null;
     try { node = document.querySelector(selector); } catch (err) { node = null; }
-    const text = node && typeof node.textContent === 'string' ? node.textContent : '';
+    if (!node || insideOwnPanel(node)) continue;
+    const text = typeof node.textContent === 'string' ? node.textContent : '';
     if (text) parts.push(text);
   }
-  return parts.join(' ').toLowerCase();
+  return identityHits(parts.join(' '));
 }
 
-/* 软校验：命中任一标识就认为当前页是本插件的配置页。命中失败只影响自动展开，不影响挂载。 */
-function pageIdentityMatches() {
-  const text = pageIdentityText();
-  if (!text) return false;
-  return IDENTITY_HINTS.some((hint) => text.includes(hint));
-}
-
-/* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。 */
-let routeProbe = { key: '', identified: false, ticks: 0, promoted: false };
+/* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。
+   `userClaimed` 是「用户点开胶囊」的凭据：认领跟着本页走 —— 同一页内的 700ms 轮询不清，
+   路由 key 一变（切到别的页）立刻作废。 */
+let routeProbe = { key: '', identified: false, ticks: 0, promoted: false, userClaimed: false };
 
 function resetRouteProbe(key) {
-  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false };
+  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, userClaimed: false };
+  /* 认领作废，接口可用性账一起清：新页面的失败要重新累计，不能带着上一页的「接口不可用」。 */
+  state.apiStreak = 0;
+  state.apiUnavailable = false;
 }
 
 /* 挂载即收回：软校验没认出本插件页时只留悬浮胶囊，不遮住别的插件页。
@@ -6871,8 +7022,14 @@ function syncAuthGate(own) {
   syncGateOwnPage(own);
   if (own === state.own) return;
   state.own = own;
+  /* 归属一变，状态位与监控条的语义就变了（本页 / 非本页 / 断线三态）：
+     立刻按新归属重画，别让上一页的「连接中断」留在胶囊上误导用户。 */
+  refreshPhase();
   if (own) {
     startDataFlow();
+    /* 缓存（state.status）没被动过：立刻按它重画一次，等新数据回来自然覆盖。
+       不重画就得等一次往返，监控页会先闪一帧空态。 */
+    if (state.stage === 'metrics') updateMetrics();
     try {
       if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
     } catch (err) {
@@ -6881,6 +7038,7 @@ function syncAuthGate(own) {
     return;
   }
   stopDataFlow();
+  if (state.stage === 'metrics') updateMetrics();
   try {
     if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
   } catch (err) {
@@ -6919,11 +7077,13 @@ function checkRoute() {
   const fresh = !state.mounted;
   if (fresh) mount();
 
-  /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。 */
+  /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。
+     用户点开胶囊的认领也算数（`routeProbe.userClaimed`）：下一轮判定不能把用户刚要到手的页
+     收回去，只有路由 key 变了（resetRouteProbe）才作废。 */
   syncAuthGate(routeMatches());
 
   if (rootEl) {
-    /* 刚进入的页面还没被认领（别人的插件页 / 身份文本未画出来）时只留胶囊：
+    /* 刚进入的页面还没被认领（别人的插件页 / 元数据未画出来）时只留胶囊：
        整窗不盖住宿主表单；用户自己点开的胶囊不再被下一次判定收回。 */
     if ((fresh || newRoute) && !routeProbe.identified) collapseQuietly();
     rootEl.classList.remove('ptx-hidden');

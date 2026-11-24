@@ -45,19 +45,71 @@ export function trafficRuntime(): string {
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
+  /* 监控条状态文案的唯一真源：**不是本插件页** / **接口不可用** / **真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向；
+     用户点开胶囊认领的页面上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
+     认领不撤销 —— 用户已经明确要用这个面板，能做的只是把原因说准。 */
+  function monitorStatusText() {
+    if (!state.own) return '当前不是本插件页';
+    if (routeProbe.userClaimed && state.apiUnavailable) return '接口不可用';
+    return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
+  }
+
+  /* 显示态与缓存是两回事，必须分开清：
+     - 缓存 = state.status（最近一次拿到的快照）。离开本页**不清**：回来立刻可重画，不闪空态。
+     - 显示态 = 下面这些变量 + 屏上的数字 / 预览 / 曲线 / 消息指纹。本页一变就得清空，
+       否则「当前不是本插件页」的标题下仍挂着**上一页**的指标与图表。
+     清空后的终态 = 空态：指标全 '—'、预览回「等待当前群的新消息」、曲线没有路径、指纹作废。 */
+  function clearTrafficDisplay() {
+    if (trafficFrame) cancelAnimationFrame(trafficFrame);
+    trafficFrame = 0;
+    trafficLastFrame = 0;
+    trafficLastSecond = -1;
+    trafficChannel = '';
+    trafficAnchor = 0;
+    trafficReceived = 0;
+    trafficPoints = [];
+    trafficScale = 10;
+    var root = monitorViewport();
+    var line = root ? root.querySelector('.ptx-ecg-line') : null;
+    if (line) line.setAttribute('d', '');
+    var panel = root ? root.querySelector('.ptx-panel') : null;
+    if (panel) panel.classList.remove('is-burst');
+    trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
+    trafficText('[data-traffic-summary]', '');
+    trafficText('[data-traffic-max]', trafficScale + ' 条');
+    trafficText('[data-traffic-mid]', trafficScale / 2 + ' 条');
+    trafficText('[data-traffic-note]', '');
+    trafficText('[data-traffic-time="0"]', '');
+    trafficText('[data-traffic-time="1"]', '');
+    trafficText('[data-traffic-time="2"]', '');
+    for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+    trafficText('[data-message-author]', '');
+    trafficText('[data-message-time]', '');
+    /* 指纹跟着一起作废：不重置的话，回到本页时同一条消息会被「指纹没变」跳过，预览永远空着。 */
+    resetLatestMessage();
+    trafficText('.ptx-monitor-status', monitorStatusText());
+  }
+
   function updateMetrics() {
     var root = monitorViewport();
     if (!root || !root.querySelector('[data-traffic-summary]')) return;
     var status = state.status;
+    /* 未认领本页：数据面没启动，屏上留着的就是上一页的残留 —— 无条件清空。
+       不能只在「频道变了」时清：同一个群切到别的插件页，trafficChannel 恰好等于当前作用域，
+       原来的判断就整段跳过，指标与图表跟着页走。 */
+    if (!state.own) {
+      clearTrafficDisplay();
+      return;
+    }
     if (!status) {
+      /* 真断线 / 首帧：**同一个群**保留最后一次数据并由文案说明（见 monitorStatusText），
+         换了群才清 —— 上一个群的数字不能贴在这个群上。 */
       if (trafficChannel && trafficChannel !== channelScopeId()) {
-        trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
-        trafficText('[data-message-author]', '');
-        trafficText('[data-message-time]', '');
-        resetLatestMessage();
-        for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+        clearTrafficDisplay();
+        return;
       }
-      trafficText('.ptx-monitor-status', state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务');
+      trafficText('.ptx-monitor-status', monitorStatusText());
       return;
     }
     var channel = String(status.channelId || channelScopeId());
@@ -114,9 +166,11 @@ export function trafficRuntime(): string {
     trafficFrame = requestAnimationFrame(animateTraffic);
   }
 
+  /* 回到前台补一次数据：只在**本插件页**发。未认领的页面上数据面根本没启动，
+     这里不设闸口就等于「切一次标签页 = 一条 /api 请求」。 */
   function resumeTraffic() {
     var root = monitorViewport();
-    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed) return;
+    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed || !state.own) return;
     loadStatus().then(function () { refreshPhase(); updateMetrics(); });
   }
   document.addEventListener('visibilitychange', resumeTraffic);
