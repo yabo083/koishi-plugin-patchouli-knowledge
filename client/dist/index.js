@@ -6971,6 +6971,25 @@ function resetRouteProbe(key) {
 /* 这些元素的内容不是可见正文：读进来只会制造假命中（脚本里的变量名、样式里的注释文案）。 */
 const DEEP_PROBE_SKIP = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
 
+/* 可见性判定：宿主是 SPA，切换页面时不销毁旧视图 —— 上一个插件页的整块内容、折叠的菜单、
+   没打开的 dialog 都还留在 DOM 里。那些文本不是用户眼前的正文，读进来就会在别人的插件页上
+   命中专有标识而误认领。优先 `checkVisibility`（一次覆盖 display / visibility /
+   content-visibility / opacity，且已算上祖先的 display:none）；内核没实现时退回
+   `getClientRects`（不可见元素没有盒子）。两者都取不到（非 DOM 桩）按可见处理：
+   宁可漏判一次隐藏，也不能把真实正文整片判成不可见。 */
+function isVisibleElement(el) {
+  if (!el) return false;
+  try {
+    if (typeof el.checkVisibility === 'function') {
+      return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === true;
+    }
+    if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
+  } catch (err) {
+    /* 结点不是真元素（或被克隆走了方法）时按可见处理，交给上面两道文本过滤兜底 */
+  }
+  return true;
+}
+
 /* NodeFilter 常量按数值写：NodeFilter 是浏览器全局，Client 产物在剥离 DOM 的环境里也解析这份
    源码，单独取会 ReferenceError。4 = SHOW_TEXT，1 = FILTER_ACCEPT，2 = FILTER_REJECT。 */
 const NODE_FILTER_SHOW_TEXT = 4;
@@ -6981,17 +7000,30 @@ const NODE_FILTER_REJECT = 2;
    `walker.currentNode` 处中断。**不用 `body.innerText`**：它先把整页可见文本物化成一条长字符串
    （一次重排 + 一次全量拷贝），页面越大主线程尖峰越高，而判定只需要最前面的 600 字。
    这里每个文本节点只取还缺的那几个字符，累计量恒 ≤ 600。
-   浮窗自己的子树一律跳过（壳层文案带「LLMWiki 知识阅读器」，不剔掉就会自我认领）。 */
+   浮窗自己的子树一律跳过（壳层文案带「LLMWiki 知识阅读器」，不剔掉就会自我认领）；
+   宿主留在 DOM 里但没画在屏上的子树（别的 SPA 视图 / 折叠菜单 / 没打开的 dialog）同样跳过 ——
+   它们的文本不属于「用户眼前的这一页」，读进来会在别人的插件页上误认领。 */
 function pageBodyText() {
   const body = document.body;
   if (!body || typeof document.createTreeWalker !== 'function') return '';
   let text = '';
   try {
+    /* 同一父元素下的兄弟文本节点共享可见性：判定一次即可，Map 只活一次取样（≤ 600 字）。 */
+    const visibleParents = new Map();
+    const parentVisible = (el) => {
+      let visible = visibleParents.get(el);
+      if (visible === undefined) {
+        visible = isVisibleElement(el);
+        visibleParents.set(el, visible);
+      }
+      return visible;
+    };
     const walker = document.createTreeWalker(body, NODE_FILTER_SHOW_TEXT, {
       acceptNode(node) {
-        const parent = node.parentNode;
+        const parent = node.parentElement || node.parentNode;
         if (parent && DEEP_PROBE_SKIP[parent.nodeName]) return NODE_FILTER_REJECT;
         if (insideOwnPanel(node)) return NODE_FILTER_REJECT;
+        if (parent && !parentVisible(parent)) return NODE_FILTER_REJECT;
         return NODE_FILTER_ACCEPT;
       },
     });

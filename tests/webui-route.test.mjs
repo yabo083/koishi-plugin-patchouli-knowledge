@@ -115,17 +115,26 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
      ROUTE-16 用它证明取样停在第 600 字 —— 没有像 innerText 那样先物化整页。 */
   const probeReads = { nodes: 0, chars: 0 };
   const pageTextNodes = () => {
+    /* 父元素桩：真 DOM 里每个 Element 都有 `checkVisibility` / `getClientRects`，
+       可见性判定靠它们。默认按可见（`checkVisibility() === true`）；`hidden: true` 造
+       `display:none` 那种不可见子树，`noRects: true` 造只有 `getClientRects` 的老内核回退形态。 */
+    const parentFor = (entry) => {
+      if (entry.panel) return { nodeName: 'DIV', id: 'patchouli-organic-root', parentNode: null };
+      const parent = { nodeName: entry.parent || 'DIV', parentNode: null };
+      if (entry.hidden) parent.checkVisibility = () => false;
+      else if (entry.noRects) parent.getClientRects = () => [];
+      else parent.checkVisibility = () => true;
+      return parent;
+    };
     if (Array.isArray(bodyNodes)) {
-      return bodyNodes.map((entry) => ({
-        nodeType: 3,
-        nodeValue: entry.text,
-        parentNode: entry.panel
-          ? { nodeName: 'DIV', id: 'patchouli-organic-root', parentNode: null }
-          : { nodeName: entry.parent || 'DIV', parentNode: null },
-      }));
+      return bodyNodes.map((entry) => {
+        const parent = parentFor(entry);
+        return { nodeType: 3, nodeValue: entry.text, parentElement: parent, parentNode: parent };
+      });
     }
     if (!bodyText) return [];
-    return [{ nodeType: 3, nodeValue: bodyText, parentNode: { nodeName: 'DIV', parentNode: null } }];
+    const parent = { nodeName: 'DIV', parentNode: null, checkVisibility: () => true };
+    return [{ nodeType: 3, nodeValue: bodyText, parentElement: parent, parentNode: parent }];
   };
   const documentStub = {
     readyState: 'complete',
@@ -719,5 +728,63 @@ test('ROUTE-18: 同一宽容器里写着专有名字「知识阅读器」→ 认
     started.every((url) => url.startsWith('/patchouli/api/')),
     true,
     '取数只打 /api',
+  );
+});
+
+test('ROUTE-19: 专有标识落在隐藏子树（display:none / checkVisibility()===false）里 → 深探测不认领、零请求', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    bodyNodes: [
+      /* 宿主是 SPA：切页不销毁旧视图。上一个插件页的整块内容还在 DOM 里，
+         display:none（`checkVisibility()` 为 false），却带着专有标识。 */
+      { text: 'LLMWiki 知识阅读器 频道白名单', hidden: true },
+      /* 老内核没有 checkVisibility：不可见元素没有盒子，`getClientRects()` 为空。 */
+      { text: ' 大图书馆 索引重建', noRects: true },
+      /* 真正画在屏上的正文：只有与本插件无关的设置文案 */
+      { text: '插件配置 账号协议 心跳间隔 重连次数' },
+    ],
+  });
+  api.checkRoute();
+  assert.equal(api.state.own, false, '首帧身份文本不命中：先不认领');
+
+  api.expandPanel();
+
+  assert.equal(api.probeState().deepTried, true, '深探测只跑一次');
+  assert.equal(api.state.own, false, '隐藏子树里的专有标识不是页面正文，不得据此认领');
+  assert.equal(api.auth.gates, 0, '不认领就不弹全屏门禁');
+  assert.deepEqual(api.requests(), [], '误认领会连带为一个不可见页取数 —— 必须零请求');
+  assert.equal(api.monitorStatusText(), '当前不是本插件页', '未认领页面不是断线');
+});
+
+test('ROUTE-20: 同一段专有标识画在可见子树上 → 深探测照常认领', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    bodyNodes: [
+      /* 与 ROUTE-19 同一段文本，只是这棵子树真的画在屏上（`checkVisibility()` 为 true） */
+      { text: 'LLMWiki 知识阅读器 频道白名单' },
+      { text: '插件配置 账号协议 心跳间隔 重连次数' },
+    ],
+  });
+  api.checkRoute();
+  assert.equal(api.state.own, false, '首帧身份文本不命中：先不认领');
+  assert.deepEqual(api.requests(), [], '认领之前一个 /api 请求都不发');
+
+  api.expandPanel();
+
+  assert.equal(api.state.own, true, '可见正文命中专有标识即认领本页');
+  assert.equal(api.probeState().deepOwned, true, '认领结果记在本页上');
+  assert.equal(api.auth.ownPage, true, '认领结果必须同步给生成块');
+  assert.equal(api.auth.gates, 1, '认领本页即弹门禁');
+  assert.equal(api.state.collapsed, false, '点开就是展开');
+  const started = api.requests();
+  assert.ok(started.length > 0, '认领后立刻启动数据面');
+  assert.equal(
+    started.every((url) => url.startsWith('/patchouli/api/')),
+    true,
+    '深探测本身零请求：取数只打 /api',
   );
 });
