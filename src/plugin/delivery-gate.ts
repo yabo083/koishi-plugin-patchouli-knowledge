@@ -550,7 +550,10 @@ export class DeliveryGate {
   ): number {
     const cron = cronForKind(policy, kind);
     const spec = cron === '' ? null : parseCron(cron);
-    const candidate = spec === null ? at : nextCronAt(spec, at);
+    /* 同一分钟内的触发要算「现在」：全局 cron 生成周报的时刻通常就等于目标的 weeklyCron
+       时刻，而 `nextCronAt` 是严格大于，会把每份周报整整推迟一周。回看一分钟即覆盖「本分钟已到点」。 */
+    const sameMinute = spec !== null && nextCronAt(spec, at - 60_000) <= at;
+    const candidate = spec === null || sameMinute ? at : nextCronAt(spec, at);
     let previous: number | undefined;
     for (const item of this.state.queue) {
       if (item.source !== source || item.targetKey !== targetKey) continue;

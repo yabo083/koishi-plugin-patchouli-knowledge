@@ -2915,6 +2915,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       );
       return;
     }
+    /* 额度必须在渲染之前判：配额耗尽时不该再画一张图。drain 里还会再判一次，那是最终权威。 */
+    const candidates = targets.filter((target) =>
+      deliveryGate.allows('entry', sourceChannelId, entryTargetKey(target, sourceChannelId)),
+    );
+    if (candidates.length === 0) {
+      logger.warn(`[Patchouli] 词条《${entryId}》今日卡片配额已满，未出卡（来源群 ${sourceChannelId}）`);
+      return;
+    }
     const rendered = await renderEntryCard(ctx, system, entryId, {
       maskNames: system.getCardSettings().maskNames,
       maxHeight: system.settings('query').cardMaxHeight,
@@ -2927,14 +2935,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       kind: 'entry',
       source: sourceChannelId,
       eventKey: entryId,
-      targets: targets.map((target) => ({ targetKey: entryTargetKey(target, sourceChannelId), target })),
+      targets: candidates.map((target) => ({ targetKey: entryTargetKey(target, sourceChannelId), target })),
       png: rendered.image,
     });
-    const targetText = targets
+    const targetText = candidates
       .map((target) => (target.kind === 'album' ? `相册 ${target.channelId}/${target.albumId}` : `群 ${target.channelId}`))
       .join('、');
     logger.info(
-      `[Patchouli] 词条《${entryId}》投递入队 ${offer.accepted}/${targets.length}` +
+      `[Patchouli] 词条《${entryId}》投递入队 ${offer.accepted}/${candidates.length}` +
         (offer.deferred > 0 ? `（${offer.deferred} 个待窗口）` : '') +
         (offer.dropped > 0 ? `（${offer.dropped} 个超额 / 队满丢弃）` : '') +
         `（来源群 ${sourceChannelId}，目标：${targetText}）`,

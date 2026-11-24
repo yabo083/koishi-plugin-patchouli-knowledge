@@ -1,5 +1,5 @@
 /**
- * 定时投递闸门（`docs/delivery-schedule.md` §8，SCHED-01..21）。
+ * 定时投递闸门（`docs/delivery-schedule.md` §8，SCHED-01..23 + ENTRY-QUOTA-01）。
  *
  * 时钟与定时器都是注入的：断言落在「取出哪几条 / 什么时候唤醒 / 一次广播发几条」，
  * 不依赖真实 `setTimeout`，也不依赖宿主时区（时间戳一律用 `+08:00` 明确写出）。
@@ -401,9 +401,9 @@ test('SCHED-09: 跨重启——队列与计数持久化，同事件键不重复�
     dueAt = first.gate.snapshot().queue[0].dueAt;
     assert.equal(dueAt, sh('2026-11-24T22:00:00'));
 
-    // 到点投一条，记下额度；再排一条明天的。
+    // 到点投一条，记下额度；分钟已过（22:05）再排一条 → 只能排到明天同一时刻。
     await first.gate.drain(sh('2026-11-24T22:00:00'));
-    first.advance(sh('2026-11-24T22:00:00'));
+    first.advance(sh('2026-11-24T22:05:00'));
     await offerEvent(first, { eventKey: 'entry-2', targets: [albumPlan(ALBUM_A)] });
 
     const raw = await first.readState();
@@ -802,6 +802,135 @@ test('SCHED-21: 并发 drain 不重复占额——额度判定在串行链内只
       '额度只被占两次（不是四次）',
     );
     assert.equal(harness.gate.snapshot().queue.length, 0);
+  } finally {
+    await harness.disposeDir();
+  }
+});
+
+test('SCHED-22: 入队时刻与 weeklyCron 同一分钟 → 当场到期，不推迟一周', async () => {
+  /* 2026-11-23 是周一。全局 cron 生成周报的时刻（09:00）与目标的 `weeklyCron` 是同一分钟，
+     但入队时刻带秒：`nextCronAt` 严格大于会把它推到 11-30。回看一分钟必须把「本分钟已到点」算成现在。 */
+  const at = sh('2026-11-23T09:00:30');
+  const harness = await makeHarness({
+    now: at,
+    policies: { [albumPolicyKey(ALBUM_A)]: { entryCron: '', weeklyCron: '0 9 * * 1', perDay: 0, perWeek: 0 } },
+    random: () => 0,
+  });
+  try {
+    const weekly = await harness.gate.offer({
+      kind: 'weekly',
+      source: '100000001',
+      eventKey: 'fire-1',
+      targets: [albumPlan(ALBUM_A)],
+    });
+    assert.equal(weekly.accepted, 1);
+    assert.equal(weekly.deferred, 0, '同一分钟内的触发就是「现在」，不算延期');
+
+    const [item] = harness.gate.snapshot().queue;
+    assert.equal(item.dueAt, at, 'dueAt 必须是入队时刻，不能推到下周一');
+    assert.equal(harness.gate.nextWakeAt(), at);
+
+    const ontime = await harness.gate.drain(at);
+    assert.equal(ontime.delivered, 1, '当场就能发出去');
+    assert.equal(harness.calls[0][0].item.kind, 'weekly');
+    assert.equal(harness.gate.snapshot().queue.length, 0);
+  } finally {
+    await harness.disposeDir();
+  }
+});
+
+test('SCHED-23: 入队时刻已过匹配分钟（09:01:30）→ 排到下一个周一 09:00', async () => {
+  const at = sh('2026-11-23T09:01:30');
+  const harness = await makeHarness({
+    now: at,
+    policies: { [albumPolicyKey(ALBUM_A)]: { entryCron: '', weeklyCron: '0 9 * * 1', perDay: 0, perWeek: 0 } },
+    random: () => 0,
+  });
+  try {
+    const weekly = await harness.gate.offer({
+      kind: 'weekly',
+      source: '100000001',
+      eventKey: 'fire-1',
+      targets: [albumPlan(ALBUM_A)],
+    });
+    assert.equal(weekly.deferred, 1, '匹配分钟已过，必须等下一次触发');
+    assert.equal(harness.gate.snapshot().queue[0].dueAt, sh('2026-11-30T09:00:00'), '下一个周一 09:00');
+    assert.equal(harness.gate.nextWakeAt(), sh('2026-11-30T09:00:00'));
+
+    const early = await harness.gate.drain(at);
+    assert.equal(early.skipped, true);
+    assert.equal(harness.calls.length, 0, '本周这条已经错过，绝不当场补发');
+
+    const due = await harness.gate.drain(sh('2026-11-30T09:00:00'));
+    assert.equal(due.delivered, 1);
+    assert.equal(harness.calls[0][0].item.kind, 'weekly');
+  } finally {
+    await harness.disposeDir();
+  }
+});
+
+test('ENTRY-QUOTA-01: 额度预筛——allows 为 false 的目标被剔除，只把通过的目标交给 offer', async () => {
+  /* 词条 sink 的语义：渲染之前先用 `allows('entry', …)` 过滤目标，全被剔除就不出卡。
+     这里锁死闸门侧的契约：`allows` 是同步只读预筛，剔除的目标根本进不了 offer。 */
+  const harness = await makeHarness({
+    policies: {
+      [albumPolicyKey(ALBUM_A)]: { entryCron: '', weeklyCron: '', perDay: 1, perWeek: 0 },
+      [albumPolicyKey(ALBUM_B)]: { entryCron: '', weeklyCron: '', perDay: 1, perWeek: 0 },
+    },
+    random: () => 0,
+  });
+  try {
+    const at = harness.now();
+    const source = '100000001';
+
+    // 先把 ALBUM_A 的当日额度用满。
+    await offerEvent(harness, { eventKey: 'entry-a1', targets: [albumPlan(ALBUM_A)] });
+    const first = await harness.gate.drain(at);
+    assert.equal(first.delivered, 1);
+
+    // 预筛是只读的：反复调用不占额、不改计数。
+    for (let round = 0; round < 3; round += 1) {
+      assert.equal(harness.gate.allows('entry', source, ALBUM_A), false, '额度耗尽的目标预筛必须拒');
+    }
+    assert.equal(harness.gate.allows('entry', source, ALBUM_B), true, '未占额的目标照常放行');
+    assert.equal(
+      harness.gate.snapshot().quotaUsed('entry', source, ALBUM_A, at),
+      1,
+      '预筛不占额',
+    );
+
+    const plans = [albumPlan(ALBUM_A), albumPlan(ALBUM_B)];
+    const candidates = plans.filter((plan) => harness.gate.allows('entry', source, plan.targetKey));
+    assert.deepEqual(
+      candidates.map((plan) => plan.targetKey),
+      [ALBUM_B],
+      '只有通过预筛的目标进入候选',
+    );
+
+    // 被剔除的目标连队列都不进：不渲染、不投递、不告警超额。
+    const offer = await harness.gate.offer({
+      kind: 'entry',
+      source,
+      eventKey: 'entry-a2',
+      targets: candidates,
+    });
+    assert.equal(offer.accepted, 1, '只入队一条');
+    assert.deepEqual(
+      harness.gate.snapshot().queue.map((item) => item.targetKey),
+      [ALBUM_B],
+    );
+
+    const drained = await harness.gate.drain(at + 120_000);
+    assert.equal(drained.deliveries, 1);
+    assert.equal(drained.overQuota, 0, '被预筛掉的目标不会走 drain 的超额分支');
+    assert.deepEqual(
+      harness.calls.at(-1).map((delivery) => delivery.item.targetKey),
+      [ALBUM_B],
+    );
+    assert.equal(harness.gate.snapshot().quotaUsed('entry', source, ALBUM_A, at), 1, 'A 的额度没被再动');
+
+    // 周期滚动后预筛重新放行（sink 下一张卡又该出图）。
+    assert.equal(harness.gate.allows('entry', source, ALBUM_A, sh('2026-11-25T10:00:00')), true);
   } finally {
     await harness.disposeDir();
   }
