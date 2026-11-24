@@ -4038,18 +4038,59 @@ function monitorViewport() { return viewportEl; }
     return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
   }
 
+  /* 显示态与缓存是两回事，必须分开清：
+     - 缓存 = state.status（最近一次拿到的快照）。离开本页**不清**：回来立刻可重画，不闪空态。
+     - 显示态 = 下面这些变量 + 屏上的数字 / 预览 / 曲线 / 消息指纹。本页一变就得清空，
+       否则「当前不是本插件页」的标题下仍挂着**上一页**的指标与图表。
+     清空后的终态 = 空态：指标全 '—'、预览回「等待当前群的新消息」、曲线没有路径、指纹作废。 */
+  function clearTrafficDisplay() {
+    if (trafficFrame) cancelAnimationFrame(trafficFrame);
+    trafficFrame = 0;
+    trafficLastFrame = 0;
+    trafficLastSecond = -1;
+    trafficChannel = '';
+    trafficAnchor = 0;
+    trafficReceived = 0;
+    trafficPoints = [];
+    trafficScale = 10;
+    var root = monitorViewport();
+    var line = root ? root.querySelector('.ptx-ecg-line') : null;
+    if (line) line.setAttribute('d', '');
+    var panel = root ? root.querySelector('.ptx-panel') : null;
+    if (panel) panel.classList.remove('is-burst');
+    trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
+    trafficText('[data-traffic-summary]', '');
+    trafficText('[data-traffic-max]', trafficScale + ' 条');
+    trafficText('[data-traffic-mid]', trafficScale / 2 + ' 条');
+    trafficText('[data-traffic-note]', '');
+    trafficText('[data-traffic-time="0"]', '');
+    trafficText('[data-traffic-time="1"]', '');
+    trafficText('[data-traffic-time="2"]', '');
+    for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+    trafficText('[data-message-author]', '');
+    trafficText('[data-message-time]', '');
+    /* 指纹跟着一起作废：不重置的话，回到本页时同一条消息会被「指纹没变」跳过，预览永远空着。 */
+    resetLatestMessage();
+    trafficText('.ptx-monitor-status', monitorStatusText());
+  }
+
   function updateMetrics() {
     var root = monitorViewport();
     if (!root || !root.querySelector('[data-traffic-summary]')) return;
     var status = state.status;
-    /* 未认领本页时数据面没启动：清掉可能从上一页留下的数字，只说「不是本插件页」。 */
-    if (!status || !state.own) {
+    /* 未认领本页：数据面没启动，屏上留着的就是上一页的残留 —— 无条件清空。
+       不能只在「频道变了」时清：同一个群切到别的插件页，trafficChannel 恰好等于当前作用域，
+       原来的判断就整段跳过，指标与图表跟着页走。 */
+    if (!state.own) {
+      clearTrafficDisplay();
+      return;
+    }
+    if (!status) {
+      /* 真断线 / 首帧：**同一个群**保留最后一次数据并由文案说明（见 monitorStatusText），
+         换了群才清 —— 上一个群的数字不能贴在这个群上。 */
       if (trafficChannel && trafficChannel !== channelScopeId()) {
-        trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
-        trafficText('[data-message-author]', '');
-        trafficText('[data-message-time]', '');
-        resetLatestMessage();
-        for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
+        clearTrafficDisplay();
+        return;
       }
       trafficText('.ptx-monitor-status', monitorStatusText());
       return;
@@ -4108,9 +4149,11 @@ function monitorViewport() { return viewportEl; }
     trafficFrame = requestAnimationFrame(animateTraffic);
   }
 
+  /* 回到前台补一次数据：只在**本插件页**发。未认领的页面上数据面根本没启动，
+     这里不设闸口就等于「切一次标签页 = 一条 /api 请求」。 */
   function resumeTraffic() {
     var root = monitorViewport();
-    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed) return;
+    if (document.hidden || !root || !root.isConnected || state.stage !== 'metrics' || state.collapsed || !state.own) return;
     loadStatus().then(function () { refreshPhase(); updateMetrics(); });
   }
   document.addEventListener('visibilitychange', resumeTraffic);
@@ -6896,30 +6939,58 @@ function resetRouteProbe(key) {
   routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
 }
 
-/* 页面正文（可见文本）样本：只取前 `DEEP_PROBE_CHARS` 字。
-   浮窗自己挂在 body 上，它的文案（LLMWiki 知识阅读器）也在 body.innerText 里；
-   不剔掉就会自我认领 —— 任何插件页点一下胶囊都变成本插件页。 */
+/* 深探测的专有标识：只认**本插件独有**的名字。
+   泛化词（「知识库」）留给自动取样（`IDENTITY_HINTS`）：别的插件页正文随口提一句「知识库」，
+   用户点一下胶囊就把整页认领走 —— 全屏门与 /api 请求全落到别人的配置页上。
+   命中任一即认领（要求多个会漏掉只画了名字的宿主版本）。 */
+const DEEP_PROBE_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识阅读器', '大图书馆'];
+
+/* 这些元素的内容不是可见正文：读进来只会制造假命中（脚本里的变量名、样式里的注释文案）。 */
+const DEEP_PROBE_SKIP = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
+
+/* NodeFilter 常量按数值写：NodeFilter 是浏览器全局，Client 产物在剥离 DOM 的环境里也解析这份
+   源码，单独取会 ReferenceError。4 = SHOW_TEXT，1 = FILTER_ACCEPT，2 = FILTER_REJECT。 */
+const NODE_FILTER_SHOW_TEXT = 4;
+const NODE_FILTER_ACCEPT = 1;
+const NODE_FILTER_REJECT = 2;
+
+/* 页面正文（可见文本）样本：TreeWalker 边遍历边累加，凑满 `DEEP_PROBE_CHARS` 立刻在
+   `walker.currentNode` 处中断。**不用 `body.innerText`**：它先把整页可见文本物化成一条长字符串
+   （一次重排 + 一次全量拷贝），页面越大主线程尖峰越高，而判定只需要最前面的 600 字。
+   这里每个文本节点只取还缺的那几个字符，累计量恒 ≤ 600。
+   浮窗自己的子树一律跳过（壳层文案带「LLMWiki 知识阅读器」，不剔掉就会自我认领）。 */
 function pageBodyText() {
+  const body = document.body;
+  if (!body || typeof document.createTreeWalker !== 'function') return '';
   let text = '';
   try {
-    const body = document.body;
-    if (body && typeof body.innerText === 'string') text = body.innerText;
-  } catch (err) { text = ''; }
-  if (!text) return '';
-  /* 有界：先按样本长度的 4 倍截断再剔除自身文案。正文可以很长，这里绝不整段复制
-     （浮窗文案只有几百字，4 倍窗口足够覆盖它；超出部分本就进不了前 600 字的判定）。 */
-  const scanLimit = DEEP_PROBE_CHARS * 4;
-  if (text.length > scanLimit) text = text.slice(0, scanLimit);
-  try {
-    const own = rootEl && typeof rootEl.innerText === 'string' ? rootEl.innerText : '';
-    if (own && text.indexOf(own) >= 0) text = text.split(own).join(' ');
-  } catch (err) { /* 读不到自身文案时按原样取样 */ }
-  return text.slice(0, DEEP_PROBE_CHARS);
+    const walker = document.createTreeWalker(body, NODE_FILTER_SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentNode;
+        if (parent && DEEP_PROBE_SKIP[parent.nodeName]) return NODE_FILTER_REJECT;
+        if (insideOwnPanel(node)) return NODE_FILTER_REJECT;
+        return NODE_FILTER_ACCEPT;
+      },
+    });
+    let node = walker.nextNode();
+    while (node) {
+      const value = typeof node.nodeValue === 'string' ? node.nodeValue : '';
+      const need = DEEP_PROBE_CHARS - text.length;
+      if (need > 0) text += value.length > need ? value.slice(0, need) : value;
+      /* 够 600 字就停在 currentNode：不把余下的正文遍历完再截断。 */
+      if (text.length >= DEEP_PROBE_CHARS) break;
+      node = walker.nextNode();
+    }
+  } catch (err) {
+    /* 宿主 DOM 不可遍历时按「认不出」处理：宁可让用户多点一次，也不误认别人的页 */
+  }
+  return text;
 }
 
 /* 用户意图兜底：宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / 标题层级可能全都不命中，
    浮窗只能挂成胶囊。用户**手动点开胶囊**就是明确表态「我要用这个面板」，此时才允许一次深探测：
-   读页面正文前 600 字，命中任一标识即认领本页（启动数据面 + 门禁）。
+   正文前 600 字里出现**专有标识**（`DEEP_PROBE_HINTS`，泛化词不算）即认领本页（启动数据面 + 门禁）。
+   取样已排除浮窗自身子树，命中不会来自壳层文案。
    每页只探测一次；纯 DOM 读取，不产生任何网络请求。 */
 function probeOwnershipDeep() {
   if (state.own) return true;
@@ -6927,7 +6998,7 @@ function probeOwnershipDeep() {
   routeProbe.deepTried = true;
   const text = pageBodyText().toLowerCase();
   if (!text) return false;
-  if (!IDENTITY_HINTS.some((hint) => text.includes(hint))) return false;
+  if (!DEEP_PROBE_HINTS.some((hint) => text.includes(hint))) return false;
   /* 认领结果记在本页上：下一次 checkRoute 现算 routeMatches() 时不能把用户刚要到手的页收回去。 */
   routeProbe.deepOwned = true;
   routeProbe.identified = true;
@@ -6974,6 +7045,9 @@ function syncAuthGate(own) {
   refreshPhase();
   if (own) {
     startDataFlow();
+    /* 缓存（state.status）没被动过：立刻按它重画一次，等新数据回来自然覆盖。
+       不重画就得等一次往返，监控页会先闪一帧空态。 */
+    if (state.stage === 'metrics') updateMetrics();
     try {
       if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
     } catch (err) {

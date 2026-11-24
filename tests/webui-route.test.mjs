@@ -50,10 +50,42 @@ function createNode() {
 }
 
 /**
+ * 监控视图的记账桩：`updateMetrics()` / `drawTraffic()` / `renderLatestMessage()` 只经
+ * `querySelector` 读写，所以这里按选择器记忆节点，把 textContent / dataset / 属性留在原地。
+ * ROUTE-14 断言的是「屏上还留着什么」（指标、预览、曲线），而不是渲染细节。
+ */
+function fakeMetricsView() {
+  const children = new Map();
+  const node = {
+    textContent: '',
+    dataset: {},
+    attrs: {},
+    firstChild: null,
+    isConnected: true,
+    style: {},
+    classList: { add: noop, remove: noop, contains: () => false, toggle: () => true },
+    setAttribute(name, value) { node.attrs[name] = String(value); },
+    getAttribute(name) { return node.attrs[name] === undefined ? null : node.attrs[name]; },
+    removeAttribute: noop,
+    addEventListener: noop,
+    removeEventListener: noop,
+    innerHTML: '',
+    appendChild: noop,
+    removeChild: noop,
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      if (!children.has(selector)) children.set(selector, fakeMetricsView());
+      return children.get(selector);
+    },
+  };
+  return node;
+}
+
+/**
  * 载入产物并按用例摆好宿主环境。
  * `mount()` 被替换成记账桩：真壳层需要完整 DOM，而本文件只断言挂载 / 收回的判定。
  */
-function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', bodyText = '', panelNode = false }) {
+function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', bodyText = '', bodyNodes = null, panelNode = false }) {
   /* 数据面的「零请求」断言靠这个记账桩：产物里的 `fetch` 与生成块抓到的
      `window.fetch` 都指向它，任何一条 /api 请求都躲不过去。 */
   const requests = [];
@@ -79,13 +111,51 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
     fetch: fetchStub,
     CustomEvent: function CustomEvent() {},
   };
+  /* 深探测的正文取样走 TreeWalker：桩按顺序交出文本节点，并记账「读了几次、一共几个字符」。
+     ROUTE-16 用它证明取样停在第 600 字 —— 没有像 innerText 那样先物化整页。 */
+  const probeReads = { nodes: 0, chars: 0 };
+  const pageTextNodes = () => {
+    if (Array.isArray(bodyNodes)) {
+      return bodyNodes.map((entry) => ({
+        nodeType: 3,
+        nodeValue: entry.text,
+        parentNode: entry.panel
+          ? { nodeName: 'DIV', id: 'patchouli-organic-root', parentNode: null }
+          : { nodeName: entry.parent || 'DIV', parentNode: null },
+      }));
+    }
+    if (!bodyText) return [];
+    return [{ nodeType: 3, nodeValue: bodyText, parentNode: { nodeName: 'DIV', parentNode: null } }];
+  };
   const documentStub = {
     readyState: 'complete',
     hidden: false,
     title,
     documentElement: null,
-    /* 用户意图兜底（点开胶囊后的深探测）读的是页面正文：桩里给出可控文本。 */
-    body: { innerText: bodyText, appendChild: noop, removeChild: noop, addEventListener: noop, querySelector: () => null, getAttribute: () => null },
+    /* 页面正文只经 TreeWalker 取样（产物不再读 innerText）：桩里连 innerText 都不提供，
+       任何回退到 innerText 的写法都会立刻在 ROUTE-11/12/15/16 上失败。 */
+    body: { nodeName: 'BODY', appendChild: noop, removeChild: noop, addEventListener: noop, querySelector: () => null, getAttribute: () => null },
+    createTreeWalker: (root, whatToShow, filter) => {
+      const queue = pageTextNodes();
+      let index = 0;
+      const walker = {
+        currentNode: null,
+        nextNode() {
+          while (index < queue.length) {
+            const node = queue[index];
+            index += 1;
+            /* FILTER_REJECT(2) / 任一非 ACCEPT 值都跳过：脚本、浮窗自身子树都不算正文。 */
+            if (filter && typeof filter.acceptNode === 'function' && filter.acceptNode(node) !== 1) continue;
+            probeReads.nodes += 1;
+            probeReads.chars += (node.nodeValue || '').length;
+            walker.currentNode = node;
+            return node;
+          }
+          return null;
+        },
+      };
+      return walker;
+    },
     addEventListener: noop,
     removeEventListener: noop,
     getElementById: () => null,
@@ -140,6 +210,7 @@ function __stateNode() {
     addEventListener: function () {},
     removeEventListener: function () {},
     appendChild: function () {},
+    querySelectorAll: function () { return []; },
     querySelector: function () { return null; },
   };
 }
@@ -164,6 +235,12 @@ return {
   monitorStatusText,
   phaseLabel,
   refreshPhase,
+  /* 监控视图换成记账桩，并留一条「屏上显示态」的读数（ROUTE-14）。 */
+  setViewport: function (node) { viewportEl = node; },
+  updateMetrics,
+  paint: function () {
+    return { points: trafficPoints.length, channel: trafficChannel, anchor: trafficAnchor, frame: trafficFrame };
+  },
   probeState: function () {
     return {
       key: routeProbe.key,
@@ -203,7 +280,7 @@ return {
   auth.isOwnPage = () => auth.ownPage === true;
   windowStub.__ptxAuth = auth;
 
-  return { ...api, auth, requests: () => requests.slice() };
+  return { ...api, auth, requests: () => requests.slice(), probeReads: () => ({ ...probeReads }) };
 }
 
 test('ROUTE-01: 随机实例 id + 页面身份文本命中时挂载并展开（真实部署形态）', () => {
@@ -393,7 +470,7 @@ test('ROUTE-11: 随机实例 id + 标题与面包屑都不含身份文本 → �
     title: 'Koishi',
     breadcrumb: 'Koishi 控制台 / 插件配置',
     // 宿主把插件名画在页头之外的地方（说明 / 表单标题），首帧取样读不到
-    bodyText: '插件配置 实例 0848oh 知识库范围 频道白名单',
+    bodyText: '插件配置 实例 0848oh LLMWiki 知识阅读器 频道白名单',
   });
   api.checkRoute();
 
@@ -466,4 +543,119 @@ test('ROUTE-13: 身份取样落到浮窗自己的 DOM 里不算页面身份（�
   assert.equal(api.state.own, false);
   assert.equal(api.state.collapsed, true, '别的插件页仍是胶囊');
   assert.deepEqual(api.requests(), [], '自我认领会连带把别人的插件页变成取数页 —— 必须零请求');
+});
+
+test('ROUTE-14: 非本页但频道不变 → 指标/预览/图表清空，回本页后缓存可再显示', () => {
+  const api = loadClient({ pathname: '/plugins/0848oh', title: 'Patchouli Knowledge · Koishi' });
+  api.checkRoute();
+  assert.equal(api.state.own, true);
+
+  const view = fakeMetricsView();
+  api.setViewport(view);
+  api.state.stage = 'metrics';
+  /* 群聊作用域与快照里的 channelId 一致：这正是 G1 的漏点 ——
+     旧写法「频道变了才清」在这里整段跳过，整窗带着上一页的指标去了别的插件页。 */
+  api.state.channel = '1024';
+  api.state.status = {
+    channelId: '1024',
+    serverTime: 1700000000000,
+    currentRate: 12.5,
+    baselineRate: 3.25,
+    burstRatio: 3.84,
+    bufferedCount: 40,
+    traffic: [{ timestamp: 1699999995000, count: 6 }, { timestamp: 1700000000000, count: 9 }],
+    latestMessage: { id: 'm1', userName: '阿求', timestamp: 1700000000000, content: '上一页残留的消息', elements: [] },
+    phase: 'BURSTING',
+  };
+  api.updateMetrics();
+
+  const metric0 = view.querySelector('[data-metric="0"]');
+  const metric3 = view.querySelector('[data-metric="3"]');
+  const preview = view.querySelector('[data-message-body]');
+  const line = view.querySelector('.ptx-ecg-line');
+  assert.equal(metric0.textContent, '12.50 条/分');
+  assert.equal(metric3.textContent, '40 条');
+  assert.equal(preview.textContent, '上一页残留的消息');
+  assert.notEqual(line.attrs.d, '', '有快照时必须画出曲线');
+  assert.equal(api.paint().points, 2);
+
+  // 切到别的插件页：还是同一个群（频道作用域没变），但已经不是在用本面板
+  api.doc.title = '适配器 · Koishi';
+  api.win.location.pathname = '/plugins/adapter-onebot';
+  api.checkRoute();
+
+  assert.equal(api.state.own, false);
+  assert.equal(api.state.channel, '1024', '离开本页不动群聊选择');
+  assert.equal(metric0.textContent, '—', '指标不得跟着页走');
+  assert.equal(metric3.textContent, '—');
+  assert.equal(preview.textContent, '等待当前群的新消息', '预览必须回到空态');
+  assert.equal(preview.dataset.richKey, 'none', '指纹必须作废，否则同一条消息回来时被「指纹没变」跳过');
+  assert.equal(line.attrs.d, '', '曲线必须清空');
+  assert.equal(api.paint().points, 0);
+  assert.equal(api.paint().channel, '');
+  assert.equal(view.querySelector('.ptx-monitor-status').textContent, '当前不是本插件页');
+  assert.equal(api.state.status.currentRate, 12.5, '缓存（state.status）不跟着显示态一起清');
+
+  // 回本插件页：缓存立刻重画，不必等一次往返、不闪空态
+  api.doc.title = 'Patchouli Knowledge · Koishi';
+  api.win.location.pathname = '/plugins/0848oh';
+  api.checkRoute();
+
+  assert.equal(api.state.own, true);
+  assert.equal(metric0.textContent, '12.50 条/分', '回本页立刻按缓存重画');
+  assert.equal(preview.textContent, '上一页残留的消息');
+  assert.notEqual(line.attrs.d, '', '曲线按缓存重画');
+});
+
+test('ROUTE-15: 正文只有泛化词「知识库」→ 深探测不认领（零请求）', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    // 别的插件的页面正文里随口提一句「知识库」：泛化词不该成为认领凭据
+    bodyText: '知识库范围 群聊归档 讨论缓存 索引重建 关键词提取',
+  });
+  api.checkRoute();
+  assert.equal(api.state.own, false);
+
+  api.expandPanel();
+
+  assert.equal(api.probeState().deepTried, true, '深探测只跑一次');
+  assert.equal(api.state.own, false, '泛化词不参与深探测：别人的插件页提到「知识库」也不认领');
+  assert.deepEqual(api.requests(), [], '不认领就不发一个请求');
+  assert.equal(api.auth.gates, 0, '不认领就不弹全屏门禁');
+  assert.equal(api.monitorStatusText(), '当前不是本插件页');
+});
+
+test('ROUTE-16: 5000 字正文、专有标识在 600 字之后 → 不认领，且取样绝不读超过 600 字', () => {
+  const nodes = [
+    /* 浮窗自己的子树：壳层文案带专有标识，但不算页面正文 */
+    { text: 'Patchouli Knowledge 知识阅读器', panel: true },
+    /* <script> 里的标识同理：不是可见正文 */
+    { text: 'llmwiki', parent: 'SCRIPT' },
+  ];
+  /* 100 个 50 字节点 = 5000 字可见正文 */
+  for (let index = 0; index < 100; index += 1) nodes.push({ text: '配'.repeat(50) });
+  /* 专有标识整体落在第 5000 字之后，远在第 600 字窗口之外 */
+  nodes.push({ text: '知识阅读器 大图书馆' });
+
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    bodyNodes: nodes,
+  });
+  api.checkRoute();
+  assert.equal(api.state.own, false);
+
+  api.expandPanel();
+
+  assert.equal(api.state.own, false, '600 字之外的标识、浮窗子树与脚本内容都不算页面身份');
+  assert.equal(api.probeState().deepTried, true);
+  assert.deepEqual(api.requests(), [], '零请求');
+  assert.equal(api.auth.gates, 0);
+
+  const reads = api.probeReads();
+  assert.ok(reads.chars <= 600, `取样最多读 600 字，实际读了 ${reads.chars}`);
+  assert.ok(reads.nodes <= 12, `凑满 600 字即中断，实际遍历了 ${reads.nodes} 个文本节点`);
 });
