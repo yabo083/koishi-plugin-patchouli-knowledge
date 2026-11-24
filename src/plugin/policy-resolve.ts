@@ -51,6 +51,9 @@ const MAX_SOURCE_CHARS = 64;
 /** 下一次触发的搜索上界（天）：覆盖「闰日 + 每月 31 号」这类最长空档。 */
 const MAX_CRON_LOOKAHEAD_DAYS = 366 * 8;
 
+/** 各月最长天数；2 月按闰年 29 天算（闰日是合法日期，只是要等到下一个闰年）。 */
+const MONTH_MAX_DAYS: readonly number[] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 /* `cron` 是旧版单一定时字段：归一阶段按 `entryCron` 的别名读（见 `normalizePolicy`），
@@ -223,7 +226,25 @@ function parseCronField(text: string, min: number, max: number): CronField | nul
 }
 
 /**
- * 解析 5 字段 cron；非法（字段数不符 / 越界 / 空段 / 步长 0 / 超长）一律 `null`，绝不抛。
+ * 「日 × 月」组合在该日历上是否可能命中。
+ *
+ * 只有「设了日、没设周」才可能永远空转：日与周同时设限取并集（周字段每月都能命中），
+ * 只设周同样每月都有。剩下的逐个已列月份检查：有没有一个不超过该月天数的日。
+ * `0 0 31 2 *`（2 月只有 28 / 29 天）命中不了任何日期——放它进去等于让
+ * `nextCronAt` 搜满 8 年上界，再把一次「永不到点」折算成一次立刻外发。
+ */
+function cronDaysReachable(daysOfMonth: readonly number[], months: readonly number[] | null): boolean {
+  for (let month = 1; month <= MONTH_MAX_DAYS.length; month += 1) {
+    if (months !== null && !months.includes(month)) continue;
+    const maxDay = MONTH_MAX_DAYS[month - 1];
+    if (daysOfMonth.some((day) => day <= maxDay)) return true;
+  }
+  return false;
+}
+
+/**
+ * 解析 5 字段 cron；非法（字段数不符 / 越界 / 空段 / 步长 0 / 超长 / 日历上永不发生）一律
+ * `null`，绝不抛。
  *
  * 字段：`分 时 日 月 周`。周字段 0=周日 … 6=周六（不认 7）。
  * 日与周**同时**设限时按标准 cron 语义取并集（任一命中即触发）。
@@ -245,6 +266,13 @@ export function parseCron(text: string): CronSpec | null {
     daysOfMonth === null ||
     months === null ||
     daysOfWeek === null
+  ) {
+    return null;
+  }
+  if (
+    !daysOfMonth.wildcard &&
+    daysOfWeek.wildcard &&
+    !cronDaysReachable(daysOfMonth.values, months.wildcard ? null : months.values)
   ) {
     return null;
   }
@@ -291,8 +319,10 @@ export function nextCronAt(spec: CronSpec | null, at: number): number {
       }
     }
   }
-  // 合法 spec 在 8 年内必命中（2 月 29 日最坏 8 年一轮）；兜底只为类型闭合。
-  return at;
+  /* 合法 spec 在 8 年内必命中（2 月 29 日最坏 8 年一轮；永不发生的日 / 月组合已被
+     `parseCron` 拒掉）。兜底只为类型闭合：**绝不**折算成「立即投」——那会把一次排期
+     错误变成一次立刻外发。排在搜索上界之后，等于「排不进任何明确时刻」。 */
+  return at + MAX_CRON_LOOKAHEAD_DAYS * DAY_MS;
 }
 
 /* ------------------------------------------------------------------ *
@@ -460,7 +490,7 @@ export function validatePolicies(input: unknown): PolicyPatchResult {
     if (policy === null) {
       return {
         ok: false,
-        error: `policies[${key}] 字段非法（entryCron / weeklyCron 需为 5 字段表达式 / perDay ≤ ${MAX_PERIOD_QUOTA} / perWeek ≤ ${MAX_PERIOD_QUOTA}）`,
+        error: `policies[${key}] 字段非法（entryCron / weeklyCron 需为 5 字段表达式，且日期必须真实存在（如 2 月 31 日不收） / perDay ≤ ${MAX_PERIOD_QUOTA} / perWeek ≤ ${MAX_PERIOD_QUOTA}）`,
       };
     }
     value[key] = policy;

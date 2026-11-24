@@ -22,7 +22,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import { resolveWikiLayout } from '../wiki/layout';
 import { normalizeTriggerOptions } from '../trigger/detector';
-import type { SubscriptionRow, TargetPolicies, TargetPolicy, TriggerOptions } from '../types';
+import type { SubscriptionRow, TargetPolicies, TriggerOptions } from '../types';
 import {
   ALBUM_TARGET_PATTERN,
   CHAT_TARGET,
@@ -30,7 +30,7 @@ import {
   TARGET_GROUP_PREFIX,
   normalizeSubscriptionRows,
 } from './subscriptions';
-import { MAX_TARGET_POLICIES, parsePolicies } from './policy-resolve';
+import { MAX_TARGET_POLICIES, isDefaultPolicy, normalizePolicy, parsePolicies } from './policy-resolve';
 
 /** 面板可调的五个段（顺序即 GET 响应里的展示顺序）。 */
 export const SETTINGS_SECTIONS = ['trigger', 'topics', 'media', 'query', 'judge'] as const;
@@ -876,33 +876,56 @@ export async function writeTargetPolicies(
   return next.policies;
 }
 
+/** 面板保存单条策略的局部补丁：`undefined` 字段 = 沿用文件里的现值（不是「清空」）。 */
+export interface TargetPolicyPatch {
+  entryCron?: unknown;
+  weeklyCron?: unknown;
+  perDay?: unknown;
+  perWeek?: unknown;
+}
+
+/** 局部更新的结果：`ok: false` = 合并后字段非法，文件一个字节都没动（HTTP 层翻成 400）。 */
+export type TargetPolicyPatchResult =
+  | { readonly ok: true; readonly policies: TargetPolicies }
+  | { readonly ok: false };
+
 /**
- * 逐项写一条策略（面板右键菜单的唯一入口）：`policy === null` = 删除该项。
+ * 逐项写一条策略的**局部更新**（面板右键菜单的唯一入口）：`undefined` 字段沿用现值。
  *
- * 读改写整段在**同一条串行链**里完成：两个并发 POST 不会各自读到旧表再互相覆盖。
- * 表项已满且是新增键时抛 `SettingsConflictError`（HTTP 层翻成 400），文件保持原样。
- * 键与值都由调用方先过 `isPolicyKey` / `normalizePolicy`——这里再清洗一遍整表，
- * 顺手把文件里遗留的非法项清掉。
+ * 读现有值、合补丁、清洗、落盘**全在同一条串行链里**完成：并发的两次局部更新
+ * （一次改 `entryCron`、一次改 `perWeek`）不会各自读到同一份旧值，再把对方刚写的
+ * 字段盖回旧值。合并后仍是四字段全默认 = 删除该项。
+ *
+ * 字段非法返回 `{ ok: false }` 且不落盘；表项已满且是新增键时抛 `SettingsConflictError`
+ * （HTTP 层翻成 400），文件保持原样。
  */
-export async function upsertTargetPolicy(
+export async function patchTargetPolicy(
   wikiDir: string,
   key: string,
-  policy: TargetPolicy | null,
-): Promise<TargetPolicies> {
+  patch: TargetPolicyPatch,
+): Promise<TargetPolicyPatchResult> {
   const target = settingsPath(wikiDir);
-  const next = await enqueueWrite(target, () =>
-    performDocumentWrite(target, (current) => {
-      const policies: TargetPolicies = { ...current.policies };
-      if (policy === null) {
-        delete policies[key];
-      } else {
-        if (!Object.hasOwn(policies, key) && Object.keys(policies).length >= MAX_TARGET_POLICIES) {
-          throw new SettingsConflictError(`投递策略最多 ${MAX_TARGET_POLICIES} 项，请先删除不再使用的目标`);
-        }
-        policies[key] = policy;
+  return enqueueWrite(target, async (): Promise<TargetPolicyPatchResult> => {
+    const current = await readWritableDocument(target);
+    const existing = current.policies[key];
+    const policy = normalizePolicy({
+      entryCron: patch.entryCron === undefined ? existing?.entryCron : patch.entryCron,
+      weeklyCron: patch.weeklyCron === undefined ? existing?.weeklyCron : patch.weeklyCron,
+      perDay: patch.perDay === undefined ? existing?.perDay : patch.perDay,
+      perWeek: patch.perWeek === undefined ? existing?.perWeek : patch.perWeek,
+    });
+    if (policy === null) return { ok: false };
+    const policies: TargetPolicies = { ...current.policies };
+    if (isDefaultPolicy(policy)) {
+      delete policies[key];
+    } else {
+      if (!Object.hasOwn(policies, key) && Object.keys(policies).length >= MAX_TARGET_POLICIES) {
+        throw new SettingsConflictError(`投递策略最多 ${MAX_TARGET_POLICIES} 项，请先删除不再使用的目标`);
       }
-      return { ...current, policies: parsePolicies(policies) };
-    }),
-  );
-  return next.policies;
+      policies[key] = policy;
+    }
+    const next: StoredDocument = { ...current, policies: parsePolicies(policies) };
+    await writeDocument(target, next);
+    return { ok: true, policies: next.policies };
+  });
 }

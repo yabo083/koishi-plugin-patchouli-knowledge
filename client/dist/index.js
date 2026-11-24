@@ -6871,6 +6871,16 @@ function normalizeTagPolicy(raw) {
   return { entryCron, weeklyCron, perDay, perWeek };
 }
 
+/* 四字段全默认 = 服务端把这一项删掉（没有策略 = 立即投 + 不限量）：缓存也要跟着消失，
+   否则折叠徽标的条数与目标列表的「已设置」会把已删除的策略继续当配置显示。 */
+function isDefaultTagPolicy(policy) {
+  const normalized = normalizeTagPolicy(policy);
+  return normalized.entryCron === ''
+    && normalized.weeklyCron === ''
+    && normalized.perDay === 0
+    && normalized.perWeek === 0;
+}
+
 /* 后缀文案：`entryCron·周weeklyCron·perDay/perWeek`，任一段为空就省略；全空 → 空串（不挂后缀）。
    周报那条带「周」前缀：两条表达式并排时不至于分不清哪条管哪类事件。 */
 function formatTagPolicy(policy) {
@@ -6914,7 +6924,9 @@ function ensureTagPolicyStyles(doc) {
 
 /**
  * 投递群标签右键菜单。
- * 依赖全部注入（document / isOwnPage / read / write / readTargets），本段因此可被测试单独载入。
+ * 依赖全部注入（document / isOwnPage / identify / claim / read / write / readTargets），本段因此可被测试单独载入。
+ * `identify` 回答「现在这页能不能认出是本插件页」（路由 key / 页面身份元数据）：认不出时
+ * 右键既不认领也不吞宿主菜单，绝不把别的插件页抢成帕秋莉的页面。
  * `read` 返回 `GET /api/policies` 的载荷（数组或 `{ policies }`），`write` 抛错时
  * 的 `message` 会原样显示在菜单里（服务端 400 的 body.error 已在 writeJson 里抬出来）。
  * `readTargets` 返回 `GET /api/subscriptions` 的载荷（`{ rows: [{ source, targets }] }`）：
@@ -6932,7 +6944,18 @@ function createTagPolicyMenu(options) {
   /* 右键标签即「用户要在这个页面配置」——与点胶囊认领同义，不能因为宿主用随机实例 id
      渲染插件页就把右键吞掉（默认菜单已被 preventDefault，不认领就等于什么都不发生）。 */
   const claimPage = typeof opts.claim === 'function' ? opts.claim : null;
+  /* 「能确认是本插件页」的判据（路由 key 命中本插件名 / 页面身份元数据命中）。只用于右键
+     认领的门槛，与 `isOwnPage()`（是否已认领）分开注入：本段因此可被测试单独载入。 */
+  const identify = typeof opts.identify === 'function' ? opts.identify : null;
   const scanDelay = typeof opts.scanDelay === 'number' ? opts.scanDelay : 60;
+
+  /* 右键认领的门槛：已 own 的页面照旧（幂等）；否则必须能认出这是本插件页。
+     别的插件页上任何「数字列 + 可关闭标签」的组合都不能因为一次右键就被认领成帕秋莉的
+     页面（认领会启动数据面并弹鉴权门）。认不出时连宿主右键菜单都不吞，也不发请求。 */
+  function claimAllowed() {
+    if (isOwnPage()) return true;
+    return identify !== null && identify() === true;
+  }
 
   const cache = new Map();
   const bound = new WeakMap();
@@ -6954,13 +6977,16 @@ function createTagPolicyMenu(options) {
     let source = '';
     const cells = row.querySelectorAll ? row.querySelectorAll('td, th') : [];
     for (const cell of cells) {
-      /* 宿主把「监听群」渲染成输入框：文本节点是空的，值在 `input.value` 里。 */
+      /* 宿主把「监听群」渲染成输入框：文本节点是空的，值在 `input.value` 里。
+         服务端订阅校验接受任何纯数字来源（1–5 位短群号也合法），输入框这条因此按
+         「1–64 位纯数字」认；单元格纯文本仍用 6–12 位启发式（序号列也是几位数字）。 */
       const input = cell.querySelector ? cell.querySelector('input, textarea') : null;
       const value = input && typeof input.value === 'string' ? input.value.trim() : '';
-      if (/^\d{6,12}$/.test(value)) {
+      if (/^\d{1,64}$/.test(value)) {
         source = value;
         break;
       }
+      /* 文本路径只认 QQ 群号形状（6–12 位）：放宽到 1 位会把序号列认成来源群。 */
       const text = String(cell.textContent == null ? '' : cell.textContent).replace(/\s+/g, ' ').trim();
       if (text === '*' || /^\d{6,12}$/.test(text)) {
         source = text;
@@ -7067,6 +7093,7 @@ function createTagPolicyMenu(options) {
     const handler = (event) => {
       const source = readCollapsedSource(host);
       if (!source) return;
+      if (!claimAllowed()) return;
       if (event && typeof event.preventDefault === 'function') event.preventDefault();
       if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
       if (claimPage) claimPage();
@@ -7088,11 +7115,12 @@ function createTagPolicyMenu(options) {
     const handler = (event) => {
       const fresh = readTagInfo(tag);
       if (!fresh) return;
+      if (!claimAllowed()) return;
       if (event && typeof event.preventDefault === 'function') event.preventDefault();
       if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
-      /* 右键 = 「我要在这页配置」。**无条件**走认领（幂等）：已 own 时也要写
-         `routeProbe.userClaimed`，否则 own 若是靠标题文本临时命中，标题一消失
-         下一轮 tick 就会 syncOwn(false) 把菜单收掉。 */
+      /* 右键 = 「我要在这页配置」。认得出本插件页时**无条件**走认领（幂等）：已 own 时
+         也要写 `routeProbe.userClaimed`，否则 own 若是靠标题文本临时命中，标题一消失
+         下一轮 tick 就会 syncOwn(false) 把菜单收掉。认不出就不认领（见 `claimAllowed`）。 */
       if (claimPage) claimPage();
       if (!isOwnPage()) return;
       openMenu(tag, fresh, Number(event && event.clientX) || 0, Number(event && event.clientY) || 0);
@@ -7527,8 +7555,9 @@ function createTagPolicyMenu(options) {
     limitHead.appendChild(limitTitle);
     limitSec.appendChild(limitHead);
 
-    /* 值域：词条每天最多 1000、周报每周最多 100（与服务端一致的量级护栏）。 */
-    const perDayField = countField('词条 / 日', 'perday', policy.perDay, 1000);
+    /* 值域：词条每天最多 999（与服务端 `MAX_PERIOD_QUOTA` 同一口径，超出会被 400）、
+       周报每周最多 100（更窄的界面护栏）。 */
+    const perDayField = countField('词条 / 日', 'perday', policy.perDay, 999);
     const perWeekField = countField('周报 / 周', 'perweek', policy.perWeek, 100);
     limitSec.appendChild(perDayField.field);
     limitSec.appendChild(perWeekField.field);
@@ -7611,9 +7640,13 @@ function createTagPolicyMenu(options) {
       Promise.resolve()
         .then(() => writePolicy(next))
         .then(() => {
-          cache.set(info.key, normalizeTagPolicy(next));
+          /* 四字段全默认 = 服务端删掉了这一项（`settings.json` 里不留策略）：缓存必须同步删除，
+             否则折叠徽标的条数与目标列表的「已设置」能把已删除的策略一直当配置显示。 */
+          const stored = normalizeTagPolicy(next);
+          if (isDefaultTagPolicy(stored)) cache.delete(info.key);
+          else cache.set(info.key, stored);
           if (tag) {
-            applyTagPolicySuffix(doc, tag, next);
+            applyTagPolicySuffix(doc, tag, stored);
           }
           /* 折叠徽标的条数取自缓存：缓存一改就要重画（这次没有可见标签可写时也一样）。 */
           scanCollapsed();
@@ -8403,6 +8436,9 @@ export default function applyPatchouliWikiReader(ctx) {
        下一轮 checkRoute 的 routeMatches() 仍为 false → syncOwn(false) → 菜单被关，
        表现就是「闪一下就没」。 */
     claim: () => claimOwnPage(),
+    /* 右键认领前的归属校验：随机实例 id 的页面要靠元数据 / 路由名认，认不出就不认领
+       ——否则别的插件页上任意「数字列 + 可关闭标签」都能把那一页变成帕秋莉的。 */
+    identify: () => routeMatches(),
     read: () => requestJson(`${API_BASE}/api/policies`),
     write: (payload) => writeJson(`${API_BASE}/api/policies`, 'POST', payload),
     /* `collapse-tags` 把多余目标折叠成 `+ N`：这些目标不在 DOM 里，只能回订阅表取。 */

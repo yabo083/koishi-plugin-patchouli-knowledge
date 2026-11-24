@@ -14,16 +14,9 @@ import {
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
-import { SETTINGS_META, SettingsConflictError, readTargetPolicies, upsertTargetPolicy } from '../plugin/settings-store';
+import { SETTINGS_META, SettingsConflictError, patchTargetPolicy, readTargetPolicies } from '../plugin/settings-store';
 import { ALBUM_TARGET_PATTERN, CHAT_TARGET, bareChannelId, isTargetGroupHeader } from '../plugin/subscriptions';
-import {
-  MAX_PERIOD_QUOTA,
-  isDefaultPolicy,
-  isPolicyKey,
-  normalizePolicy,
-  policyKey,
-  splitPolicyKey,
-} from '../plugin/policy-resolve';
+import { MAX_PERIOD_QUOTA, isPolicyKey, policyKey, splitPolicyKey } from '../plugin/policy-resolve';
 import { albumTargetValues, albumValue, loadAlbumCatalog, type AlbumCandidate } from '../plugin/albums';
 import {
   DEFAULT_TUNING_PARAMETERS,
@@ -1320,9 +1313,9 @@ export function registerWebUi(
   // 键 = `<来源群>\u0000<目标键>`：同一个投递群在不同监听群里各有一份独立策略。
   // GET 把键拆成 `{ source, target, entryCron, weeklyCron, perDay, perWeek }`；`target` 回显
   // 订阅表里的写法（相册名 / `@chat`），前端按标签文案匹配后缀。
-  // POST 是**逐项 upsert + 局部更新**：没给的字段沿用该项现有值，其余项原样保留
-  // （并发保存因此不会互相覆盖）；四字段全等于缺省（空 cron / 0 / 0）= 删除该项。
-  // 非法输入 400 且文件一个字节都不动。
+  // POST 是**逐项局部更新**：没给的字段沿用该项现有值，其余项原样保留；四字段全等于
+  // 缺省（空 cron / 0 / 0）= 删除该项。合并在 `patchTargetPolicy` 的串行读改写里完成，
+  // 并发的两次局部更新（各改一个字段）因此不会互相覆盖。非法输入 400 且文件一个字节都不动。
   router.get(`${cleanBase}/api/policies`, async (kCtx: KoishiKoaContext) => {
     kCtx.type = 'application/json';
     const wikiDir = typeof system.wikiDir === 'string' ? system.wikiDir.trim() : '';
@@ -1383,28 +1376,28 @@ export function registerWebUi(
       return;
     }
     try {
-      /* 局部更新：**没给**的字段沿用该项现有值（面板只发改动的那几项），
-         没这一项时按缺省补（立即投 / 不限量）。整条四字段全默认 = 删除该项。 */
-      const existing = (await readTargetPolicies(system.wikiDir))[key];
-      const policy = normalizePolicy({
-        entryCron: body.entryCron === undefined ? existing?.entryCron : body.entryCron,
-        weeklyCron: body.weeklyCron === undefined ? existing?.weeklyCron : body.weeklyCron,
-        perDay: body.perDay === undefined ? existing?.perDay : body.perDay,
-        perWeek: body.perWeek === undefined ? existing?.perWeek : body.perWeek,
+      /* 局部更新：**没给**的字段沿用该项现有值（面板只发改动的那几项），没这一项时按缺省
+         补（立即投 / 不限量）。读取、合并、落盘都在 `patchTargetPolicy` 的同一条串行链里，
+         并发的两次局部更新不会各自读到同一份旧值、再把对方刚写的字段盖回去。
+         整条四字段全默认 = 删除该项。 */
+      const result = await patchTargetPolicy(system.wikiDir, key, {
+        entryCron: body.entryCron,
+        weeklyCron: body.weeklyCron,
+        perDay: body.perDay,
+        perWeek: body.perWeek,
       });
-      if (policy === null) {
+      if (!result.ok) {
         kCtx.status = 400;
         kCtx.body = {
           ok: false,
           error:
-            `策略字段非法：entryCron / weeklyCron 需为 5 字段表达式（分 时 日 月 周），` +
+            `策略字段非法：entryCron / weeklyCron 需为 5 字段表达式，且日期必须真实存在（如 2 月 31 日不收），` +
             `perDay / perWeek 需为 0–${MAX_PERIOD_QUOTA} 的整数`,
         };
         return;
       }
-      const stored = await upsertTargetPolicy(system.wikiDir, key, isDefaultPolicy(policy) ? null : policy);
       kCtx.type = 'application/json';
-      kCtx.body = { ok: true, policies: policyEntries(system, stored) };
+      kCtx.body = { ok: true, policies: policyEntries(system, result.policies) };
     } catch (err: unknown) {
       kCtx.type = 'application/json';
       kCtx.status = err instanceof SettingsConflictError ? 400 : 500;

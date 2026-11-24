@@ -883,11 +883,90 @@ test('DELIVERY-GATE-SCOPE: 词条 / 周报各带各的 scope 与去重键', asyn
     const weekly = deliveries.find((delivery) => delivery.item.kind === 'weekly');
     assert.equal(entry.scope, 'patchouli:entry');
     assert.equal(weekly.scope, 'patchouli:weekly-album');
-    assert.equal(entry.dedupeKey, `entry-1:${ALBUM_A}`);
-    assert.equal(weekly.dedupeKey, `fire-1:${ALBUM_B}`);
+    assert.equal(entry.dedupeKey, `100000001:entry-1:${ALBUM_A}`);
+    assert.equal(weekly.dedupeKey, `100000001:fire-1:${ALBUM_B}`);
     assert.deepEqual(weekly.target, albumTarget('ALBUM02'));
   } finally {
     await harness.disposeDir();
+  }
+});
+
+test('DELIVERY-GATE-SCOPE-SOURCE: 两个来源群的同一事件投同一相册，幂等键与投递都各算各的', async () => {
+  const harness = await makeHarness();
+  try {
+    const at = harness.now();
+    // 同一个 `fireKey` / 同一个相册，只有来源群不同：队列身份本就按来源分开，
+    // 下游幂等键也必须分开，否则后到的那条会被判成「已发过」而静默跳过。
+    for (const source of ['100000001', '100000002']) {
+      await harness.gate.offer({
+        kind: 'weekly',
+        source,
+        eventKey: 'fire-1',
+        targets: [albumPlan(ALBUM_A)],
+        png: PNG(`weekly-${source}`),
+      });
+    }
+    // 词条同理：同一天同标题 slug 在不同来源群里会撞 `entryId`。
+    for (const source of ['100000001', '100000002']) {
+      await harness.gate.offer({
+        kind: 'entry',
+        source,
+        eventKey: '2026-11-24-some-topic',
+        targets: [albumPlan(ALBUM_B)],
+        png: PNG(`entry-${source}`),
+      });
+    }
+    await harness.gate.drain(at);
+
+    const deliveries = harness.calls[0];
+    assert.equal(deliveries.length, 4, '两条来源的四张卡都要真的发出去');
+    const keys = deliveries.map((delivery) => delivery.dedupeKey);
+    assert.equal(new Set(keys).size, 4, '幂等键必须按来源群区分');
+    assert.deepEqual(keys.slice().sort(), [
+      `100000001:2026-11-24-some-topic:${ALBUM_B}`,
+      `100000001:fire-1:${ALBUM_A}`,
+      `100000002:2026-11-24-some-topic:${ALBUM_B}`,
+      `100000002:fire-1:${ALBUM_A}`,
+    ].sort());
+  } finally {
+    await harness.disposeDir();
+  }
+});
+
+test('DELIVERY-GATE-TIMER-CAP: 极远的到期时刻夹到定时器上界，不当成立即唤醒', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'patchouli-gate-far-'));
+  try {
+    const now = sh('2026-11-24T22:30:00');
+    const far = now + 8 * 366 * 86_400_000;
+    await writeFile(
+      path.join(dir, 'delivery-state.json'),
+      JSON.stringify({
+        version: 1,
+        queue: [
+          {
+            seq: 1,
+            source: '100000001',
+            targetKey: ALBUM_A,
+            kind: 'entry',
+            eventKey: 'entry-far',
+            createdAt: now,
+            dueAt: far,
+            channelId: 'onebot:100000001',
+            attempts: 0,
+          },
+        ],
+        counters: {},
+      }),
+      'utf8',
+    );
+    const harness = await makeHarness({ dir, now });
+    const armed = [...harness.timers.values()];
+    assert.equal(armed.length, 1, '有一条待投就要排一次唤醒');
+    assert.equal(armed[0].delayMs, 2_147_483_647, '超过上界的延迟必须夹住（否则运行时按 1ms 触发）');
+    assert.ok(armed[0].delayMs > 0, '绝不能是 0 延迟的空转唤醒');
+    await harness.disposeDir();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

@@ -69,6 +69,9 @@ const ESTIMATED_ITEM_BYTES = 4096;
 const SCOPE_ENTRY = 'patchouli:entry';
 const SCOPE_WEEKLY = 'patchouli:weekly-album';
 
+/** 单次 `setTimer` 的延迟上界：超过它的延迟会被运行时当成 1ms 立即触发（等于空转唤醒）。 */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** 宿主透传的重试策略：维持条目投递的历史行为。 */
 const ENTRY_RETRY: DeliveryRetryOptions = { maxAttempts: 4, baseDelayMs: 3000 };
 
@@ -130,6 +133,7 @@ export interface DeliveryGateDelivery {
   target: DeliveryTargetLike;
   png: Buffer;
   scope: string;
+  /** 下游幂等键：`<来源群>:<事件键>:<目标键>`——三者都对上才算「同一张卡」。 */
   dedupeKey: string;
   retry?: DeliveryRetryOptions;
 }
@@ -371,7 +375,10 @@ export class DeliveryGate {
           target: targetOf(entry.item),
           png: entry.png,
           scope: entry.item.kind === 'weekly' ? SCOPE_WEEKLY : SCOPE_ENTRY,
-          dedupeKey: `${entry.item.eventKey}:${entry.item.targetKey}`,
+          /* 幂等键必须带来源群：队列身份是（来源 × 目标 × 事件键），而 `eventKey` 在跨来源时
+             会撞——同一个相册、同一天的同一标题 slug（词条），或同一取材时刻（周报 `fireKey`）。
+             只按事件键 + 目标做键，第二个来源的那张卡会被下游判成「已发过」直接跳过。 */
+          dedupeKey: `${entry.item.source}:${entry.item.eventKey}:${entry.item.targetKey}`,
           retry: entry.item.kind === 'entry' ? ENTRY_RETRY : undefined,
         }));
         try {
@@ -792,7 +799,9 @@ export class DeliveryGate {
     }
     const wake = this.nextWakeAt();
     if (wake === undefined) return;
-    const delay = Math.max(0, wake - this.clock());
+    /* 超过 `MAX_TIMER_DELAY_MS` 的延迟会被当成 1ms 立即触发：夹到上界后到点再排一次，
+       绝不把「很久以后」变成空转唤醒（`nextCronAt` 的兜底就可能排在 8 年后）。 */
+    const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, wake - this.clock()));
     this.timer = this.setTimer(() => {
       this.timer = undefined;
       void this.drain().catch((error: unknown) => {

@@ -177,6 +177,7 @@ test('POLICY-API-01: GET 拆键 / POST 逐项 upsert / 缺省删项 / 400 不改
       { source: '200', target: '@chat', perDay: -1 },
       { source: '200', target: '@chat', perDay: 1.5 },
       { source: '200', target: '@chat', perWeek: 1000 },
+      { source: '200', target: '@chat', entryCron: '0 0 31 2 *' },
       { source: '200', target: '未绑定相册', perDay: 1 },
     ];
     for (const body of invalid) {
@@ -245,6 +246,18 @@ test('POLICY-API-01: GET 拆键 / POST 逐项 upsert / 缺省删项 / 400 不改
         perWeek: 0,
       },
       '只读展示同样拆成两条 cron',
+    );
+
+    // ⑥' 并发局部更新**同一项的不同字段**：合并必须在串行读改写里完成。
+    //     旧写法各自读到同一份旧值再整条提交，后到者会把前者刚写的字段盖回旧值。
+    await Promise.all([
+      request('POST /patchouli/api/policies', koaCtx({ source, target: '@chat', entryCron: '0 7 * * *' })),
+      request('POST /patchouli/api/policies', koaCtx({ source, target: '@chat', perWeek: 4 })),
+    ]);
+    assert.deepEqual(
+      (await readTargetPolicies(wikiDir))[chatKey],
+      { entryCron: '0 7 * * *', weeklyCron: '', perDay: 1, perWeek: 4 },
+      '同目标并发改不同字段：两个字段都得留下',
     );
   } finally {
     system.dispose();

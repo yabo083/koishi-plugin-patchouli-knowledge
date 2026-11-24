@@ -342,12 +342,18 @@ function setup(options = {}) {
   const factory = loadFactory();
   const api = factory(dom.window, dom.document);
   const state = { own: options.own !== false };
-  const calls = { reads: 0, writes: [], targetReads: 0 };
+  const calls = { reads: 0, writes: [], targetReads: 0, claims: 0 };
   const menu = api.createTagPolicyMenu({
     document: dom.document,
     window: dom.window,
     MutationObserver: options.MutationObserver || null,
     isOwnPage: () => state.own,
+    /* 认领替身：与生产同义（认领成功 → 本页变 own），并记一次数。 */
+    claim: () => {
+      calls.claims += 1;
+      state.own = true;
+    },
+    identify: options.identify,
     read: () => {
       calls.reads += 1;
       return Promise.resolve({ policies: options.policies || [] });
@@ -914,14 +920,17 @@ test('TAG-16: 数字控件在 0 与上限处钳制，0 显示「不限」，点�
   dayUp.dispatchEvent(makeEvent('click'));
   assert.equal(perDay.value, '1', '+ 从 0 加到 1');
 
-  perDay.value = '1000';
+  perDay.value = '999';
   dayUp.dispatchEvent(makeEvent('click'));
-  assert.equal(perDay.value, '1000', '词条上限 1000');
+  assert.equal(perDay.value, '999', '词条上限 999（与服务端 MAX_PERIOD_QUOTA 同一口径）');
   assert.equal(dayUp.disabled, true, '到上限后加号禁用');
   perDay.value = '5000';
   perDay.dispatchEvent(makeEvent('click'));
   dayUp.dispatchEvent(makeEvent('click'));
-  assert.equal(perDay.value, '1000', '手输超限也钳到 1000');
+  assert.equal(perDay.value, '999', '手输超限也钳到 999');
+
+  /* 旧界面能提交的 1000 现在读出来也是 999：服务端上限 999，保存不该带出 400。 */
+  perDay.value = '1000';
 
   assert.equal(perWeek.value, '不限', '周报为 0 时也显示「不限」');
   perWeek.dispatchEvent(makeEvent('focus'));
@@ -941,7 +950,130 @@ test('TAG-16: 数字控件在 0 与上限处钳制，0 显示「不限」，点�
     target: '甲群',
     entryCron: '',
     weeklyCron: '',
-    perDay: 1000,
+    perDay: 999,
     perWeek: 99,
   });
+});
+
+/** 造一行「监听群渲染成输入框」的订阅表：来源群号只能从 `input.value` 里读。 */
+function buildInputTable(doc, row) {
+  const table = doc.createElement('table');
+  const tbody = doc.createElement('tbody');
+  table.appendChild(tbody);
+  const tr = doc.createElement('tr');
+  const sourceCell = doc.createElement('td');
+  const input = doc.createElement('input');
+  input.value = row.source;
+  sourceCell.appendChild(input);
+  const targetCell = doc.createElement('td');
+  const tag = doc.createElement('span');
+  tag.className = 'el-tag el-tag--info el-tag--default el-tag--light is-closable';
+  const content = doc.createElement('span');
+  content.className = 'el-tag__content';
+  content.textContent = row.target;
+  const close = doc.createElement('span');
+  close.className = 'el-tag__close';
+  tag.appendChild(content);
+  tag.appendChild(close);
+  targetCell.appendChild(tag);
+  tr.appendChild(sourceCell);
+  tr.appendChild(targetCell);
+  tbody.appendChild(tr);
+  doc.body.appendChild(table);
+  return { tr, tag, content, close, input };
+}
+
+test('TAG-17: 输入框里的短群号（1–5 位）也认得出，右键能开策略菜单', async () => {
+  const client = setup({ policies: [] });
+  const row = buildInputTable(client.document, { source: '12345', target: '@chat' });
+  client.menu.attach();
+  await client.menu.refresh();
+
+  const info = client.menu.readTagInfo(row.tag);
+  assert.ok(info, '短群号行不能被当成「没有来源」');
+  assert.equal(info.source, '12345', '服务端订阅校验接受 1–5 位群号，解析器也必须接受');
+  assert.equal(info.key, '12345\u0000@chat');
+
+  row.tag.dispatchEvent(makeEvent('contextmenu', { clientX: 120, clientY: 90 }));
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  assert.ok(menu, '短群号行的标签右键要能开菜单');
+  assert.equal(menu.querySelector('.ptx-policy-who').textContent, '12345 → @chat');
+
+  menu.querySelector('.ptx-policy-save').dispatchEvent(makeEvent('click'));
+  await flush();
+  assert.equal(client.calls.writes.length, 1);
+  assert.equal(client.calls.writes[0].source, '12345', 'POST 的 source 原样是短群号');
+});
+
+test('TAG-18: 认不出归属的页面右键不认领、不吞宿主菜单；认得出才认领', async () => {
+  const foreign = setup({ own: false, identify: () => false, policies: [] });
+  const [row] = buildSubscriptionTable(foreign.document, [{ source: '111111', target: '甲群' }]);
+  foreign.menu.attach();
+  const event = makeEvent('contextmenu', { clientX: 200, clientY: 160 });
+  row.tag.dispatchEvent(event);
+
+  assert.equal(foreign.calls.claims, 0, '别的插件页不得被认领成帕秋莉的页面');
+  assert.equal(event.defaultPrevented, false, '不认领就不吞宿主右键菜单');
+  assert.equal(foreign.document.querySelectorAll('.ptx-policy-menu').length, 0);
+  assert.equal(foreign.calls.reads, 0, '认不出归属时一个请求都不发');
+
+  /* 折叠标签（`+ N`）同一条门槛。 */
+  const collapsed = setup({ own: false, identify: () => false, policies: [] });
+  const [folded] = buildCollapsedTable(collapsed.document, [{ source: '111111', visible: '甲群', collapsed: 1 }]);
+  collapsed.menu.attach();
+  const plusEvent = makeEvent('contextmenu', { clientX: 200, clientY: 160 });
+  folded.plusTag.dispatchEvent(plusEvent);
+  assert.equal(collapsed.calls.claims, 0);
+  assert.equal(plusEvent.defaultPrevented, false);
+  assert.equal(collapsed.document.querySelectorAll('.ptx-policy-picker').length, 0);
+
+  /* 认得出（路由名 / 页面身份元数据命中）：右键即认领并开菜单。 */
+  const own = setup({ own: false, identify: () => true, policies: [] });
+  const [known] = buildSubscriptionTable(own.document, [{ source: '111111', target: '甲群' }]);
+  own.menu.attach();
+  known.tag.dispatchEvent(makeEvent('contextmenu', { clientX: 200, clientY: 160 }));
+  assert.equal(own.calls.claims, 1, '认得出本插件页：右键就是认领凭据');
+  assert.ok(own.document.querySelector('.ptx-policy-menu'), '认领后菜单要开');
+});
+
+test('TAG-19: 保存成全缺省 = 删项，缓存 / 折叠徽标 / 目标列表的已设置同步消失', async () => {
+  const client = setup({
+    policies: [{ source: '111111', target: '甲群', entryCron: '0 22 * * *', weeklyCron: '', perDay: 3, perWeek: 0 }],
+    subscriptions: { rows: [{ source: '111111', targets: ['甲群', '乙群'] }] },
+  });
+  const [row] = buildCollapsedTable(client.document, [{ source: '111111', visible: '甲群', collapsed: 1 }]);
+  client.menu.attach();
+  await client.menu.refresh();
+  assert.equal(row.plusTag.getAttribute('data-ptx-policy-count'), '1 条策略');
+  assert.equal(row.tag.getAttribute('data-ptx-policy'), '0 22 * * *·3/0');
+
+  row.tag.dispatchEvent(makeEvent('contextmenu', { clientX: 200, clientY: 160 }));
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  menu.querySelector('.ptx-policy-sec-entry').querySelector('.ptx-policy-cron').value = '';
+  menu.querySelector('.ptx-policy-perday').value = '0';
+  menu.querySelector('.ptx-policy-save').dispatchEvent(makeEvent('click'));
+  await flush();
+
+  assert.equal(client.calls.writes.length, 1);
+  assert.deepEqual(client.calls.writes[0], {
+    source: '111111',
+    target: '甲群',
+    entryCron: '',
+    weeklyCron: '',
+    perDay: 0,
+    perWeek: 0,
+  });
+  assert.equal(row.tag.getAttribute('data-ptx-policy'), null, '标签后缀要摘掉');
+  assert.equal(row.plusTag.getAttribute('data-ptx-policy-count'), null, '折叠徽标不得再算这条已删除的策略');
+
+  /* 目标列表的「已设置」也取自缓存：删掉的那条不能再显示为已配置。 */
+  row.plusTag.dispatchEvent(makeEvent('contextmenu', { clientX: 512, clientY: 240 }));
+  await flush();
+  const buttons = client.document.querySelectorAll('.ptx-policy-target');
+  assert.equal(buttons.length, 2, '列表项来自订阅表');
+  assert.equal(
+    buttons.filter((button) => button.classList.contains('is-set')).length,
+    0,
+    '已删除的策略不得再显示为已设置',
+  );
 });

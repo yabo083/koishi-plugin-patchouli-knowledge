@@ -77,6 +77,10 @@ test('CRON-03: 非法 cron 一律 null（不抛）', () => {
     '1,,2 * * * *',
     '1- * * * *',
     '*'.repeat(200),
+    // 日历上永不发生：语法合法但没有任何日期能命中（2 月没有 30 / 31 号）。
+    '0 0 31 2 *',
+    '0 0 30 2 *',
+    '0 22 31 4,6,9,11 *',
   ];
   for (const text of invalid) {
     assert.equal(parseCron(text), null, `${JSON.stringify(text)} 必须判为非法`);
@@ -122,6 +126,31 @@ test('CRON-06: 跨日 / 跨周 / 跨月，以及日与周同时设限取并集',
   const union = parseCron('0 12 1 * 1');
   assert.equal(nextCronAt(union, sh('2026-11-24T13:00:00')), sh('2026-11-30T12:00:00'));
   assert.equal(nextCronAt(union, sh('2026-12-01T13:00:00')), sh('2026-12-07T12:00:00'), '1 号当天的 12:00 已过');
+});
+
+test('CRON-07: 可达性——闰日合法、日周并集合法；搜满上界不折算成立即投', () => {
+  // 闰日只是稀有，不是不可能（nextCronAt 会排到下一个闰年）。
+  const leapDay = parseCron('0 0 29 2 *');
+  assert.ok(leapDay, '2 月 29 日必须合法');
+  // 任一所列月份存在该日即可（1 月有 31 号）。
+  assert.ok(parseCron('0 0 31 1,2 *'), '1 月 31 日存在 → 合法');
+  assert.ok(parseCron('0 0 31 2,3 *'), '3 月 31 日存在 → 合法');
+  // 日与周同时设限取并集：2 月的每周一都可能命中，日字段再离谱也有日期。
+  assert.ok(parseCron('0 0 31 2 1'), '并集语义下周字段兜住了可达性');
+
+  // 手工构造「永不命中」的 spec（绕过 parseCron 的拒收）：搜满上界后必须排在界外，
+  // 绝不能返回 at —— 那会把一次永不到点变成一次立刻外发。
+  const impossible = {
+    minutes: [0],
+    hours: [0],
+    daysOfMonth: [31],
+    months: [2],
+    daysOfWeek: null,
+  };
+  const at = sh('2026-11-24T10:00:00');
+  const fallback = nextCronAt(impossible, at);
+  assert.equal(fallback, at + 8 * 366 * 86_400_000, '兜底 = 搜索上界之后');
+  assert.ok(fallback > at, '兜底必须严格大于 at');
 });
 
 test('POLICY-10: 策略键形状（<来源群> NUL <目标键>）', () => {
@@ -182,6 +211,9 @@ test('POLICY-11: 策略归一（缺省 = 两类事件都立即投 / 不限量）
     { perDay: 1.5 },
     { perDay: MAX_PERIOD_QUOTA + 1 },
     { perWeek: '1' },
+    // 日历上永不发生（`0 0 31 2 *`）：保存时 400、读盘时丢弃，绝不排成一个「立即投」。
+    { entryCron: '0 0 31 2 *' },
+    { weeklyCron: '0 0 31 2 *' },
   ]) {
     assert.equal(normalizePolicy(bad), null, `${JSON.stringify(bad)} 必须判为非法`);
   }
@@ -223,6 +255,7 @@ test('POLICY-12: 策略表清洗（读路径）与严格校验（写路径）', 
     [`200\u0000100/A4`]: { entryCron: '25:00-26:00', weeklyCron: '', perDay: 1, perWeek: 0 },
     [`200\u0000100/A5`]: { entryCron: '', weeklyCron: '0 9 * * 9', perDay: 1, perWeek: 0 },
     [`200\u0000100/A6`]: null,
+    [`200\u0000100/A7`]: { entryCron: '0 0 31 2 *', weeklyCron: '', perDay: 1, perWeek: 0 },
   };
 
   // 读路径：坏项静默丢弃（一份脏文件不得让策略意外全开或整份失效）。
