@@ -379,30 +379,45 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
 | `GET <base>/api/subscriptions` | `{ rows, source, albums, probedAt }`；相册只读缓存（GET 不触发秒级探测，保鲜交给 `/api/albums`） |
 | `POST <base>/api/subscriptions` | body `{ rows }` → `200 { ok: true, rows, unresolved }` / `400 { ok: false, error }`。`unresolved` = 本次解析不到相册（歧义 / 改名 / 删除）因而**没有绑定**的名字：行里保留、投递期停投，面板提示重选。校验：`source` 非空（`*` 允许）、每行 `targets` 是数组且元素只能是 `@chat` 或**探测到 / 缓存里存在 / 当前行已用**的目标、`entry`/`weekly` 布尔、单行 ≤16、总行 ≤256。相册目录为空（探测不可用）时只做形状校验，否则面板在掉线时连 `@chat` 都存不下去 |
 
-### 3.5.3 定时投递 / 限量 / 抖动（`src/plugin/delivery-gate.ts` / `delivery-state.ts`）
+### 3.5.3 定时投递 / 限量（`src/plugin/delivery-gate.ts` / `delivery-state.ts` / `policy-resolve.ts`）
 
-投递策略挂在**稳定地址**上（`settings.json` 顶层 `policies`，与 `targetBindings` 同一次原子写）：
-`@chat:<来源群>` 或 `群号/相册ID`；未配置的目标 = 全天、不限量、不抖动（行为与旧版一致）。
+投递策略挂在**（监听群 × 稳定目标）**上（`settings.json` 顶层 `policies`，与 `targetBindings`
+同一次原子写）：键 = `<来源群>\u0000<目标键>`，目标键是 `@chat:<来源群>` 或 `群号/相册ID`。
+同一个投递群挂在两个监听群下各有一份**独立**策略；未配置的目标 = 立即投、不限量（与旧版一致）。
 
+- **写入口 = `POST /api/policies`**（订阅表里投递群标签的右键菜单）：逐项 upsert + **局部更新**
+  （没给的字段沿用该项现有值），四字段全缺省（两条 cron 都空 / 0 / 0）= 删除该项。
+  `GET /api/policies` 把键拆成 `{ source, target, entryCron, weeklyCron, perDay, perWeek }`；
+  `target` 优先回显订阅表里的写法（相册名 / `@chat`），拿不到名字时回退稳定地址。
+  `POST /api/settings` 的 `section: 'policies'` 一律 400——策略只有一个写入口。
+  旧的单一字段 `cron` 已拆成 `entryCron` / `weeklyCron`：`POST` 里出现 `cron` 直接 400，
+  读盘时旧键按 `entryCron` 读、`weeklyCron` 置空（写盘只写新字段）。
+- **定时按投递类型分开**（`cronForKind`）：日词条用 `entryCron`（每天都有新词条），
+  周主题用 `weeklyCron`（每周一次周报）——两条各管一类事件，互不影响。
+  `cron` 是 5 字段（分 时 日 月 周）、`Asia/Shanghai`，支持 `*` / 数字 /
+  `a-b` / 步进（`a/n`、`a-b/n`）/ 逗号列表；空串 = 立即投。`nextCronAt` 取**严格大于**
+  入队时刻的下一次触发，`dueAt` 入队时算定并落库，重启不重算。
 - **入队而非直发**：`handleQuiescence` 结算 → `setEntryCardSink` → `DeliveryGate.offer({kind:'entry'})`；
   周报产物同理（`runWeeklyAlbumUpload` 的 `deliver` 依赖换成 offer）。入队粒度是「事件 × 目标」：
-  一条词条投三个相册 = 三条队列项，各自额度、各自窗口。
-- **排队不丢弃**：窗口外的事件等到下一个窗口首刻（`policy-resolve.nextWindowStart`），
-  绝不让「讨论结束的时刻」决定词条可见性。抖动的 `deliverAt` 入队时算定并落库，重启不重算。
-- **限量按目标**：词条按自然日（上海 00:00 切）、周报按周一起算的自然周，惰性比较 `periodKey` 清零；
-  超额 `warn` 并丢弃（不占队列）。同一事件投多个目标时每个目标各扣一次。
+  一条词条投三个相册 = 三条队列项，各自 cron、各自额度、各自来源群。
+- **排队不丢弃**：带 cron 的事件等到下一次触发，绝不让「讨论结束的时刻」决定词条可见性；
+  额度在**到点那一刻**判定（`cron` 把事件推到未来的那一段不占额）。
+- **限量按（来源群 × 目标）**：词条按自然日（上海 00:00 切）、周报按周一起算的自然周，
+  惰性比较 `periodKey` 清零；到点超额 warn 并**出队丢弃**。同一事件投多个目标时每个目标各判一次。
+- **同目标随机间隔**：同一（来源群 × 目标）相邻两条至少 60–180 秒随机（内部常量、不可配置），
+  错开 `dueAt` 而不是同一毫秒挤进一批。
 - **批量外发**：`drain` 取到期项（≤20 条 / ≤8 MiB）→ 逐事件渲染（同事件多目标只渲一次）→
   **一次** `ctx['miyako-delivery'].broadcast`（`createBroadcastDeliver`），按 `outcomes` 逐（产物 × 目标）
   结算：成功出队、失败留队指数退避（60s 起、封顶 30 分钟、10 次封顶）、`TARGET_UNBOUND` 之类
   目标失效直接出队并告警。渲染失败 3 次出队，不阻塞同批。缺 `broadcast` = 整批留队退避，无逐条 fallback。
-- **单定时器**：只有一条 wake 定时器指向队列最早的 `deliverAt`（`nextWakeAt`），无轮询；`dispose()` 停闸。
+- **单定时器**：只有一条 wake 定时器指向队列最早的 `dueAt`（`nextWakeAt`），无轮询；`dispose()` 停闸。
 - **状态文件**：`<wikiDir>/.patchouli/delivery-state.json`（独立文件、独立原子写、`0600`）——
-  `{ version: 1, queue: QueuedDelivery[], counters: Record<'<kind>\u0000<目标键>', {periodKey, used}> }`。
+  `{ version: 1, queue: QueuedDelivery[]（含 dueAt）, counters: Record<'<kind>\u0000<来源群>\u0000<目标键>', {periodKey, used}> }`。
   队列 ≤1024 条且序列化 ≤1 MiB，满了**拒收新事件并 warn、不淘汰旧项**；坏文件当空状态 + 一次 warn，
   写路径一律拒绝覆盖（`DeliveryStateError`）。渲染产物在内存里暂存 ≤32 MiB，超出 / 重启后由 `render`
   重渲（词条按 id 重渲；周报产物随进程丢失，条目出队并告警）。
-- **周报预筛**：`planWeeklyAlbumSources(snapshot, fallbackAlbums, allowTarget)` 跳过本周额度已尽的相册，
-  免得白占 `gateDailySlot` 的触发槽；最终仍以 `offer` 占额为准。
+- **周报预筛**：`planWeeklyAlbumSources(snapshot, fallbackAlbums, allowTarget(album, source))` 跳过
+  本周额度已尽的相册，免得白占 `gateDailySlot` 的触发槽；最终仍以 `drain` 到点判定为准。
 
 ### 3.6 自动书记存储（`src/plugin/scribe.ts`）
 
@@ -480,6 +495,8 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
 
 | 日期 | 变更 |
 | :--- | :--- |
+| 2026-11-24 | **投递时间按投递类型拆分（`entryCron` / `weeklyCron`）**：①`TargetPolicy` 改为 `{ entryCron, weeklyCron, perDay, perWeek }`——日词条与周主题各一条 cron；②读盘时旧的单一 `cron` 视为 `entryCron`、`weeklyCron` 置空（写盘只写新字段），`isDefaultPolicy` 改为四字段全默认；③`policy-resolve` 新增 `cronForKind(policy, kind)`，闸门 `planDueAt` 按 `kind` 取对应 cron 再 `nextCronAt`（额度 / 随机间隔 / 批量不变）；④`POST /api/policies` 改**局部更新**（没给的字段沿用该项现值，出现旧字段 `cron` 直接 400），`GET` 返回两条 cron；⑤订阅表标签右键菜单拆成「日词条投递时间」「周主题投递时间」两块（各带「立即投」与每日 / 每周预设 chips），标签后缀为 `entryCron·周weeklyCron·限量`。 |
+| 2026-11-24 | **投递策略改为 cron + （监听群 × 目标）键，入口移到订阅表标签右键菜单**：①`TargetPolicy` 收敛为 `{ cron, perDay, perWeek }`（窗口 / `entryPerDay` / `weeklyPerWeek` / `jitterMinutes` 删除；抖动与同目标 1–3 分钟随机间隔内化为投递逻辑常量）；②策略键 = `<来源群>\u0000<目标键>`，同一个投递群在不同监听群下各有一份独立策略与额度；③`policy-resolve` 用 `parseCron`（5 字段，`*` / 数字 / `a-b` / 步进 / 逗号列表，非法即 `null`）与 `nextCronAt`（上海时区，**严格大于**入队时刻）替换窗口语法；④闸门 `offer` 排定 `dueAt`（cron + 同目标随机间隔，落库不重算），额度改在 `drain` **到点**判定（cron 推后的那一段不占额，重试不重复判额），队列项字段 `deliverAt` → `dueAt`（旧状态文件读回兼容）；⑤删除插件页 `deliveryPolicies` 表格、`normalizeDeliveryPolicyRows` / `syncDeliveryPolicies` 与 `albums.ts` 的候选依赖，`apply()` 只读 `settings.json.policies`；⑥新增 `GET/POST /api/policies`（GET 把键拆成 `{source,target,cron,perDay,perWeek}` 且 `target` 回显订阅表写法；POST 逐项 upsert、三项全缺省 = 删项、400 不改文件，`upsertTargetPolicy` 在同一条串行链上读改写）、`/api/settings.policies` 改数组形状；⑦`planWeeklyAlbumSources` 的 `allowTarget(album, source)` 带上来源群。测试新增 CRON-01..06 / SCHED-18 / POLICY-10..13 / POLICY-API-01。 |
 | 2026-11-24 | **定时投递 / 限量 / 抖动落地（`delivery-gate.ts` / `delivery-state.ts`）**：新增闸门 `DeliveryGate`（`offer` / `drain` / `nextWakeAt` / `dispose`，单定时器）与状态文件 `.patchouli/delivery-state.json`（`0600`、原子写、同路径串行；队列 ≤1024 条且序列化 ≤1 MiB，满则拒收并 warn、不淘汰旧项；计数 `Record<'<kind>\u0000<目标键>',{periodKey,used}>` 惰性清零；坏文件当空状态 + warn、写路径拒绝覆盖）；`handleQuiescence` 的词条投递改为按（行 × 目标）`offer`，`runWeeklyAlbumUpload` 的产物同样入队，周报 `planWeeklyAlbumSources` 按本周剩余额度预筛；`dispose()` 停闸。批量外发仍是**一次** `broadcast`，按 `outcomes` 逐（产物 × 目标）结算（成功出队、失败退避、目标失效出队、渲染失败 3 次出队）。 |
 | 2026-11-24 | **审查修复：挂载零请求 + 启动期候选按实例目录兜底**：①`client/dist/index.js` 的 `mount()` 只建壳与绑定事件，**不发任何 `/api` 请求**——首次取数与两条轮询链移入新的 `startDataFlow()`，由 `syncAuthGate()` 在「本插件页」变真时启动、变假时 `stopDataFlow()` 断链；`state.own` 是唯一真源（`gateShown` 撤掉），`requestJson` 在入口按它拦下全部请求；②`src/web/auth-bootstrap.ts` 记住本页标记（`window.__ptxAuth.setOwnPage`），`gate()` 与 401 兜底只在本插件页动作，别的插件页上的 401 只清票据、不盖全屏遮罩；③`readStartupTargetValues()` 之上新增惰性的 `startupTargetValues(baseDir, { reload })`（按目录缓存，上界 8）与 `installStartupTargets({ baseDir })`：`cwd` 不是实例目录时，实例里已配置的目标也能进静态 const union，不再拒载整份配置；`apply()` 走 `ctx.baseDir` + `reload` 重读。 |
 | 2026-11-24 | **审查修复：相册名 / 掉绑标记 / 候选上界 / 摊平与热更新（`B1`~`B8`）**：①`nameAlbumTargets()` 遇到**长得像稳定地址**的相册名（`2026/Spring`）追加 `（群号/相册ID）` 后缀直到不匹配——否则保存时被当「已经是地址」跳过（永不绑定）、投递时又被当地址解析；未命名相册仍回退它自己的地址；②`resolveTargetBindings(rows, albums, previous, previousRows)`：名字在上一次**落盘的行**里却没有绑定 = 上次就掉绑了，本次同样的行不再重解析（此前一次相册消失会让**下一次相同的保存**把名字绑到别的群同名相册）；标记只在绑定表**建立过**（`bindingMigration` 或非空表）时生效，用户改过该行（值变了）才重新解析；③「已配置但未探测到」的候选不再封顶 64：上限改为订阅表自身的硬上限 `MAX_SUBSCRIPTION_ROWS × MAX_TARGETS_PER_ROW`（部分已保存值被截断 = 整份配置过不了严格校验、插件拒载）；④`flattenConfig()` 改为**逐段**判定来源（顶层 → `advanced` → 默认值），顶层写了 `trigger` 时 `advanced.channels` 的白名单不再整段丢失（退化成监听全部群）；⑤`applySettingsOverrides(next, mode)`：面板保存只应用 `previous → next` **真正变化的键**（落盘的 `trigger` 段是累积的，整段重放会把每个群 AIMD 学到的 `minBurstRate` 改回快照值），启动回灌 / 文件被外部改写仍整段应用；⑥词条投递的外层闸改为「新表生效 → 由行决定；表为空回退 → 读 `entryEnabled`」（旧开关不再压制新表已勾的「词条」）；⑦`runTopicsDirect()` 入口先判 `features.topics`（`/api/topics` 绕过调度器空表照样烧模型），关闭时返回既有的 `disabled` 结果；⑧`apply()` 的相册探测提成 `refreshAlbumCandidates()`，**每个 `await` 之后**重查 `disposed`（卸载后不再 `ctx.schema.set` / 不覆盖模块级候选与解析表），`onSubscriptionsChanged` 回调同样早退 |

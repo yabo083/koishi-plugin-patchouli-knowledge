@@ -609,33 +609,42 @@ export interface SubscriptionRow {
 }
 
 /**
- * 单个投递目标的策略（定时窗口 / 限量 / 抖动）。
+ * 单个投递目标的策略（定时 / 限量）。
  *
- * 宿主是**投递目标**（稳定地址），不是订阅行：同一行里的不同目标各自独立配置。
- * 没有任何策略的目标 = 全天不限时、不限量、不抖动，行为与升级前完全一致。
+ * 宿主是**投递目标 × 监听群**（`<来源群>\u0000<目标键>`），不是订阅行：
+ * 同一行里的不同目标各自独立，同一个投递群挂在两个监听群下也各自独立。
+ * 没有任何策略的目标 = 立即投、不限量，行为与升级前完全一致。
+ *
+ * 抖动与「同目标相邻两条的随机间隔」是投递逻辑的内部常量，**不在策略里暴露**。
  */
 export interface TargetPolicy {
   /**
-   * 投递窗口文本；空串 = 全天不限时。语法见 `plugin/policy-resolve.ts`：
-   * `* HH:MM-HH:MM` / `W HH:MM-HH:MM` / `W HH:MM` / `HH:MM-HH:MM`，可带 `~N` 抖动后缀。
-   * 归一化后不带 `~N`——抖动只认 `jitterMinutes`（单一真源）。
+   * 日词条投递时间：5 字段 cron（`分 时 日 月 周`，`Asia/Shanghai`）；空串 = 立即投。
+   * 语法见 `plugin/policy-resolve.ts` 的 `parseCron`：`*` / 数字 / `a-b` / 步进（`a/n`）/ 逗号列表。
    */
-  window: string;
-  /** 词条每自然日上限（上海日切）；0 = 不限。 */
-  entryPerDay: number;
-  /** 周报每自然周上限（ISO 周，周一起）；0 = 不限。 */
-  weeklyPerWeek: number;
-  /** 窗口内随机抖动上界（分钟）；0 = 不抖动，绝不越过窗口右边界。 */
-  jitterMinutes: number;
+  entryCron: string;
+  /**
+   * 周主题（周报）投递时间：5 字段 cron，空串 = 立即投。
+   *
+   * 与 `entryCron` 分开是因为两类事件节律不同：词条每天都有，周报每周一次；
+   * 旧版本只有一个 `cron`，迁移时读成 `entryCron`、`weeklyCron` 置空（见 `normalizePolicy`）。
+   */
+  weeklyCron: string;
+  /** 每自然日最多几条（上海日切）；0 = 不限。 */
+  perDay: number;
+  /** 每自然周最多几条（ISO 周，周一起）；0 = 不限。 */
+  perWeek: number;
 }
 
 /**
- * 投递策略表：键 = 目标稳定地址，与 `targetBindings` 并列、**同一次原子写**。
+ * 投递策略表：键 = `<来源群>\u0000<目标键>`，与 `targetBindings` 并列、**同一次原子写**。
  *
- * 键只能是 `@chat:<来源群>`（同一个 `@chat` 在不同来源行里指向不同群，必须带来源）
- * 或 `群号/相册ID`。面板保存整张表，未出现的键 = 无策略。
+ * 目标键是 `@chat:<来源群>`（同一个 `@chat` 在不同来源行里指向不同群，必须带来源）
+ * 或 `群号/相册ID`；前缀的来源群让同一个投递群在不同监听群下各有一份策略。
+ * 面板逐项 upsert，未出现的键 = 无策略。
  */
 export type TargetPolicies = Record<string, TargetPolicy>;
+
 
 /**
  * 高级设置：控制台里由 `advancedMode` 开关**条件渲染**（关闭时不显示，但默认值仍在）。

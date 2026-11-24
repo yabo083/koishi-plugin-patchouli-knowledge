@@ -1,26 +1,33 @@
 /**
- * 投递策略解析：窗口文本 / 时区 / 窗口命中 / 下一个窗口首刻 / 抖动落点 / 周期键。
+ * 投递策略解析：cron 语法 / 下一次触发时刻 / 周期键 / 策略表清洗与严格校验。
  *
  * 纯函数、无 IO、无定时器：状态与调度在 `delivery-state.ts` / `delivery-gate.ts`，
- * 这里只回答「这一刻在不在窗口内」「下一次窗口什么时候开」「这条事件该排到哪个时刻」。
+ * 这里只回答「这条策略下一次该在什么时候投」「这个键是不是合法策略键」。
  *
  * 时区一律 `Asia/Shanghai`，本地年月日时分**只从 `Intl.DateTimeFormat` 取**，
  * 绝不手算 UTC 偏移（偏移量在 `offsetMsAt` 里由同一份本地时间反推）。
  */
 
 import type { TargetPolicies, TargetPolicy } from '../types';
-import { ALBUM_TARGET_PATTERN } from './subscriptions';
+import { ALBUM_TARGET_PATTERN, CHAT_TARGET } from './subscriptions';
 
-/** 投递窗口的归一形状（分钟口径，左闭右开）。 */
-export interface WindowSpec {
-  /** 命中的星期（0=周日，1=周一 … 6=周六），`*` 的形式即全集。 */
-  days: number[];
-  /** 窗口开始：本地当日第几分钟（0–1439）。 */
-  startMin: number;
-  /** 窗口结束：本地当日第几分钟；跨午夜时 **> 1440**（相对开始日）。 */
-  endMin: number;
-  /** 窗口内随机抖动上界（分钟）；0 = 不抖动。 */
-  jitterMinutes: number;
+/**
+ * cron 的归一形状（标准 5 字段：分 时 日 月 周）。
+ *
+ * 分钟 / 小时恒为非空升序数组；日 / 月 / 周用 `null` 表示 `*`（不设限）——
+ * 「空数组」与「通配」在语义上是两件事，不能合并成同一个值。
+ */
+export interface CronSpec {
+  /** 分（0–59），升序。 */
+  minutes: number[];
+  /** 时（0–23），升序。 */
+  hours: number[];
+  /** 日（1–31）；`null` = `*`。 */
+  daysOfMonth: number[] | null;
+  /** 月（1–12）；`null` = `*`。 */
+  months: number[] | null;
+  /** 周（0=周日 … 6=周六）；`null` = `*`。不认 7=周日，避免与 0 两套口径。 */
+  daysOfWeek: number[] | null;
 }
 
 /** 策略表项数上限（与 `settings.json` 的清洗口径一致）。 */
@@ -29,35 +36,45 @@ export const MAX_TARGET_POLICIES = 256;
 /** 单周期额度上限（词条 / 日、周报 / 周共用）；不设上限会让一份脏文件写出天文数字。 */
 export const MAX_PERIOD_QUOTA = 999;
 
-/** 抖动上限（分钟）：一天。窗口更长也不会用到更多。 */
-export const MAX_JITTER_MINUTES = 1440;
+/** cron 文本长度上限：脏文件不得把长字符串带进解析器。 */
+export const MAX_CRON_CHARS = 120;
 
-/** 策略键长度上限（`@chat:<来源群>` 或 `群号/相册ID`）。 */
-export const MAX_POLICY_KEY_CHARS = 160;
+/** 策略键长度上限（`<来源群>\u0000<目标键>`）。 */
+export const MAX_POLICY_KEY_CHARS = 256;
 
-/** 窗口文本长度上限：脏文件不得把长字符串带进解析器。 */
-const MAX_WINDOW_CHARS = 120;
+/** 目标键（`@chat:<来源群>` 或 `群号/相册ID`）长度上限。 */
+export const MAX_TARGET_CHARS = 160;
 
-/** 来源群号（`@chat:` 后缀）长度上限。 */
+/** 来源群号长度上限。 */
 const MAX_SOURCE_CHARS = 64;
+
+/** 下一次触发的搜索上界（天）：覆盖「闰日 + 每月 31 号」这类最长空档。 */
+const MAX_CRON_LOOKAHEAD_DAYS = 366 * 8;
+
+/** 各月最长天数；2 月按闰年 29 天算（闰日是合法日期，只是要等到下一个闰年）。 */
+const MONTH_MAX_DAYS: readonly number[] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
-const ALL_DAYS: readonly number[] = [0, 1, 2, 3, 4, 5, 6];
-const DAY_MINUTES = 1440;
+/* `cron` 是旧版单一定时字段：归一阶段按 `entryCron` 的别名读（见 `normalizePolicy`），
+   写盘只写 `entryCron` / `weeklyCron`。 */
 const POLICY_FIELDS: Readonly<Record<string, true>> = {
-  window: true,
-  entryPerDay: true,
-  weeklyPerWeek: true,
-  jitterMinutes: true,
+  entryCron: true,
+  weeklyCron: true,
+  perDay: true,
+  perWeek: true,
+  cron: true,
 };
 
-/** 无策略：全天、不限量、不抖动。读路径缺键时的唯一缺省值。 */
+/** 策略键分隔符：来源群与目标键之间（两者都不会含 NUL）。 */
+const POLICY_KEY_SEPARATOR = '\u0000';
+
+/** 无策略：立即投、不限量。读路径缺键时的唯一缺省值。 */
 export const DEFAULT_POLICY: TargetPolicy = Object.freeze({
-  window: '',
-  entryPerDay: 0,
-  weeklyPerWeek: 0,
-  jitterMinutes: 0,
+  entryCron: '',
+  weeklyCron: '',
+  perDay: 0,
+  perWeek: 0,
 });
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -151,184 +168,161 @@ function shiftCivilDate(date: CivilDate, days: number): CivilDate {
 }
 
 /* ------------------------------------------------------------------ *
- * 窗口语法
+ * cron 语法
  * ------------------------------------------------------------------ */
 
-const TIME = String.raw`(\d{1,2}):(\d{2})`;
-/** `* HH:MM[-HH:MM] [~N]` 与 `W HH:MM[-HH:MM] [~N]`。 */
-const DAY_WINDOW_RE = new RegExp(
-  String.raw`^(?:\*|([0-6]))\s+${TIME}(?:\s*-\s*${TIME})?(?:\s*~\s*(\d{1,4}))?$`,
-  'u',
-);
-/** `HH:MM-HH:MM [~N]`：每天该区间（不带前缀 = 每天）。 */
-const ANY_DAY_RANGE_RE = new RegExp(String.raw`^${TIME}\s*-\s*${TIME}(?:\s*~\s*(\d{1,4}))?$`, 'u');
-
-function clockMinute(hourText: string, minuteText: string): number | null {
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  if (!Number.isInteger(hour) || hour > 23) return null;
-  if (!Number.isInteger(minute) || minute > 59) return null;
-  return hour * 60 + minute;
+interface CronField {
+  /** 取值是否覆盖整个字段区间（通配、或步进 1）：日 / 周据此判断「是否设限」。 */
+  wildcard: boolean;
+  values: number[];
 }
 
-function jitterValue(text: string | undefined): number | null {
-  if (text === undefined) return 0;
-  const value = Number(text);
-  return Number.isInteger(value) && value >= 0 && value <= MAX_JITTER_MINUTES ? value : null;
+const DIGITS_RE = /^\d+$/u;
+
+/**
+ * 单个 cron 字段：`*` / `a` / `a-b` / 步进（`a/n`、`a-b/n`，通配步进写作 `*` 加 `/n`），逗号可并列。
+ *
+ * 越界 / 空段 / 步长为 0 / 倒序区间一律 `null`（调用方据此判定整条 cron 非法）。
+ */
+function parseCronField(text: string, min: number, max: number): CronField | null {
+  if (text === '') return null;
+  const values = new Set<number>();
+  for (const part of text.split(',')) {
+    if (part === '') return null;
+    const slash = part.indexOf('/');
+    const base = slash >= 0 ? part.slice(0, slash) : part;
+    let step = 1;
+    if (slash >= 0) {
+      const stepText = part.slice(slash + 1);
+      if (!DIGITS_RE.test(stepText)) return null;
+      step = Number(stepText);
+      if (step < 1) return null;
+    }
+    let from: number;
+    let to: number;
+    if (base === '*') {
+      from = min;
+      to = max;
+    } else {
+      const dash = base.indexOf('-');
+      if (dash >= 0) {
+        const fromText = base.slice(0, dash);
+        const toText = base.slice(dash + 1);
+        if (!DIGITS_RE.test(fromText) || !DIGITS_RE.test(toText)) return null;
+        from = Number(fromText);
+        to = Number(toText);
+      } else {
+        if (!DIGITS_RE.test(base)) return null;
+        from = Number(base);
+        // `a/n` = 从 a 起每 n 个到区间上界（标准 cron 简写）；单个 `a` 只是一个值。
+        to = slash >= 0 ? max : from;
+      }
+      if (from < min || to > max || from > to) return null;
+    }
+    for (let value = from; value <= to; value += step) values.add(value);
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  return { wildcard: sorted.length === max - min + 1, values: sorted };
 }
 
 /**
- * 解析窗口文本；非法（含超长 / 未知形状 / 时刻越界 / 零长窗口）一律 `null`，绝不抛。
+ * 「日 × 月」组合在该日历上是否可能命中。
  *
- * 支持的四种写法：
- * - `* HH:MM-HH:MM` 每天该区间
- * - `W HH:MM-HH:MM` 周 W 该区间（0=周日，1=周一）
- * - `W HH:MM` 该日一分钟窗口
- * - `HH:MM-HH:MM` 每天该区间（`22:00-02:00` = 跨午夜，归开始日）
- *
- * 末尾可带 `~N`：窗口内抖动上界（分钟）。`* HH:MM` 是一分钟窗口的同样推广。
+ * 只有「设了日、没设周」才可能永远空转：日与周同时设限取并集（周字段每月都能命中），
+ * 只设周同样每月都有。剩下的逐个已列月份检查：有没有一个不超过该月天数的日。
+ * `0 0 31 2 *`（2 月只有 28 / 29 天）命中不了任何日期——放它进去等于让
+ * `nextCronAt` 搜满 8 年上界，再把一次「永不到点」折算成一次立刻外发。
  */
-export function parseWindow(text: string): WindowSpec | null {
+function cronDaysReachable(daysOfMonth: readonly number[], months: readonly number[] | null): boolean {
+  for (let month = 1; month <= MONTH_MAX_DAYS.length; month += 1) {
+    if (months !== null && !months.includes(month)) continue;
+    const maxDay = MONTH_MAX_DAYS[month - 1];
+    if (daysOfMonth.some((day) => day <= maxDay)) return true;
+  }
+  return false;
+}
+
+/**
+ * 解析 5 字段 cron；非法（字段数不符 / 越界 / 空段 / 步长 0 / 超长 / 日历上永不发生）一律
+ * `null`，绝不抛。
+ *
+ * 字段：`分 时 日 月 周`。周字段 0=周日 … 6=周六（不认 7）。
+ * 日与周**同时**设限时按标准 cron 语义取并集（任一命中即触发）。
+ */
+export function parseCron(text: string): CronSpec | null {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_WINDOW_CHARS) return null;
-
-  const dayMatch = DAY_WINDOW_RE.exec(trimmed);
-  if (dayMatch !== null) {
-    const [, dayText, startHour, startMinute, endHour, endMinute, jitterText] = dayMatch;
-    const start = clockMinute(startHour, startMinute);
-    if (start === null) return null;
-    const jitter = jitterValue(jitterText);
-    if (jitter === null) return null;
-    let end: number;
-    if (endHour === undefined || endMinute === undefined) {
-      end = start + 1;
-    } else {
-      const rawEnd = clockMinute(endHour, endMinute);
-      if (rawEnd === null || rawEnd === start) return null;
-      end = rawEnd < start ? rawEnd + DAY_MINUTES : rawEnd;
-    }
-    const days = dayText === undefined ? [...ALL_DAYS] : [Number(dayText)];
-    return { days, startMin: start, endMin: end, jitterMinutes: jitter };
+  if (trimmed === '' || trimmed.length > MAX_CRON_CHARS) return null;
+  const fields = trimmed.split(/\s+/u);
+  if (fields.length !== 5) return null;
+  const minutes = parseCronField(fields[0], 0, 59);
+  const hours = parseCronField(fields[1], 0, 23);
+  const daysOfMonth = parseCronField(fields[2], 1, 31);
+  const months = parseCronField(fields[3], 1, 12);
+  const daysOfWeek = parseCronField(fields[4], 0, 6);
+  if (
+    minutes === null ||
+    hours === null ||
+    daysOfMonth === null ||
+    months === null ||
+    daysOfWeek === null
+  ) {
+    return null;
   }
-
-  const rangeMatch = ANY_DAY_RANGE_RE.exec(trimmed);
-  if (rangeMatch !== null) {
-    const [, startHour, startMinute, endHour, endMinute, jitterText] = rangeMatch;
-    const start = clockMinute(startHour, startMinute);
-    const rawEnd = clockMinute(endHour, endMinute);
-    const jitter = jitterValue(jitterText);
-    if (start === null || rawEnd === null || jitter === null || rawEnd === start) return null;
-    return {
-      days: [...ALL_DAYS],
-      startMin: start,
-      endMin: rawEnd < start ? rawEnd + DAY_MINUTES : rawEnd,
-      jitterMinutes: jitter,
-    };
+  if (
+    !daysOfMonth.wildcard &&
+    daysOfWeek.wildcard &&
+    !cronDaysReachable(daysOfMonth.values, months.wildcard ? null : months.values)
+  ) {
+    return null;
   }
-
-  return null;
+  return {
+    minutes: minutes.values,
+    hours: hours.values,
+    daysOfMonth: daysOfMonth.wildcard ? null : daysOfMonth.values,
+    months: months.wildcard ? null : months.values,
+    daysOfWeek: daysOfWeek.wildcard ? null : daysOfWeek.values,
+  };
 }
 
-/* ------------------------------------------------------------------ *
- * 窗口命中 / 下一窗口 / 抖动落点
- * ------------------------------------------------------------------ */
-
-interface WindowRange {
-  /** 窗口首刻（epoch ms）。 */
-  start: number;
-  /** 窗口右边界（epoch ms，**不含**）。 */
-  end: number;
-}
-
-/** `at` 落在的窗口（含跨午夜归属开始日）；不在任何窗口内返回 `null`。 */
-function currentWindow(spec: WindowSpec, at: number): WindowRange | null {
-  const local = localTimeAt(at);
-  const minute = local.hour * 60 + local.minute;
-  const crossing = spec.endMin > DAY_MINUTES;
-  const tailMinutes = crossing ? spec.endMin - DAY_MINUTES : 0;
-  const today: CivilDate = { year: local.year, month: local.month, day: local.day };
-
-  for (const day of spec.days) {
-    if (!crossing) {
-      if (local.weekday !== day || minute < spec.startMin || minute >= spec.endMin) continue;
-    } else if (local.weekday === day && minute >= spec.startMin) {
-      // 开始日当天，已过首刻。
-    } else if (local.weekday === (day + 1) % 7 && minute < tailMinutes) {
-      // 跨午夜的尾巴：窗口属于**前一天**（开始日）。
-      const startDay = shiftCivilDate(today, -1);
-      return {
-        start: epochFromLocal(startDay.year, startDay.month, startDay.day, spec.startMin),
-        end: epochFromLocal(today.year, today.month, today.day, tailMinutes),
-      };
-    } else {
-      continue;
-    }
-    return {
-      start: epochFromLocal(today.year, today.month, today.day, spec.startMin),
-      end: epochFromLocal(today.year, today.month, today.day, spec.endMin),
-    };
-  }
-  return null;
-}
-
-/** `at` 是否落在窗口内（左闭右开；跨午夜窗口的尾巴归开始日）。 */
-export function windowContains(spec: WindowSpec, at: number): boolean {
-  return currentWindow(spec, at) !== null;
+/** 该本地日期是否命中 spec 的「日 / 月 / 周」三字段。 */
+function cronDayMatches(spec: CronSpec, date: CivilDate): boolean {
+  if (spec.months !== null && !spec.months.includes(date.month)) return false;
+  if (spec.daysOfMonth === null && spec.daysOfWeek === null) return true;
+  const weekday = new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay();
+  const dayOk = spec.daysOfMonth === null || spec.daysOfMonth.includes(date.day);
+  const weekOk = spec.daysOfWeek === null || spec.daysOfWeek.includes(weekday);
+  // 标准 cron：日与周同时设限时取并集；只设一个时只认那一个。
+  if (spec.daysOfMonth !== null && spec.daysOfWeek !== null) return dayOk || weekOk;
+  return spec.daysOfMonth !== null ? dayOk : weekOk;
 }
 
 /**
- * 下一次窗口首刻（epoch ms，`>= at`）。
+ * 下一次触发时刻（epoch ms，**严格大于** `at`）。
  *
- * 「下一次开窗」而不是「当前窗口的首刻」：正在窗口里时返回的是**下一个**窗口的首刻，
- * 这样调用方不必区分「已在窗口内」与「还没开窗」——前者直接投递，后者才排到首刻。
+ * 严格大于而不是大于等于：`at` 恰好落在触发点上时，这一刻已经不是「下一次」了——
+ * 让事件晚一天，也好过与已经发生的那一轮挤在同一分钟。
+ *
+ * 非法 spec（`null`）返回 `at`（= 立即投），调用方不必再分支。
  */
-export function nextWindowStart(spec: WindowSpec, at: number): number {
-  const local = localTimeAt(at);
-  const today: CivilDate = { year: local.year, month: local.month, day: local.day };
-  // 0–7：任意非空 `days` 在 8 天内必有一日；偏移 7 覆盖「今天已过首刻」的同一星期。
-  for (let offset = 0; offset <= 7; offset += 1) {
-    const date = shiftCivilDate(today, offset);
-    const weekday = new Date(Date.UTC(date.year, date.month - 1, date.day)).getUTCDay();
-    if (!spec.days.includes(weekday)) continue;
-    const start = epochFromLocal(date.year, date.month, date.day, spec.startMin);
-    if (start >= at) return start;
-  }
-  // `parseWindow` 保证 `days` 非空且取值在 0–6，循环必然命中；兜底只为类型闭合。
-  return at;
-}
-
-/** 从已知首刻反推该窗口右边界（按开始日的本地日期 + 归一后的 `endMin`）。 */
-function windowEndFromStart(spec: WindowSpec, start: number): number {
-  const local = localTimeAt(start);
-  return epochFromLocal(local.year, local.month, local.day, spec.endMin);
-}
-
-/**
- * 这条事件该排到哪个时刻（epoch ms）。
- *
- * - 无窗口（`null` / 空窗口）：`at` 立即投递。
- * - 已在窗口内：`at` 起随时可投；有抖动时取 `[窗口首刻, 首刻+抖动]` 里的随机点，
- *   但**不早于 `at`**（已经等到现在的不能倒流）。
- * - 不在窗口内：排到下一次开窗首刻 + 抖动。
- * - 抖动绝不越过窗口右边界（右开：最晚取 `end - 1`）。
- *
- * `random` 返回 `[0, 1)`；结果完全由 `spec` + `at` + `random()` 决定，调用方负责落库
- * （重启不得重算，见 SCHED-10）。
- */
-export function deliverAtFor(spec: WindowSpec | null, at: number, random: () => number): number {
+export function nextCronAt(spec: CronSpec | null, at: number): number {
   if (spec === null) return at;
-
-  const open = currentWindow(spec, at);
-  const start = open === null ? nextWindowStart(spec, at) : open.start;
-  if (spec.jitterMinutes <= 0) return open === null ? start : at;
-
-  const end = open === null ? windowEndFromStart(spec, start) : open.end;
-  const jitterMs = spec.jitterMinutes * MINUTE_MS;
-  const latest = Math.min(start + jitterMs, end - 1);
-  const drawn = start + Math.floor(random() * (jitterMs + 1));
-  const scheduled = Math.min(drawn, latest);
-  return open === null ? scheduled : Math.max(at, scheduled);
+  const local = localTimeAt(at);
+  const today: CivilDate = { year: local.year, month: local.month, day: local.day };
+  for (let offset = 0; offset <= MAX_CRON_LOOKAHEAD_DAYS; offset += 1) {
+    const date = shiftCivilDate(today, offset);
+    if (!cronDayMatches(spec, date)) continue;
+    for (const hour of spec.hours) {
+      for (const minute of spec.minutes) {
+        const candidate = epochFromLocal(date.year, date.month, date.day, hour * 60 + minute);
+        if (candidate > at) return candidate;
+      }
+    }
+  }
+  /* 合法 spec 在 8 年内必命中（2 月 29 日最坏 8 年一轮；永不发生的日 / 月组合已被
+     `parseCron` 拒掉）。兜底只为类型闭合：**绝不**折算成「立即投」——那会把一次排期
+     错误变成一次立刻外发。排在搜索上界之后，等于「排不进任何明确时刻」。 */
+  return at + MAX_CRON_LOOKAHEAD_DAYS * DAY_MS;
 }
 
 /* ------------------------------------------------------------------ *
@@ -359,43 +353,88 @@ export function periodKeyFor(kind: 'entry' | 'weekly', at: number): string {
 }
 
 /* ------------------------------------------------------------------ *
- * 策略表：清洗（读文件）/ 严格校验（POST）
+ * 策略表：键形状 / 清洗（读文件）/ 严格校验（POST）
  * ------------------------------------------------------------------ */
 
-/** 键形状：`@chat:<来源群>`（必须带来源、不接受通配 `*`）或 `群号/相册ID`。 */
+/** 来源群号：非空、非通配、无空白与控制字符。 */
+function isPolicySource(source: string): boolean {
+  if (source.length === 0 || source.length > MAX_SOURCE_CHARS || source === '*') return false;
+  return !/[\s\u0000-\u001F\u007F]/u.test(source);
+}
+
+/** 目标键：`@chat:<来源群>` 或 `群号/相册ID`（`@chat` 必须带来源，不接受通配）。 */
+function isPolicyTarget(target: string): boolean {
+  if (target.length === 0 || target.length > MAX_TARGET_CHARS) return false;
+  const prefix = `${CHAT_TARGET}:`;
+  if (target.startsWith(prefix)) return isPolicySource(target.slice(prefix.length));
+  return ALBUM_TARGET_PATTERN.test(target);
+}
+
+/** 策略键：`<来源群>\u0000<目标键>`——同一个投递群在不同监听群下各有一份策略。 */
+export function policyKey(source: string, target: string): string {
+  return `${source.trim()}${POLICY_KEY_SEPARATOR}${target.trim()}`;
+}
+
+/** 策略键 → `{ source, target }`；形状不符返回 `undefined`（不抛）。 */
+export function splitPolicyKey(key: string): { source: string; target: string } | undefined {
+  if (typeof key !== 'string' || key.length === 0 || key.length > MAX_POLICY_KEY_CHARS) return undefined;
+  const cut = key.indexOf(POLICY_KEY_SEPARATOR);
+  if (cut <= 0) return undefined;
+  if (key.indexOf(POLICY_KEY_SEPARATOR, cut + 1) >= 0) return undefined;
+  const source = key.slice(0, cut);
+  const target = key.slice(cut + 1);
+  if (!isPolicySource(source) || !isPolicyTarget(target)) return undefined;
+  return { source, target };
+}
+
+/** 键形状校验（含 NUL 的两段：来源群 + 目标键）。 */
 export function isPolicyKey(key: string): boolean {
-  if (key.length === 0 || key.length > MAX_POLICY_KEY_CHARS) return false;
-  if (key.startsWith('@chat:')) {
-    const source = key.slice('@chat:'.length);
-    if (source.length === 0 || source.length > MAX_SOURCE_CHARS || source === '*') return false;
-    return !/[\s\u0000-\u001F\u007F]/u.test(source);
-  }
-  return ALBUM_TARGET_PATTERN.test(key);
+  return splitPolicyKey(key) !== undefined;
+}
+
+/**
+ * 单个 cron 字段归一：去首尾空白，空串 = 立即投，非法表达式 → `null`（整条策略非法）。
+ *
+ * `undefined` / `null` 按缺省（空串）处理：策略字段可局部给出，缺省即「立即投」。
+ */
+function normalizeCronField(value: unknown): string | null {
+  const raw = value ?? '';
+  if (typeof raw !== 'string') return null;
+  const cron = raw.trim();
+  if (cron !== '' && parseCron(cron) === null) return null;
+  return cron;
 }
 
 /**
  * 单条策略归一；非法返回 `null`（不抛）。
  *
- * `window` 文本里若带 `~N` 后缀，归一为 `jitterMinutes = N` 并**从文本里去掉后缀**：
- * 抖动只有一个真源（字段），文本不会与字段各说一套。字段缺省 = 0，窗口缺省 = 空。
+ * 字段收敛为 `{ entryCron, weeklyCron, perDay, perWeek }`：两个 cron 空串 = 该类事件立即投，
+ * 额度 0 = 不限量。旧版只有一个 `cron`（两类事件共用一个时间）——没有 `entryCron` 时
+ * 把它读成 `entryCron`、`weeklyCron` 置空，写盘只写新字段。
+ * 抖动与随机间隔是投递逻辑的内部常量，不由用户配置——策略表里没有它们的字段。
  */
 export function normalizePolicy(input: unknown): TargetPolicy | null {
   if (!isPlainObject(input)) return null;
 
-  const rawWindow = input.window ?? '';
-  if (typeof rawWindow !== 'string') return null;
-  const spec = parseWindow(rawWindow);
-  if (rawWindow.trim() !== '' && spec === null) return null;
+  const entryCron = normalizeCronField(input.entryCron === undefined ? input.cron : input.entryCron);
+  const weeklyCron = normalizeCronField(input.weeklyCron);
+  if (entryCron === null || weeklyCron === null) return null;
 
-  const entryPerDay = boundedInt(input.entryPerDay ?? 0, MAX_PERIOD_QUOTA);
-  const weeklyPerWeek = boundedInt(input.weeklyPerWeek ?? 0, MAX_PERIOD_QUOTA);
-  const fieldJitter = boundedInt(input.jitterMinutes ?? 0, MAX_JITTER_MINUTES);
-  if (entryPerDay === null || weeklyPerWeek === null || fieldJitter === null) return null;
+  const perDay = boundedInt(input.perDay ?? 0, MAX_PERIOD_QUOTA);
+  const perWeek = boundedInt(input.perWeek ?? 0, MAX_PERIOD_QUOTA);
+  if (perDay === null || perWeek === null) return null;
 
-  const suffixJitter = spec === null ? 0 : spec.jitterMinutes;
-  const jitterMinutes = suffixJitter > 0 ? suffixJitter : fieldJitter;
-  const window = suffixJitter > 0 ? rawWindow.replace(/\s*~\s*\d{1,4}\s*$/u, '').trim() : rawWindow.trim();
-  return { window, entryPerDay, weeklyPerWeek, jitterMinutes };
+  return { entryCron, weeklyCron, perDay, perWeek };
+}
+
+/** 该投递类型用哪一条定时：词条用 `entryCron`，周报用 `weeklyCron`（空串 = 立即投）。 */
+export function cronForKind(policy: TargetPolicy, kind: 'entry' | 'weekly'): string {
+  return kind === 'entry' ? policy.entryCron : policy.weeklyCron;
+}
+
+/** 策略是否等于缺省（两个 cron 都立即投 / 不限量）：面板据此把这一项从表里删掉。 */
+export function isDefaultPolicy(policy: TargetPolicy): boolean {
+  return policy.entryCron === '' && policy.weeklyCron === '' && policy.perDay === 0 && policy.perWeek === 0;
 }
 
 /**
@@ -434,8 +473,11 @@ export function validatePolicies(input: unknown): PolicyPatchResult {
   }
   const value: TargetPolicies = {};
   for (const key of keys) {
-    if (!isPolicyKey(key)) {
-      return { ok: false, error: `policies 键非法：${JSON.stringify(key)}（只能是 @chat:<来源群> 或 群号/相册ID）` };
+    if (splitPolicyKey(key) === undefined) {
+      return {
+        ok: false,
+        error: `policies 键非法：${JSON.stringify(key)}（必须是 <来源群>\\u0000<@chat:来源群 | 群号/相册ID>）`,
+      };
     }
     const raw = input[key];
     if (!isPlainObject(raw)) return { ok: false, error: `policies[${key}] 必须是对象` };
@@ -448,22 +490,10 @@ export function validatePolicies(input: unknown): PolicyPatchResult {
     if (policy === null) {
       return {
         ok: false,
-        error: `policies[${key}] 字段非法（window 语法 / entryPerDay ≤ ${MAX_PERIOD_QUOTA} / weeklyPerWeek ≤ ${MAX_PERIOD_QUOTA} / jitterMinutes ≤ ${MAX_JITTER_MINUTES}）`,
+        error: `policies[${key}] 字段非法（entryCron / weeklyCron 需为 5 字段表达式，且日期必须真实存在（如 2 月 31 日不收） / perDay ≤ ${MAX_PERIOD_QUOTA} / perWeek ≤ ${MAX_PERIOD_QUOTA}）`,
       };
     }
     value[key] = policy;
   }
   return { ok: true, value };
-}
-
-/**
- * 策略 → 窗口形状（唯一的「策略字段 ⊕ 窗口文本」合成点）。
- *
- * 空窗口 / 非法窗口返回 `null`（= 立即投递），抖动只取 `policy.jitterMinutes`。
- */
-export function windowSpecFor(policy: TargetPolicy): WindowSpec | null {
-  const spec = parseWindow(policy.window);
-  if (spec === null) return null;
-  const jitter = boundedInt(policy.jitterMinutes, MAX_JITTER_MINUTES);
-  return { ...spec, jitterMinutes: jitter === null ? 0 : jitter };
 }

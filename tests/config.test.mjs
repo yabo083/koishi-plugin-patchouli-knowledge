@@ -219,13 +219,22 @@ test('CONFIG-07: provider 写回幂等——custom 反复解析不被覆盖回 c
   assert.equal(legacyCarried.dispatcher.provider, 'custom');
 });
 
-test('CONFIG-10: 插件页顶层七块 + 历史 advancedMode，features 默认全开，隐藏段不物化', () => {
+test('CONFIG-10: 插件页顶层八块 + 历史 advancedMode，features 默认全开，隐藏段不物化', () => {
   assert.equal(Config.type, 'object', '顶层必须是单层 object（不再是条件表单）');
 
   const parsed = Config({});
   assert.deepEqual(
     Object.keys(parsed).sort(),
-    ['adminUsers', 'advancedMode', 'enabled', 'features', 'modelConfig', 'security', 'storage', 'subscriptions'],
+    [
+      'adminUsers',
+      'advancedMode',
+      'enabled',
+      'features',
+      'modelConfig',
+      'security',
+      'storage',
+      'subscriptions',
+    ],
     '空配置只物化这八块：七块可见配置 + 历史判别字段',
   );
 
@@ -305,6 +314,7 @@ test('CONFIG-10: 插件页顶层七块 + 历史 advancedMode，features 默认�
   assert.equal(subscriptions.inner.dict.weekly.meta.description, '周报');
   assert.equal(targets.meta.role === 'dynamic', false, '不再注册成 dynamic');
   assert.equal(subscriptions.inner.dict.target.meta.hidden, true, '历史单值 target 仍收起');
+
   assert.equal(topField('enabled').meta.default, true);
 
   // 可见的两块：知识库目录与面板密钥。

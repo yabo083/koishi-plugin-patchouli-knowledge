@@ -28,9 +28,16 @@ import {
   CHAT_TARGET,
   MAX_SUBSCRIPTION_TARGET_CHARS,
   TARGET_GROUP_PREFIX,
+  bareChannelId,
   normalizeSubscriptionRows,
 } from './subscriptions';
-import { parsePolicies } from './policy-resolve';
+import {
+  MAX_TARGET_POLICIES,
+  isDefaultPolicy,
+  normalizePolicy,
+  parsePolicies,
+  policyKey,
+} from './policy-resolve';
 
 /** 面板可调的五个段（顺序即 GET 响应里的展示顺序）。 */
 export const SETTINGS_SECTIONS = ['trigger', 'topics', 'media', 'query', 'judge'] as const;
@@ -798,6 +805,66 @@ export async function writeSettingsOverrides(
 }
 
 /**
+ * 订阅表里仍可达的策略键（`<来源群>\u0000<目标键>`）。
+ *
+ * 与面板载荷的翻译同一口径：`@chat` → `@chat:<本行来源群>`；相册值是稳定地址，
+ * 可读名按绑定表换成地址。
+ *
+ * 名字还在行里但这次掉绑（相册暂时探不到）时沿用**上一次**的绑定：一次探测抖动不该把
+ * 它的定时 / 额度当孤儿删掉——名字重新绑回同一个地址时，策略还该是原来那份。
+ * 名字本次绑到了别的地址，就只认新地址（旧地址的策略确实点不到了）。
+ */
+function reachablePolicyKeys(
+  rows: readonly SubscriptionRow[],
+  bindings: Readonly<Record<string, string>>,
+  previousBindings: Readonly<Record<string, string>>,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    const source = bareChannelId(row.source);
+    if (source === '' || source === '*') continue;
+    for (const token of row.targets) {
+      const target = token.trim();
+      if (target === CHAT_TARGET) {
+        keys.add(policyKey(source, `${CHAT_TARGET}:${source}`));
+        continue;
+      }
+      if (target === '' || target === '*' || target.startsWith(TARGET_GROUP_PREFIX)) continue;
+      if (ALBUM_TARGET_PATTERN.test(target)) {
+        keys.add(policyKey(source, target));
+        continue;
+      }
+      const address = bindings[target] ?? previousBindings[target];
+      if (typeof address === 'string' && ALBUM_TARGET_PATTERN.test(address)) {
+        keys.add(policyKey(source, address));
+      }
+    }
+  }
+  return keys;
+}
+
+/**
+ * 删掉订阅表里已经点不到的策略项。
+ *
+ * 没有标签能打开它，它却照样占 `MAX_TARGET_POLICIES` 项上限：反复改订阅表会把上限填满，
+ * 之后新策略一律 400。没有任何孤儿项时返回原对象，避免无谓复制。
+ */
+function pruneOrphanPolicies(
+  policies: TargetPolicies,
+  rows: readonly SubscriptionRow[],
+  bindings: Readonly<Record<string, string>>,
+  previousBindings: Readonly<Record<string, string>>,
+): TargetPolicies {
+  const reachable = reachablePolicyKeys(rows, bindings, previousBindings);
+  const total = Object.keys(policies).length;
+  const kept: TargetPolicies = {};
+  for (const [key, policy] of Object.entries(policies)) {
+    if (reachable.has(key)) kept[key] = policy;
+  }
+  return Object.keys(kept).length === total ? policies : kept;
+}
+
+/**
  * 写入订阅表覆盖层（`null` = 删除覆盖键，回落到宿主 config），返回落盘后的值。
  *
  * 与五段覆盖值共用同一个文件与同一条串行链：两个并发写（面板改调参面 + 改订阅表）
@@ -809,6 +876,10 @@ export async function writeSettingsOverrides(
  *
  * 显式给了 `bindings` 落盘的同时打上迁移完成标记：面板保存 = 用户对绑定做了**显式**
  * 选择（删空也算），之后启动期不得再拿当前候选重新解析同名相册。
+ *
+ * 同一次落盘里顺手清掉**孤儿策略**（目标已不在任何行里）：删行 / 删目标 / 名字掉绑之后，
+ * 那些键没有任何标签能打开，只会在 256 项上限里堆积。`rows === null`（回落宿主 config）
+ * 时拿不到生效行，策略表保持原样。
  */
 export async function writeSubscriptionOverride(
   wikiDir: string,
@@ -817,12 +888,20 @@ export async function writeSubscriptionOverride(
 ): Promise<{ rows: SubscriptionRow[] | null; bindings: Record<string, string> }> {
   const target = settingsPath(wikiDir);
   const next = await enqueueWrite(target, () =>
-    performDocumentWrite(target, (current) => ({
-      ...current,
-      subscriptions: rows === null ? null : normalizeSubscriptionRows(rows),
-      bindings: bindings === undefined ? current.bindings : sanitizeTargetBindings(bindings),
-      bindingMigration: bindings === undefined ? current.bindingMigration : true,
-    })),
+    performDocumentWrite(target, (current) => {
+      const nextRows = rows === null ? null : normalizeSubscriptionRows(rows);
+      const nextBindings = bindings === undefined ? current.bindings : sanitizeTargetBindings(bindings);
+      return {
+        ...current,
+        subscriptions: nextRows,
+        bindings: nextBindings,
+        bindingMigration: bindings === undefined ? current.bindingMigration : true,
+        policies:
+          nextRows === null
+            ? current.policies
+            : pruneOrphanPolicies(current.policies, nextRows, nextBindings, current.bindings),
+      };
+    }),
   );
   return { rows: next.subscriptions, bindings: next.bindings };
 }
@@ -874,4 +953,58 @@ export async function writeTargetPolicies(
     performDocumentWrite(target, (current) => ({ ...current, policies: parsePolicies(policies) })),
   );
   return next.policies;
+}
+
+/** 面板保存单条策略的局部补丁：`undefined` 字段 = 沿用文件里的现值（不是「清空」）。 */
+export interface TargetPolicyPatch {
+  entryCron?: unknown;
+  weeklyCron?: unknown;
+  perDay?: unknown;
+  perWeek?: unknown;
+}
+
+/** 局部更新的结果：`ok: false` = 合并后字段非法，文件一个字节都没动（HTTP 层翻成 400）。 */
+export type TargetPolicyPatchResult =
+  | { readonly ok: true; readonly policies: TargetPolicies }
+  | { readonly ok: false };
+
+/**
+ * 逐项写一条策略的**局部更新**（面板右键菜单的唯一入口）：`undefined` 字段沿用现值。
+ *
+ * 读现有值、合补丁、清洗、落盘**全在同一条串行链里**完成：并发的两次局部更新
+ * （一次改 `entryCron`、一次改 `perWeek`）不会各自读到同一份旧值，再把对方刚写的
+ * 字段盖回旧值。合并后仍是四字段全默认 = 删除该项。
+ *
+ * 字段非法返回 `{ ok: false }` 且不落盘；表项已满且是新增键时抛 `SettingsConflictError`
+ * （HTTP 层翻成 400），文件保持原样。
+ */
+export async function patchTargetPolicy(
+  wikiDir: string,
+  key: string,
+  patch: TargetPolicyPatch,
+): Promise<TargetPolicyPatchResult> {
+  const target = settingsPath(wikiDir);
+  return enqueueWrite(target, async (): Promise<TargetPolicyPatchResult> => {
+    const current = await readWritableDocument(target);
+    const existing = current.policies[key];
+    const policy = normalizePolicy({
+      entryCron: patch.entryCron === undefined ? existing?.entryCron : patch.entryCron,
+      weeklyCron: patch.weeklyCron === undefined ? existing?.weeklyCron : patch.weeklyCron,
+      perDay: patch.perDay === undefined ? existing?.perDay : patch.perDay,
+      perWeek: patch.perWeek === undefined ? existing?.perWeek : patch.perWeek,
+    });
+    if (policy === null) return { ok: false };
+    const policies: TargetPolicies = { ...current.policies };
+    if (isDefaultPolicy(policy)) {
+      delete policies[key];
+    } else {
+      if (!Object.hasOwn(policies, key) && Object.keys(policies).length >= MAX_TARGET_POLICIES) {
+        throw new SettingsConflictError(`投递策略最多 ${MAX_TARGET_POLICIES} 项，请先删除不再使用的目标`);
+      }
+      policies[key] = policy;
+    }
+    const next: StoredDocument = { ...current, policies: parsePolicies(policies) };
+    await writeDocument(target, next);
+    return { ok: true, policies: next.policies };
+  });
 }

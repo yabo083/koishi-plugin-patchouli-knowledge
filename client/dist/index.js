@@ -85,7 +85,6 @@ const STAGES = [
   { key: 'entries', label: '词条', icon: 'entries', tip: '词条索引' },
   { key: 'topics', label: '主题', icon: 'topics', tip: '跨时间主题聚合' },
   { key: 'metrics', label: '监控', icon: 'metrics', tip: '实时监控' },
-  { key: 'policies', label: '投递策略', icon: 'clock', tip: '目标级定时 / 限量 / 抖动' },
 ];
 
 /* 8 向缩放手柄方向：e=右缘加宽，w=左缘（对边为锚），s=下缘，n=上缘，其余为对角双向 */
@@ -111,8 +110,6 @@ const ICONS = {
   matrix: `<g ${LUCIDE}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></g>`,
   quote: `<g ${LUCIDE}><path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1a6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"/></g>`,
   metrics: `<g ${LUCIDE}><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></g>`,
-  /* Lucide clock：投递策略——按时间窗口排期的目标级配置 */
-  clock: `<g ${LUCIDE}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></g>`,
   pulse: `<g ${LUCIDE}><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676a.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"/><path d="M3.22 13H9.5l.5-1l2 4.5l2-7l1.5 3.5h5.27"/></g>`,
   sync: `<g ${LUCIDE}><path d="M3 12a9 9 0 0 1 9-9a9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5m5 4a9 9 0 0 1-9 9a9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></g>`,
   autodock: `<g ${LUCIDE}><path d="M10 2h4m-2 12l3-3"/><circle cx="12" cy="14" r="8"/></g>`,
@@ -899,70 +896,6 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   }
   #patchouli-organic-root .ptx-cfg-row-msg.is-visible { opacity: 1; }
   #patchouli-organic-root .ptx-cfg-row-msg.is-error { color: var(--bio-danger); }
-
-  /* 投递策略：目标表（列头 + 每目标一行）。列宽固定，数值列右对齐等宽；
-     行高 / 卡片材质与设置行一致，读起来是同一张表格里的另一段。 */
-  #patchouli-organic-root .ptx-pol-head,
-  #patchouli-organic-root .ptx-pol-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1.15fr) 74px 74px 74px;
-    gap: 10px;
-    align-items: center;
-  }
-  #patchouli-organic-root .ptx-pol-head {
-    padding: 0 12px 7px;
-    font-family: var(--bio-mono);
-    font-size: 9.5px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    color: var(--bio-ink-4);
-  }
-  #patchouli-organic-root .ptx-pol-head > span:nth-child(n+3) { text-align: right; }
-  #patchouli-organic-root .ptx-pol-row {
-    min-height: 46px;
-    padding: 8px 12px;
-    border-radius: var(--r-card);
-    background: var(--surface);
-    border: 1px solid var(--hairline);
-    box-shadow: var(--shadow-card);
-  }
-  #patchouli-organic-root .ptx-pol-row + .ptx-pol-row { margin-top: 8px; }
-  #patchouli-organic-root .ptx-pol-name { flex: none; font-size: 13px; }
-  #patchouli-organic-root .ptx-pol-name em {
-    font-family: var(--bio-mono);
-    font-size: 10.5px;
-    letter-spacing: 0.01em;
-  }
-  #patchouli-organic-root .ptx-pol-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  /* 列名只由列头承担；窄档表头收起，列名挪进单元格 */
-  #patchouli-organic-root .ptx-pol-cell-h { display: none; font-size: 10px; letter-spacing: 0.04em; color: var(--bio-ink-4); }
-  #patchouli-organic-root .ptx-input.ptx-pol-window { width: 100%; height: 30px; padding: 0 9px; font-size: 12.5px; }
-  #patchouli-organic-root .ptx-input.ptx-pol-num {
-    width: 100%;
-    height: 30px;
-    padding: 0 9px;
-    font-size: 12.5px;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  /* 紧凑档的全局 .ptx-input 定宽（84px）会压扁单元格：策略表按列宽满铺 */
-  #patchouli-organic-root .ptx-window.is-compact .ptx-input.ptx-pol-window,
-  #patchouli-organic-root .ptx-window.is-compact .ptx-input.ptx-pol-num { width: 100%; }
-  /* 保存条：错误独占一行，状态靠左、动作靠右 */
-  #patchouli-organic-root .ptx-pol-foot { padding-top: 10px; }
-  #patchouli-organic-root .ptx-pol-status { margin-right: auto; }
-  #patchouli-organic-root .ptx-pol-error {
-    display: none;
-    flex: 1 1 100%;
-    font-size: 11.5px;
-    line-height: 1.6;
-    color: var(--bio-danger);
-  }
-  #patchouli-organic-root .ptx-pol-error.is-visible { display: block; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-head { display: none; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-name { grid-column: 1 / -1; }
-  #patchouli-organic-root .ptx-window.is-narrow .ptx-pol-cell-h { display: block; }
 
   /* 知识库维护：危险操作独立成卡，柔和朱红发丝线，二次确认就地展开 */
   #patchouli-organic-root .ptx-maint {
@@ -3163,10 +3096,6 @@ const state = {
   runtimeSettings: { sections: null, meta: [], error: '', loading: false, seq: {}, draftMode: '' },
   /* 出图选项（服务端持久化）：maskNames=false 时按原昵称出图。 */
   cardSettings: { settings: { maskNames: true }, error: '' },
-  /* 投递策略（/api/settings 的 policies + targets）：saved 是服务端真值，
-     未保存的编辑只存在于行内输入框（与运行时参数同一条读值路径，不另立草稿态）。
-     labels 是 /api/albums 的「稳定地址 → 可读名」映射，读不到就显示地址本身。 */
-  policies: { loaded: false, loading: false, error: '', saveError: '', targets: [], saved: {}, labels: {} },
 };
 
 let rootEl = null;
@@ -3981,261 +3910,6 @@ function resetPrompt() {
     })
     .then(() => {
       if (button) button.classList.remove('is-busy');
-    });
-}
-
-/* ---------------- 投递策略（/api/settings 的 policies + targets） ----------------
- * 一个目标一行：窗口 / 词条每日上限 / 周报每周上限 / 抖动分钟。
- * 服务端缺省（空窗口 + 0 + 0 + 0）= 全天不限量：面板照缺省显示，保存时只把与缺省
- * 不同的目标发出去 —— 整表语义下「未出现」与「缺省」等价，少发只是减小写入体积。
- * 目标清单之外仍有策略的键（订阅行删了、绑定暂时解析不出来）原样带回：
- * 在别的目标上保存整表时不会顺手清掉它。
- * 读走 requestJson、写走 writeJson：与其它面板请求共用同一个本页闸口。 */
-const POLICY_FIELD_MAX = { entryPerDay: 999, weeklyPerWeek: 999, jitterMinutes: 1440 };
-const POLICY_WINDOW_PLACEHOLDER = '* 09:00-22:00';
-
-function policyDefault() {
-  return { window: '', entryPerDay: 0, weeklyPerWeek: 0, jitterMinutes: 0 };
-}
-
-function policyIsDefault(policy) {
-  if (!policy) return true;
-  return String(policy.window == null ? '' : policy.window).trim() === ''
-    && num(policy.entryPerDay, 0) === 0
-    && num(policy.weeklyPerWeek, 0) === 0
-    && num(policy.jitterMinutes, 0) === 0;
-}
-
-/* 生效值 = 服务端策略 ⊕ 缺省值：缺键 / 脏值都退回「全天不限量」 */
-function policyOf(key) {
-  const saved = state.policies.saved || {};
-  const raw = Object.prototype.hasOwnProperty.call(saved, key) ? saved[key] : null;
-  if (!raw || typeof raw !== 'object') return policyDefault();
-  return {
-    window: typeof raw.window === 'string' ? raw.window : '',
-    entryPerDay: num(raw.entryPerDay, 0),
-    weeklyPerWeek: num(raw.weeklyPerWeek, 0),
-    jitterMinutes: num(raw.jitterMinutes, 0),
-  };
-}
-
-/* 可读名：@chat 键永远能还原成「本群聊天（群号）」；相册键查 /api/albums 的映射 */
-function policyLabel(key) {
-  const raw = String(key == null ? '' : key);
-  if (raw.startsWith('@chat:')) return `本群聊天（${raw.slice('@chat:'.length)}）`;
-  const labels = state.policies.labels || {};
-  const label = labels[raw];
-  return typeof label === 'string' && label.trim() !== '' ? label : raw;
-}
-
-function policyRows() {
-  return state.policies.targets.map((key) => {
-    const policy = policyOf(key);
-    return {
-      key,
-      label: policyLabel(key),
-      window: policy.window,
-      entryPerDay: policy.entryPerDay,
-      weeklyPerWeek: policy.weeklyPerWeek,
-      jitterMinutes: policy.jitterMinutes,
-    };
-  });
-}
-
-function policyConfiguredCount() {
-  let count = 0;
-  for (const key of state.policies.targets) if (!policyIsDefault(policyOf(key))) count += 1;
-  return count;
-}
-
-/* 差异表：只提交与缺省不同的目标。整表写入下它就是「服务端最终状态」，
-   所以行里出现过的键不再从旧表补回 —— 用户把某项清空 = 删掉这条策略。 */
-function policyPatchOf(rows) {
-  const patch = {};
-  const seen = new Set();
-  for (const row of rows || []) {
-    const key = row && typeof row.key === 'string' ? row.key : '';
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    const policy = {
-      window: String(row.window == null ? '' : row.window).trim(),
-      entryPerDay: num(row.entryPerDay, 0),
-      weeklyPerWeek: num(row.weeklyPerWeek, 0),
-      jitterMinutes: num(row.jitterMinutes, 0),
-    };
-    if (policyIsDefault(policy)) continue;
-    patch[key] = policy;
-  }
-  const saved = state.policies.saved || {};
-  for (const key of Object.keys(saved)) {
-    if (seen.has(key)) continue;
-    const policy = policyOf(key);
-    if (!policyIsDefault(policy)) patch[key] = policy;
-  }
-  return patch;
-}
-
-function policyCell(head, field, value, label) {
-  const numeric = field !== 'window';
-  const attrs = numeric
-    ? ` min="0" max="${POLICY_FIELD_MAX[field]}" step="1"`
-    : ` placeholder="${POLICY_WINDOW_PLACEHOLDER}" autocomplete="off" spellcheck="false"`;
-  return `<label class="ptx-pol-cell">` +
-    `<span class="ptx-pol-cell-h">${escapeHtml(head)}</span>` +
-    `<input class="ptx-input ${numeric ? 'ptx-pol-num' : 'ptx-pol-window'}"` +
-      ` data-pol-field="${field}" type="${numeric ? 'number' : 'text'}"${attrs}` +
-      ` value="${escapeHtml(String(value == null ? '' : value))}"` +
-      ` aria-label="${escapeHtml(label)}">` +
-  `</label>`;
-}
-
-function renderPolicyRow(row) {
-  const key = escapeHtml(row.key);
-  const label = escapeHtml(row.label);
-  const hint = row.label === row.key ? '' : `<em>${key}</em>`;
-  /* 可读名只在这里转义一次：policyCell 负责它自己的 aria-label 转义 */
-  return `<div class="ptx-pol-row" data-pol-row="${key}">` +
-    `<span class="ptx-settings-label ptx-pol-name">${label}${hint}</span>` +
-    policyCell('窗口', 'window', row.window, `${row.label}的投递窗口`) +
-    policyCell('词条/日', 'entryPerDay', row.entryPerDay, `${row.label}每天最多投递几条词条`) +
-    policyCell('周报/周', 'weeklyPerWeek', row.weeklyPerWeek, `${row.label}每周最多投递几份周报`) +
-    policyCell('抖动（分）', 'jitterMinutes', row.jitterMinutes, `${row.label}的投递抖动分钟`) +
-  `</div>`;
-}
-
-function renderPolicyTable() {
-  const box = state.policies;
-  return `<div class="ptx-pol-head" aria-hidden="true">` +
-      `<span>目标</span><span>窗口</span><span>词条/日</span><span>周报/周</span><span>抖动（分）</span>` +
-    `</div>` +
-    `<div class="ptx-pol-rows">${policyRows().map(renderPolicyRow).join('')}</div>` +
-    `<div class="ptx-editor-foot ptx-pol-foot">` +
-      `<span class="ptx-pol-error${box.saveError ? ' is-visible' : ''}" data-pol-error role="alert">${box.saveError ? `保存失败：${escapeHtml(box.saveError)}` : ''}</span>` +
-      `<span class="ptx-prompt-status ptx-pol-status">${escapeHtml(`${box.targets.length} 个目标 · ${policyConfiguredCount()} 项策略生效`)}</span>` +
-      `<button class="ptx-btn" data-act="reload-policies" type="button">重新读取</button>` +
-      `<button class="ptx-btn is-primary" data-action="save-policies" type="button">${organicIcon('check', 13)}<span>保存整表</span></button>` +
-    `</div>` +
-    `<div class="ptx-settings-note">窗口写法：「* 09:00-22:00」每天 / 「1 09:00」周一 / 「20:00-02:00」跨午夜，末尾可加「~15」抖动分钟；留空即全天不限时，次数填 0 表示不限量。</div>`;
-}
-
-function renderPolicies() {
-  const box = state.policies;
-  let inner;
-  if (box.error) {
-    inner = `<div class="ptx-settings-note">读取失败：${escapeHtml(box.error)}</div>` +
-      `<div class="ptx-settings-row"><span class="ptx-settings-label">服务端设置</span>` +
-      `<button class="ptx-btn" data-act="reload-policies" type="button">重新读取</button></div>`;
-  } else if (!box.loaded) {
-    inner = `<div class="ptx-settings-note">正在读取投递策略…</div>`;
-  } else if (!box.targets.length) {
-    inner = `<div class="ptx-settings-note">还没有投递目标，先在订阅表里选择</div>`;
-  } else {
-    inner = renderPolicyTable();
-  }
-  return renderHead('投递策略', box.loaded ? `${box.targets.length} 个目标` : '读取中') +
-    `<div class="ptx-settings-page"><div class="ptx-settings-main">${renderSection('目标策略', inner)}</div></div>`;
-}
-
-/* 相册目录只用来把稳定地址翻成可读名：读不到就显示地址，不影响策略编辑 */
-function loadPolicyLabels() {
-  return requestJson(`${API_BASE}/api/albums`).then((data) => {
-    const labels = {};
-    const albums = data && Array.isArray(data.albums) ? data.albums : [];
-    for (const album of albums) {
-      const value = album && typeof album.value === 'string' ? album.value : '';
-      const label = album && typeof album.label === 'string' ? album.label.trim() : '';
-      if (value && label) labels[value] = label;
-    }
-    state.policies.labels = labels;
-  }, () => {
-    /* 目录读不到：保留上一次的映射（或空表），地址本身仍是稳定可读的标识 */
-  });
-}
-
-function loadPolicies() {
-  const box = state.policies;
-  if (box.loading) return Promise.resolve();
-  box.loading = true;
-  box.error = '';
-  box.saveError = '';
-  const table = requestJson(`${API_BASE}/api/settings`).then((data) => {
-    const payload = data && typeof data === 'object' ? data : {};
-    const targets = Array.isArray(payload.targets) ? payload.targets : [];
-    box.targets = targets.filter((key) => typeof key === 'string' && key.trim() !== '');
-    box.saved = payload.policies && typeof payload.policies === 'object' && !Array.isArray(payload.policies)
-      ? payload.policies
-      : {};
-    box.loaded = true;
-    box.error = '';
-  }, (err) => {
-    box.error = err && err.message ? err.message : '未知错误';
-  });
-  return Promise.all([table, loadPolicyLabels()]).then(() => {
-    box.loading = false;
-    if (state.stage === 'policies') renderStage();
-  });
-}
-
-/* 面板输入是本次编辑的唯一真相：保存前按行收集，服务端归一化后整页重绘回真值 */
-function collectPolicyRows() {
-  const fallback = policyRows();
-  if (!viewportEl || typeof viewportEl.querySelectorAll !== 'function') return fallback;
-  const nodes = viewportEl.querySelectorAll('[data-pol-row]');
-  if (!nodes || !nodes.length) return fallback;
-  const rows = [];
-  for (const node of Array.from(nodes)) {
-    const key = node.getAttribute ? node.getAttribute('data-pol-row') : '';
-    if (!key) continue;
-    const cell = (field) => {
-      const input = node.querySelector(`[data-pol-field="${field}"]`);
-      return input ? input.value : '';
-    };
-    rows.push({
-      key,
-      window: cell('window'),
-      entryPerDay: cell('entryPerDay'),
-      weeklyPerWeek: cell('weeklyPerWeek'),
-      jitterMinutes: cell('jitterMinutes'),
-    });
-  }
-  return rows.length ? rows : fallback;
-}
-
-function syncPolicyError() {
-  if (!viewportEl || typeof viewportEl.querySelector !== 'function') return;
-  const node = viewportEl.querySelector('[data-pol-error]');
-  if (!node) return;
-  const message = state.policies.saveError;
-  node.textContent = message ? `保存失败：${message}` : '';
-  if (node.classList) node.classList.toggle('is-visible', Boolean(message));
-}
-
-/* 整表保存：一次 POST 只带差异项；成功后按服务端回值重绘，失败只就地写原因 */
-function savePolicyTable(rows) {
-  const box = state.policies;
-  const patch = policyPatchOf(rows || policyRows());
-  const button = viewportEl && typeof viewportEl.querySelector === 'function'
-    ? viewportEl.querySelector('[data-action="save-policies"]')
-    : null;
-  if (button && button.classList) button.classList.add('is-busy');
-  box.saveError = '';
-  syncPolicyError();
-  return writeJson(`${API_BASE}/api/settings`, 'POST', { section: 'policies', patch })
-    .then((data) => {
-      const value = data && data.value && typeof data.value === 'object' ? data.value : null;
-      if (value) box.saved = value;
-      box.loaded = true;
-      box.saveError = '';
-      /* 服务端会归一化窗口（「~N」后缀折进抖动字段）：整页重绘回服务端真值 */
-      if (state.stage === 'policies') renderStage();
-      toast('投递策略已保存');
-    }, (err) => {
-      /* 闸口拒绝（非本插件页）由 writeJson 的 toast 说明原因：页面本就不可见，
-         不把「已暂停取数」写成保存失败 */
-      if (!state.own) return;
-      box.saveError = err && err.message ? err.message : '未知错误';
-      /* 输入值与已保存真值都不动，改完可直接重试 */
-      syncPolicyError();
     });
 }
 
@@ -5195,8 +4869,6 @@ function renderStage() {
     html = renderMetrics();
   } else if (state.stage === 'settings') {
     html = renderSettings();
-  } else if (state.stage === 'policies') {
-    html = renderPolicies();
   } else {
     const isTopicList = state.stage === 'topics';
     html = renderHead(isTopicList ? '主题' : '词条索引',
@@ -6280,6 +5952,18 @@ function collapsePanel() {
   }, 470);
 }
 
+/* 认领本页的唯一入口：胶囊点击、投递标签右键都走这里。
+   必须写 `routeProbe.userClaimed`，否则下一轮 checkRoute 的 routeMatches() 仍为 false，
+   syncOwn(false) 会把刚打开的菜单/面板收掉（表现为「闪一下就消失」）。
+   路由确实变了走整轮重置：只改 key 会让下一轮 tick 认为「没换页」，
+   上一页的接口失败连胜会记到新页头上。 */
+function claimOwnPage() {
+  const key = currentRouteKey();
+  if (routeProbe.key !== key) resetRouteProbe(key);
+  routeProbe.userClaimed = true;
+  syncAuthGate(true);
+}
+
 function expandPanel({ claim = true } = {}) {
   if (!frameEl) return;
   clearIdleTimer();
@@ -6298,10 +5982,7 @@ function expandPanel({ claim = true } = {}) {
        路由确实变了就走整轮重置（与 checkRoute 的 newRoute 分支同一出口）：
        只改 key 会让下一轮 tick 认为「没换页」，上一页的接口失败连胜与「接口不可用」
        就记到新页头上，新页还没发过请求就先触到不可用阈值。 */
-    const key = currentRouteKey();
-    if (routeProbe.key !== key) resetRouteProbe(key);
-    routeProbe.userClaimed = true;
-    syncAuthGate(true);
+    claimOwnPage();
   }
   state.collapsed = false;
   if (pillEl) pillEl.classList.remove('is-visible');
@@ -6589,7 +6270,6 @@ function enterStage(next) {
      非本插件页（数据面没跑）不拉服务端设置 —— 那些请求会被 requestJson 的闸口拦下，
      不如干脆不发起，免得面板里多一行「非本插件页」的假错误。 */
   if (next === 'settings' && state.own) { loadPrompt(); loadRuntimeSettings(); loadCardSettings(); }
-  else if (next === 'policies' && state.own) loadPolicies();
   renderStage();
 }
 
@@ -6604,7 +6284,6 @@ function handleAction(action, node) {
   else if (action === 'cancel-clear-kb') { state.clearArmed = false; renderStage(); }
   else if (action === 'confirm-clear-kb') clearKnowledgeBase().then(() => resetIdleTimer());
   else if (action === 'save-prompt') savePrompt().then(() => resetIdleTimer());
-  else if (action === 'save-policies') savePolicyTable(collectPolicyRows()).then(() => resetIdleTimer());
   else if (action === 'reset-prompt') resetPrompt().then(() => resetIdleTimer());
   else if (action === 'save-topic-prompt') saveTopicPrompt().then(() => resetIdleTimer());
   else if (action === 'reset-topic-prompt') resetTopicPrompt().then(() => resetIdleTimer());
@@ -6726,11 +6405,6 @@ function bindActions() {
       loadRuntimeSettings().then(() => resetIdleTimer());
       return;
     }
-
-    if (act === 'reload-policies') {
-      loadPolicies().then(() => resetIdleTimer());
-      return;
-    }
   });
 
   /* 运行时参数：开关是按钮，点击即翻转并立刻落库；数值 / 文本 / 枚举走 change */
@@ -6804,6 +6478,1292 @@ function bindActions() {
 
   /* 胶囊仅响应显式点击展开（data-act="expand" 委派），hover 不擅自弹出，把控制权交还用户。 */
 }
+
+/* ------------------------------------------------------------------ *
+ * 12.5 订阅表投递群标签 · 右键策略菜单
+ * ------------------------------------------------------------------ *
+ * 投递策略的真实编辑入口是 Console 插件页订阅表里的投递群标签（el-tag.is-closable）：
+ * 右键 → 菜单 → 写 settings.json。浮窗只负责把策略画成标签后缀。
+ * 与宿主 DOM 的全部约定都收敛在这里：
+ *   - 行：最近的 tr（Element Plus 表格）或 [role="row"]；
+ *   - 监听群号：该行第一格文本；投递群名：标签内 .el-tag__content 文本；
+ *   - 后缀：追加在标签末尾的 .ptx-tag-policy，pointer-events:none，
+ *     既不吃掉关闭按钮的点击，也不影响 el-select 的下拉展开。
+ * 非本插件页一律不发请求（open 前判 isOwnPage，写路径另有一层 guardedFetch）。
+ * 本段自成一体（只依赖注入的 document / window），测试按标记载入。
+ */
+// BEGIN TAG POLICY MENU
+const TAG_POLICY_MENU_CLASS = 'ptx-policy-menu';
+const TAG_POLICY_SUFFIX_CLASS = 'ptx-tag-policy';
+const TAG_POLICY_SUFFIX_ATTR = 'data-ptx-policy';
+const TAG_POLICY_STYLE_ID = 'patchouli-tag-policy-style';
+const TAG_POLICY_STYLE_MARK = 'tag-policy';
+const TAG_POLICY_BOUND_ATTR = 'data-ptx-policy-tag';
+/* `collapse-tags` 折叠出来的 `+ N`：被折叠的目标不在 DOM 里（没有 `is-closable` 标签），
+   单独打一组标记，右键给出「选择投递目标」列表。 */
+const TAG_POLICY_PLUS_ATTR = 'data-ptx-policy-plus';
+const TAG_POLICY_COUNT_ATTR = 'data-ptx-policy-count';
+const TAG_POLICY_PLUS_TEXT = /^\+\s*\d+$/;
+const TAG_POLICY_PICKER_CLASS = 'ptx-policy-picker';
+const TAG_POLICY_TARGET_CLASS = 'ptx-policy-target';
+/* 一行最多 16 个目标、同一监听群可以有多行，目标总数因此没有单独上限（≤ 行数 × 16）。
+   列表一次只铺一页按钮把单屏 DOM 压住，剩下的用「继续显示」翻页——每个目标都必须点得到。 */
+const TAG_POLICY_PICKER_PAGE = 32;
+
+/* 定时预设：点 chip 只把 cron 填进**本块**的输入框，保存仍然要用户点「保存」（不发请求）。
+   日词条每天都有、周主题每周一次，两块各给各的预设，改一块绝不碰另一块。 */
+const TAG_POLICY_ENTRY_CRON_PRESETS = [
+  { label: '每天 22:00', cron: '0 22 * * *' },
+  { label: '每天 09:00', cron: '0 9 * * *' },
+];
+const TAG_POLICY_WEEKLY_CRON_PRESETS = [
+  { label: '每周一 09:00', cron: '0 9 * * 1' },
+  { label: '每周五 20:00', cron: '0 20 * * 5' },
+];
+
+/* 后缀 + 菜单的全部材质：莫兰迪灰绿（sage / stone / clay），与浮窗 `.ptx-*` 同一套
+   发丝线 + 低饱和填充语汇。菜单挂在 body 上（宿主页面，不是浮窗根节点），
+   因此不引用 `--bio-*`（那些变量只定义在 #patchouli-organic-root 上）。 */
+const TAG_POLICY_STYLES = `.ptx-policy-menu {
+  position: fixed;
+  z-index: 2147482;
+  width: 304px;
+  box-sizing: border-box;
+  padding: 14px 14px 12px;
+  border: 1px solid rgba(74, 84, 76, 0.16);
+  border-radius: 12px;
+  background: #faf9f5;
+  color: #333b35;
+  font: 12px/1.5 "Inter", "Segoe UI Variable Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
+  box-shadow: 0 1px 2px rgba(30, 40, 33, 0.08), 0 16px 34px -14px rgba(30, 40, 33, 0.32);
+  user-select: none;
+}
+.ptx-policy-menu.is-dark {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: #2f3033;
+  color: #e6e2dc;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 36px -16px rgba(0, 0, 0, 0.7);
+}
+.ptx-policy-menu button { font: inherit; }
+.ptx-policy-menu button:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(109, 139, 123, 0.24); }
+.ptx-policy-menu button:disabled { opacity: 0.5; cursor: default; }
+.ptx-policy-menu.is-dark .ptx-policy-head { border-bottom-color: rgba(255, 255, 255, 0.08); }
+.ptx-policy-menu.is-dark .ptx-policy-eyebrow { color: #8c8781; }
+.ptx-policy-menu.is-dark .ptx-policy-who { color: #dcd8d2; }
+.ptx-policy-menu.is-dark .ptx-policy-sec-title { color: #ddd8d2; }
+.ptx-policy-menu.is-dark .ptx-policy-sec + .ptx-policy-sec { border-top-color: rgba(255, 255, 255, 0.07); }
+.ptx-policy-menu.is-dark .ptx-policy-clear { color: #9db3a6; }
+.ptx-policy-menu.is-dark .ptx-policy-clear:hover { color: #bcd0c2; }
+.ptx-policy-menu.is-dark .ptx-policy-input,
+.ptx-policy-menu.is-dark .ptx-policy-stepper {
+  background: #38383d;
+  border-color: #4a4a50;
+  color: #e6e2dc;
+}
+.ptx-policy-menu.is-dark .ptx-policy-input::placeholder { color: #7b766f; }
+.ptx-policy-menu.is-dark .ptx-policy-stepper:focus-within {
+  border-color: #6f8a7c;
+  box-shadow: 0 0 0 2px rgba(140, 154, 143, 0.2);
+}
+.ptx-policy-menu.is-dark .ptx-policy-chip { border-color: rgba(255, 255, 255, 0.12); color: #b6b1ab; }
+.ptx-policy-menu.is-dark .ptx-policy-chip:hover { background: #414147; color: #dfe9e2; }
+.ptx-policy-menu.is-dark .ptx-policy-field-label { color: #b6b1ab; }
+.ptx-policy-menu.is-dark .ptx-policy-count { color: #e6e2dc; }
+.ptx-policy-menu.is-dark .ptx-policy-count.is-unlimited { color: #7b766f; }
+.ptx-policy-menu.is-dark .ptx-policy-step { color: #b6b1ab; }
+.ptx-policy-menu.is-dark .ptx-policy-step:hover { background: #414147; color: #e6e2dc; }
+.ptx-policy-menu.is-dark .ptx-policy-hint { color: #8c8781; }
+.ptx-policy-menu.is-dark .ptx-policy-blocked { color: #d3bb94; }
+.ptx-policy-menu.is-dark .ptx-policy-footnote { color: #8c8781; }
+.ptx-policy-menu.is-dark .ptx-policy-error { color: #e39aa1; }
+.ptx-policy-menu.is-dark .ptx-policy-actions button {
+  border-color: #4a4a50;
+  background: transparent;
+  color: #ddd8d2;
+}
+.ptx-policy-menu.is-dark .ptx-policy-actions button:hover { background: #414147; }
+.ptx-policy-menu.is-dark .ptx-policy-actions .ptx-policy-save {
+  border-color: transparent;
+  background: #8c9a8f;
+  color: #20241f;
+}
+.ptx-policy-menu.is-dark .ptx-policy-actions .ptx-policy-save:hover { background: #9aa89d; }
+.ptx-policy-menu.is-dark .ptx-policy-target {
+  background: #38383d;
+  border-color: #4a4a50;
+  color: #ddd8d2;
+}
+.ptx-policy-menu.is-dark .ptx-policy-target:hover { background: #414147; color: #e6e2dc; }
+.ptx-policy-menu.is-dark .ptx-policy-target.is-set { border-color: #6f8a7c; color: #b3c8bc; }
+.ptx-policy-menu.is-dark .ptx-policy-target.is-set::before { background: #8c9a8f; }
+.ptx-policy-menu .ptx-policy-head {
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(74, 84, 76, 0.08);
+}
+.ptx-policy-menu .ptx-policy-eyebrow {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: #8b948d;
+}
+.ptx-policy-menu .ptx-policy-who {
+  display: block;
+  padding-right: 16px;
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #3c4740;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptx-policy-menu .ptx-policy-sec { margin-top: 12px; }
+.ptx-policy-menu .ptx-policy-sec + .ptx-policy-sec {
+  padding-top: 12px;
+  border-top: 1px solid rgba(74, 84, 76, 0.08);
+}
+.ptx-policy-menu .ptx-policy-sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ptx-policy-menu .ptx-policy-sec-title { font-size: 12px; font-weight: 600; color: #3c4740; }
+.ptx-policy-menu .ptx-policy-clear {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #5f7d6d;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.ptx-policy-menu .ptx-policy-clear:hover { color: #2f5b45; }
+.ptx-policy-menu .ptx-policy-input {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid rgba(74, 84, 76, 0.2);
+  border-radius: 7px;
+  background: #fffefb;
+  color: #333b35;
+  font: 12.5px/1 ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  outline: none;
+}
+.ptx-policy-menu .ptx-policy-input:focus {
+  border-color: rgba(109, 139, 123, 0.62);
+  box-shadow: 0 0 0 2px rgba(109, 139, 123, 0.14);
+}
+.ptx-policy-menu .ptx-policy-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ptx-policy-menu .ptx-policy-chip {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(74, 84, 76, 0.16);
+  border-radius: 6px;
+  background: transparent;
+  color: #5f6b63;
+  font-size: 11.5px;
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ptx-policy-menu .ptx-policy-chip:hover {
+  border-color: rgba(109, 139, 123, 0.5);
+  background: #eef3ef;
+  color: #2f5b45;
+}
+.ptx-policy-menu .ptx-policy-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ptx-policy-menu .ptx-policy-field + .ptx-policy-field { margin-top: 8px; }
+.ptx-policy-menu .ptx-policy-field-label { font-size: 12px; color: #5f6b63; }
+.ptx-policy-menu .ptx-policy-stepper {
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 104px;
+  height: 28px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid rgba(74, 84, 76, 0.2);
+  border-radius: 7px;
+  background: #fffefb;
+}
+.ptx-policy-menu .ptx-policy-step {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #5f6b63;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ptx-policy-menu .ptx-policy-step:hover { background: #eef3ef; color: #2f5b45; }
+.ptx-policy-menu .ptx-policy-count {
+  flex: 1 1 auto;
+  width: 44px;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid rgba(74, 84, 76, 0.12);
+  border-right: 1px solid rgba(74, 84, 76, 0.12);
+  border-radius: 0;
+  background: transparent;
+  color: #333b35;
+  font: 12.5px/1 ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  text-align: center;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: textfield;
+}
+.ptx-policy-menu .ptx-policy-count::-webkit-outer-spin-button,
+.ptx-policy-menu .ptx-policy-count::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.ptx-policy-menu .ptx-policy-count.is-unlimited { color: #9aa39c; }
+.ptx-policy-menu .ptx-policy-count:focus { outline: none; }
+.ptx-policy-menu .ptx-policy-stepper:focus-within {
+  border-color: rgba(109, 139, 123, 0.62);
+  box-shadow: 0 0 0 2px rgba(109, 139, 123, 0.14);
+}
+.ptx-policy-menu .ptx-policy-hint { margin: 4px 0 0; font-size: 10.5px; line-height: 1.5; color: #8b948d; }
+.ptx-policy-menu .ptx-policy-blocked { margin-top: 9px; font-size: 11px; color: #6f5a3c; white-space: normal; }
+.ptx-policy-menu .ptx-policy-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 0;
+}
+.ptx-policy-menu .ptx-policy-target {
+  max-width: 148px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(74, 84, 76, 0.18);
+  border-radius: 995px;
+  background: #f2f1ec;
+  color: #3c4740;
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ptx-policy-menu .ptx-policy-target:hover { border-color: rgba(109, 139, 123, 0.5); background: #e7efe9; color: #2f5b45; }
+.ptx-policy-menu .ptx-policy-target.is-set { border-color: rgba(109, 139, 123, 0.42); color: #2f5b45; }
+.ptx-policy-menu .ptx-policy-target.is-set::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #6d8b7b;
+  vertical-align: middle;
+}
+.ptx-policy-menu .ptx-policy-error {
+  display: none;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #a8575f;
+  word-break: break-word;
+}
+.ptx-policy-menu .ptx-policy-error.is-visible { display: block; }
+.ptx-policy-menu .ptx-policy-foot { display: flex; align-items: center; gap: 8px; padding-top: 12px; }
+.ptx-policy-menu .ptx-policy-foot-left { flex: 1 1 auto; min-width: 0; }
+.ptx-policy-menu .ptx-policy-footnote { display: block; font-size: 11px; line-height: 1.4; color: #9aa39c; }
+.ptx-policy-menu .ptx-policy-footnote.is-hidden { display: none; }
+.ptx-policy-menu .ptx-policy-actions { display: flex; flex: none; justify-content: flex-end; gap: 8px; }
+.ptx-policy-menu .ptx-policy-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(74, 84, 76, 0.18);
+  border-radius: 7px;
+  background: transparent;
+  color: #4d5a51;
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ptx-policy-menu .ptx-policy-actions button:hover { background: #f2f1ec; }
+.ptx-policy-menu .ptx-policy-actions .ptx-policy-save {
+  border-color: transparent;
+  background: #5f7d6d;
+  color: #fffefb;
+  font-weight: 600;
+}
+.ptx-policy-menu .ptx-policy-actions .ptx-policy-save:hover { background: #547060; }
+.ptx-policy-menu .ptx-policy-actions .ptx-policy-save.is-busy { opacity: 0.5; cursor: default; }
+.el-tag[data-ptx-policy]::after {
+  content: attr(data-ptx-policy);
+  margin-left: 6px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(90, 100, 92, 0.28);
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.2;
+  opacity: 0.72;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.el-tag[data-ptx-policy-plus] { cursor: context-menu; }
+.el-tag[data-ptx-policy-count]::after {
+  content: attr(data-ptx-policy-count);
+  margin-left: 6px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(90, 100, 92, 0.28);
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.2;
+  opacity: 0.72;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.ptx-tag-policy {
+  pointer-events: none;
+  display: inline-block;
+  max-width: 132px;
+  margin-left: 5px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(90, 100, 92, 0.28);
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  color: #5f6f66;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+`;
+
+let tagPolicyMenu = null;
+
+/* 平台前缀归一（`onebot:123` → `123`）：服务端落键时去前缀，表里偶尔带前缀的写法
+ * 在这里同步归一并拼键，否则回显会因 `onebot:123` ≠ `123` 全部落空。 */
+function normalizePolicySource(source) {
+  const raw = String(source == null ? '' : source).trim();
+  const prefixed = /^[a-zA-Z][\w-]*:(\d+)$/.exec(raw);
+  return prefixed ? prefixed[1] : raw;
+}
+
+/* 策略键：同一个投递群在不同监听群下各自独立（`\u0000` 不会出现在群号 / 群名里）。 */
+function tagPolicyKey(source, target) {
+  return normalizePolicySource(source) + '\u0000' + String(target).trim();
+}
+
+/* 单条策略归一化：两条 cron 存原文（服务端才是语法权威），两个计数取非负整数。
+   旧版载荷只有一个 `cron`（两类事件共用）：没有 `entryCron` 时按它读，`weeklyCron` 留空。 */
+function normalizeTagPolicy(raw) {
+  const legacyCron = raw && raw.cron != null ? String(raw.cron).trim() : '';
+  const entryCron = raw && raw.entryCron != null ? String(raw.entryCron).trim() : legacyCron;
+  const weeklyCron = raw && raw.weeklyCron != null ? String(raw.weeklyCron).trim() : '';
+  const perDay = Math.max(0, Math.trunc(Number(raw && raw.perDay) || 0));
+  const perWeek = Math.max(0, Math.trunc(Number(raw && raw.perWeek) || 0));
+  return { entryCron, weeklyCron, perDay, perWeek };
+}
+
+/* 四字段全默认 = 服务端把这一项删掉（没有策略 = 立即投 + 不限量）：缓存也要跟着消失，
+   否则折叠徽标的条数与目标列表的「已设置」会把已删除的策略继续当配置显示。 */
+function isDefaultTagPolicy(policy) {
+  const normalized = normalizeTagPolicy(policy);
+  return normalized.entryCron === ''
+    && normalized.weeklyCron === ''
+    && normalized.perDay === 0
+    && normalized.perWeek === 0;
+}
+
+/* 后缀文案：`entryCron·周weeklyCron·perDay/perWeek`，任一段为空就省略；全空 → 空串（不挂后缀）。
+   周报那条带「周」前缀：两条表达式并排时不至于分不清哪条管哪类事件。 */
+function formatTagPolicy(policy) {
+  if (!policy) return '';
+  const entryCron = String(policy.entryCron || '').trim();
+  const weeklyCron = String(policy.weeklyCron || '').trim();
+  const perDay = Math.max(0, Math.trunc(Number(policy.perDay) || 0));
+  const perWeek = Math.max(0, Math.trunc(Number(policy.perWeek) || 0));
+  const parts = [];
+  if (entryCron) parts.push(entryCron);
+  if (weeklyCron) parts.push('周' + weeklyCron);
+  if (perDay || perWeek) parts.push(perDay + '/' + perWeek);
+  return parts.join('·');
+}
+
+/* 标签后缀的读写是幂等的：文案没变就不碰 DOM（否则 MutationObserver 会被自己的写入
+   再触发一轮，扫描永远停不下来）。 */
+function applyTagPolicySuffix(_doc, tag, policy) {
+  const text = formatTagPolicy(policy);
+  if (!tag || typeof tag.setAttribute !== 'function') return;
+  if (!text) {
+    if (typeof tag.removeAttribute === 'function') tag.removeAttribute(TAG_POLICY_SUFFIX_ATTR);
+    return;
+  }
+  /* 不往标签里插节点：Vue 的虚拟 DOM 重渲染会把外部插入的 span 抹掉（并连带触发
+     MutationObserver → 菜单被当成「标签已消失」收掉）。改用属性 + CSS 伪元素，
+     宿主 patch 属性时顶多覆盖一个 aria 无关的属性，不会与渲染冲突。 */
+  tag.setAttribute(TAG_POLICY_SUFFIX_ATTR, text);
+}
+
+function ensureTagPolicyStyles(doc) {
+  if (!doc || typeof doc.createElement !== 'function') return;
+  if (typeof doc.getElementById === 'function' && doc.getElementById(TAG_POLICY_STYLE_ID)) return;
+  if (!doc.head || typeof doc.head.appendChild !== 'function') return;
+  const style = doc.createElement('style');
+  style.id = TAG_POLICY_STYLE_ID;
+  style.setAttribute('data-patchouli', TAG_POLICY_STYLE_MARK);
+  style.textContent = TAG_POLICY_STYLES;
+  doc.head.appendChild(style);
+}
+
+/**
+ * 投递群标签右键菜单。
+ * 依赖全部注入（document / isOwnPage / identify / claim / read / write / readTargets），本段因此可被测试单独载入。
+ * `identify` 回答「现在这页能不能认出是本插件页」（路由 key / 页面身份元数据）：认不出时
+ * 右键既不认领也不吞宿主菜单，绝不把别的插件页抢成帕秋莉的页面。
+ * `read` 返回 `GET /api/policies` 的载荷（数组或 `{ policies }`），`write` 抛错时
+ * 的 `message` 会原样显示在菜单里（服务端 400 的 body.error 已在 writeJson 里抬出来）。
+ * `readTargets` 返回 `GET /api/subscriptions` 的载荷（`{ rows: [{ source, targets }] }`）：
+ * 只有 `+ N` 折叠标签需要它——被折叠的目标不在 DOM 里，只能从订阅表取回。
+ */
+function createTagPolicyMenu(options) {
+  const opts = options || {};
+  const doc = opts.document;
+  if (!doc || typeof doc.createElement !== 'function') return null;
+  const win = opts.window || null;
+  const isOwnPage = typeof opts.isOwnPage === 'function' ? opts.isOwnPage : () => true;
+  const readPolicies = typeof opts.read === 'function' ? opts.read : null;
+  const writePolicy = typeof opts.write === 'function' ? opts.write : null;
+  const readTargets = typeof opts.readTargets === 'function' ? opts.readTargets : null;
+  /* 右键标签即「用户要在这个页面配置」——与点胶囊认领同义，不能因为宿主用随机实例 id
+     渲染插件页就把右键吞掉（默认菜单已被 preventDefault，不认领就等于什么都不发生）。 */
+  const claimPage = typeof opts.claim === 'function' ? opts.claim : null;
+  /* 「能确认是本插件页」的判据（路由 key 命中本插件名 / 页面身份元数据命中）。只用于右键
+     认领的门槛，与 `isOwnPage()`（是否已认领）分开注入：本段因此可被测试单独载入。 */
+  const identify = typeof opts.identify === 'function' ? opts.identify : null;
+  const scanDelay = typeof opts.scanDelay === 'number' ? opts.scanDelay : 60;
+
+  /* 右键认领的门槛：已 own 的页面照旧（幂等）；否则必须能认出这是本插件页。
+     别的插件页上任何「数字列 + 可关闭标签」的组合都不能因为一次右键就被认领成帕秋莉的
+     页面（认领会启动数据面并弹鉴权门）。认不出时连宿主右键菜单都不吞，也不发请求。 */
+  function claimAllowed() {
+    if (isOwnPage()) return true;
+    return identify !== null && identify() === true;
+  }
+
+  const cache = new Map();
+  const bound = new WeakMap();
+  const listeners = [];
+  let menuEl = null;
+  let menuTag = null;
+  let observer = null;
+  let scanTimer = null;
+  let inflight = null;
+  let attempted = false;
+  /* 服务端策略是否已成功读回：没读回时保存会把未知的现有策略覆盖成 0，先拦住。 */
+  let loaded = false;
+
+  /* ---------------- 行 / 标签识别 ---------------- */
+  /* 监听群号**不假设列序**：宿主表格可能带索引列 / 展开列，第一个单元格未必是有内容的。
+     先逐格找「纯数字 6–12 位」，找不到再退到整行文本里抓第一个群号形状。 */
+  function readRowSource(row) {
+    if (!row) return '';
+    let source = '';
+    const cells = row.querySelectorAll ? row.querySelectorAll('td, th') : [];
+    for (const cell of cells) {
+      /* 宿主把「监听群」渲染成输入框：文本节点是空的，值在 `input.value` 里。
+         服务端订阅校验接受任何纯数字来源（1–5 位短群号也合法），输入框这条因此按
+         「1–64 位纯数字」认；单元格纯文本仍用 6–12 位启发式（序号列也是几位数字）。 */
+      const input = cell.querySelector ? cell.querySelector('input, textarea') : null;
+      const value = input && typeof input.value === 'string' ? input.value.trim() : '';
+      if (/^\d{1,64}$/.test(value)) {
+        source = value;
+        break;
+      }
+      /* 文本路径只认 QQ 群号形状（6–12 位）：放宽到 1 位会把序号列认成来源群。 */
+      const text = String(cell.textContent == null ? '' : cell.textContent).replace(/\s+/g, ' ').trim();
+      if (text === '*' || /^\d{6,12}$/.test(text)) {
+        source = text;
+        break;
+      }
+    }
+    if (!source) {
+      const rowText = String(row.textContent == null ? '' : row.textContent);
+      const m = /\b(\d{6,12})\b/.exec(rowText);
+      if (m) source = m[1];
+      else if (/(^|\s)\*(\s|$)/.test(rowText)) source = '*';
+    }
+    return source;
+  }
+
+  function readTagInfo(tag) {
+    if (!tag || typeof tag.closest !== 'function') return null;
+    const row = tag.closest('tr') || tag.closest('[role="row"]');
+    if (!row) return null;
+    const source = readRowSource(row);
+    const labelNode = tag.querySelector ? tag.querySelector('.el-tag__content') : null;
+    let target = String((labelNode && labelNode.textContent) || '').trim();
+    if (!target) {
+      /* 老版本 Element Plus 没有 `.el-tag__content`：去掉关闭按钮的文字后取剩余。 */
+      const closeBtn = tag.querySelector ? tag.querySelector('.el-tag__close') : null;
+      const raw = String(tag.textContent == null ? '' : tag.textContent);
+      target = (closeBtn && closeBtn.textContent ? raw.split(closeBtn.textContent).join('') : raw).trim();
+    }
+    if (!source || !target) return null;
+    return { row, source, target, key: tagPolicyKey(source, target) };
+  }
+
+  /* ---------------- 后缀同步 ---------------- */
+  function paintTag(tag) {
+    const info = readTagInfo(tag);
+    if (!info) return null;
+    applyTagPolicySuffix(doc, tag, cache.get(info.key));
+    return info;
+  }
+
+  function scan() {
+    if (!doc.querySelectorAll) return;
+    const tags = doc.querySelectorAll('.el-tag.is-closable');
+    for (const tag of tags) {
+      if (menuEl && typeof menuEl.contains === 'function' && menuEl.contains(tag)) continue;
+      if (tag.getAttribute(TAG_POLICY_BOUND_ATTR) !== '1') bindTag(tag);
+      else paintTag(tag);
+    }
+    scanCollapsed();
+  }
+
+  /* ---------------- 折叠标签（`+ N`） ----------------
+   * Element Plus 的 `collapse-tags` 把多余目标摘出 DOM，只留一个 `+ N` 标签：
+   *   <span class="el-tag"><span class="el-tag__content"><span class="el-select__tags-text">+ 1</span></span></span>
+   * 它没有 `is-closable`，所以上面那轮扫描看不见它；目标真值只能回订阅表取。 */
+  function readCollapsedSource(host) {
+    if (!host || typeof host.closest !== 'function') return '';
+    const node = host.querySelector ? host.querySelector('.el-select__tags-text') : null;
+    const text = String((node && node.textContent) || '').trim();
+    if (!TAG_POLICY_PLUS_TEXT.test(text)) return '';
+    const row = host.closest('tr') || host.closest('[role="row"]');
+    return row ? readRowSource(row) : '';
+  }
+
+  /* 折叠标签上的策略条数：本行监听群下已有几条目标策略（缓存键前缀即监听群）。 */
+  function countPolicies(source) {
+    const prefix = normalizePolicySource(source) + '\u0000';
+    let count = 0;
+    cache.forEach((_policy, key) => {
+      if (key.indexOf(prefix) === 0) count += 1;
+    });
+    return count;
+  }
+
+  function paintCollapsed(host) {
+    const source = readCollapsedSource(host);
+    if (!source) return null;
+    const count = countPolicies(source);
+    if (count > 0) host.setAttribute(TAG_POLICY_COUNT_ATTR, count + ' 条策略');
+    else if (typeof host.removeAttribute === 'function') host.removeAttribute(TAG_POLICY_COUNT_ATTR);
+    return source;
+  }
+
+  function scanCollapsed() {
+    if (!doc.querySelectorAll) return;
+    const texts = doc.querySelectorAll('.el-select__tags-text');
+    for (const node of texts) {
+      const text = String(node.textContent == null ? '' : node.textContent).trim();
+      if (!TAG_POLICY_PLUS_TEXT.test(text)) continue;
+      /* 最内层 `.el-tag` 是 `+ N` 自己的标签；老版本没有 `.el-tag` 时退到选择器项。 */
+      const host = (typeof node.closest === 'function' && node.closest('.el-tag'))
+        || (typeof node.closest === 'function' ? node.closest('.el-select__selected-item') : null);
+      if (!host) continue;
+      if (menuEl && typeof menuEl.contains === 'function' && menuEl.contains(host)) continue;
+      if (host.getAttribute(TAG_POLICY_PLUS_ATTR) !== '1') bindCollapsed(host);
+      else paintCollapsed(host);
+    }
+  }
+
+  function bindCollapsed(host) {
+    if (!host || typeof host.addEventListener !== 'function') return;
+    if (!readCollapsedSource(host)) return;
+    host.setAttribute(TAG_POLICY_PLUS_ATTR, '1');
+    const handler = (event) => {
+      const source = readCollapsedSource(host);
+      if (!source) return;
+      if (!claimAllowed()) return;
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      if (claimPage) claimPage();
+      if (!isOwnPage()) return;
+      openTargetPicker(source, Number(event && event.clientX) || 0, Number(event && event.clientY) || 0);
+    };
+    host.addEventListener('contextmenu', handler);
+    bound.set(host, handler);
+    paintCollapsed(host);
+  }
+
+  function bindTag(tag) {
+    if (!tag || typeof tag.addEventListener !== 'function') return;
+    const info = readTagInfo(tag);
+    if (!info) return;
+    /* 少数版本的 `+ N` 折叠标签也带 `is-closable`：它是「选择目标」入口，不是投递目标本身。 */
+    if (TAG_POLICY_PLUS_TEXT.test(info.target)) return;
+    tag.setAttribute(TAG_POLICY_BOUND_ATTR, '1');
+    const handler = (event) => {
+      const fresh = readTagInfo(tag);
+      if (!fresh) return;
+      if (!claimAllowed()) return;
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      /* 右键 = 「我要在这页配置」。认得出本插件页时**无条件**走认领（幂等）：已 own 时
+         也要写 `routeProbe.userClaimed`，否则 own 若是靠标题文本临时命中，标题一消失
+         下一轮 tick 就会 syncOwn(false) 把菜单收掉。认不出就不认领（见 `claimAllowed`）。 */
+      if (claimPage) claimPage();
+      if (!isOwnPage()) return;
+      openMenu(tag, fresh, Number(event && event.clientX) || 0, Number(event && event.clientY) || 0);
+    };
+    tag.addEventListener('contextmenu', handler);
+    bound.set(tag, handler);
+    applyTagPolicySuffix(doc, tag, cache.get(info.key));
+  }
+
+  /* ---------------- 策略读取 ---------------- */
+  function refresh() {
+    if (!readPolicies || !isOwnPage()) return Promise.resolve(false);
+    if (inflight) return inflight;
+    inflight = Promise.resolve()
+      .then(() => readPolicies())
+      .then((payload) => {
+        const list = Array.isArray(payload)
+          ? payload
+          : (payload && Array.isArray(payload.policies) ? payload.policies : []);
+        cache.clear();
+        for (const raw of list) {
+          if (!raw) continue;
+          const source = String(raw.source == null ? '' : raw.source).trim();
+          const target = String(raw.target == null ? '' : raw.target).trim();
+          if (!source || !target) continue;
+          cache.set(tagPolicyKey(source, target), normalizeTagPolicy(raw));
+        }
+        loaded = true;
+        scan();
+        return true;
+      }, () => false)
+      .then((ok) => {
+        inflight = null;
+        return ok;
+      });
+    return inflight;
+  }
+
+  /* 本插件页归属变化：变真 → 本次进入只读一次策略；变假 → 收起菜单（请求零发出）。 */
+  function syncOwn(own) {
+    if (!own) {
+      attempted = false;
+      loaded = false;
+      closeMenu();
+      return;
+    }
+    if (attempted) return;
+    attempted = true;
+    refresh();
+  }
+
+  /* ---------------- 菜单 ---------------- */
+  function closeMenu() {
+    if (menuEl && menuEl.parentNode) menuEl.parentNode.removeChild(menuEl);
+    menuEl = null;
+    menuTag = null;
+  }
+
+  function onDocPointer(event) {
+    if (!menuEl) return;
+    const target = event && event.target;
+    if (target && typeof menuEl.contains === 'function' && menuEl.contains(target)) return;
+    closeMenu();
+  }
+
+  function onDocKey(event) {
+    if (!menuEl) return;
+    if (event && (event.key === 'Escape' || event.key === 'Esc')) closeMenu();
+  }
+
+  /* 指针坐标定位 + 视口钳制：贴右边 / 底边时向内收，不把按钮推出屏外。 */
+  function placeMenu(root, x, y) {
+    const vw = (win && Number(win.innerWidth)) || 1024;
+    const vh = (win && Number(win.innerHeight)) || 768;
+    const rect = typeof root.getBoundingClientRect === 'function' ? root.getBoundingClientRect() : null;
+    const boxW = rect ? Number(rect.width) || 0 : 0;
+    const boxH = rect ? Number(rect.height) || 0 : 0;
+    let left = x;
+    let top = y;
+    if (boxW && left + boxW > vw - 8) left = Math.max(8, vw - boxW - 8);
+    if (boxH && top + boxH > vh - 8) top = Math.max(8, vh - boxH - 8);
+    root.style.left = left + 'px';
+    root.style.top = top + 'px';
+  }
+
+  /* 宿主可能切深色主题：按 body 背景亮度给菜单加 is-dark，样式另给一套变量。 */
+  function menuThemeClass() {
+    try {
+      const body = doc.body;
+      const style = win && typeof win.getComputedStyle === 'function' ? win.getComputedStyle(body) : null;
+      const raw = style && typeof style.backgroundColor === 'string' ? style.backgroundColor : '';
+      const m = /rgba?\(([^)]+)\)/.exec(raw);
+      if (m) {
+        const parts = m[1].split(',').map((value) => parseFloat(value));
+        const alpha = parts.length > 3 ? parts[3] : 1;
+        if (!(alpha > 0) || alpha > 0.5) {
+          const luma = 0.299 * parts[0] + 0.587 * parts[1] + 0.114 * parts[2];
+          return luma < 128 ? ' is-dark' : ' is-light';
+        }
+      }
+    } catch (err) {
+      /* 读不到主题就按浅色 */
+    }
+    return ' is-light';
+  }
+
+  /* ---------------- 折叠标签的目标选择 ----------------
+   * 被折叠的目标不在 DOM 里，唯一真源是订阅表接口：按本行监听群号筛 `row.targets`。
+   * 草稿（还没保存）或接口失败时行里没有目标，菜单只说明原因、不给可点项。 */
+  function resolveRowTargets(payload, source) {
+    const rows = payload && Array.isArray(payload.rows)
+      ? payload.rows
+      : (Array.isArray(payload) ? payload : []);
+    const wanted = normalizePolicySource(source);
+    const out = [];
+    const seen = new Set();
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      if (normalizePolicySource(row.source) !== wanted) continue;
+      const list = Array.isArray(row.targets) ? row.targets : [];
+      for (const raw of list) {
+        const target = typeof raw === 'string' ? raw.trim() : '';
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
+        out.push(target);
+      }
+    }
+    return out;
+  }
+
+  function openTargetPicker(source, x, y) {
+    ensureTagPolicyStyles(doc);
+    closeMenu();
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+
+    const root = doc.createElement('div');
+    root.className = TAG_POLICY_MENU_CLASS + ' ' + TAG_POLICY_PICKER_CLASS + menuThemeClass();
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', '选择投递目标');
+
+    const head = doc.createElement('div');
+    head.className = 'ptx-policy-head';
+    const tipNode = doc.createElement('span');
+    tipNode.className = 'ptx-policy-eyebrow';
+    tipNode.textContent = '选择目标';
+    const who = doc.createElement('span');
+    who.className = 'ptx-policy-who';
+    who.textContent = source;
+    head.appendChild(tipNode);
+    head.appendChild(who);
+    root.appendChild(head);
+
+    const listNode = doc.createElement('div');
+    listNode.className = 'ptx-policy-targets';
+    root.appendChild(listNode);
+
+    const actions = doc.createElement('div');
+    actions.className = 'ptx-policy-actions';
+    const cancelBtn = doc.createElement('button');
+    cancelBtn.setAttribute('type', 'button');
+    cancelBtn.className = 'ptx-policy-cancel';
+    cancelBtn.textContent = '取消';
+    cancelBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      closeMenu();
+    });
+    actions.appendChild(cancelBtn);
+    root.appendChild(actions);
+
+    const showNote = (text, cls) => {
+      /* `textContent` 写入会清空列表：一次只留一种状态，避免旧按钮和新提示并存。 */
+      listNode.textContent = '';
+      const note = doc.createElement('p');
+      note.className = cls;
+      note.textContent = text;
+      listNode.appendChild(note);
+    };
+    showNote('正在读取投递目标…', 'ptx-policy-hint');
+    /* 读不到目标 = 这行还只是草稿（或接口失败）：说明原因，一个可点项都不给。 */
+    const showDraft = () => {
+      showNote('目标是草稿，先保存订阅表', 'ptx-policy-blocked');
+      root.setAttribute('aria-disabled', 'true');
+      placeMenu(root, x, y);
+    };
+
+    doc.body.appendChild(root);
+    menuEl = root;
+    menuTag = null;
+    placeMenu(root, x, y);
+
+    if (!readTargets) {
+      showDraft();
+      return;
+    }
+
+    Promise.resolve()
+      .then(() => readTargets())
+      .then((payload) => {
+        /* 回执可能迟到：菜单已被收起 / 换成了别的菜单时不能再往里写。 */
+        if (menuEl !== root) return;
+        const targets = resolveRowTargets(payload, source);
+        if (!targets.length) {
+          showDraft();
+          return;
+        }
+        listNode.textContent = '';
+        /* 分页铺按钮：单屏 DOM 有界，但每个目标都必须能点到（第 33 个起靠「继续显示」）。
+           回执迟到 / 菜单已换掉时不再往里写——翻页按钮点得慢也受同一条闸门约束。 */
+        let shown = 0;
+        let moreBtn = null;
+        const appendPage = () => {
+          if (moreBtn && moreBtn.parentNode === listNode) listNode.removeChild(moreBtn);
+          moreBtn = null;
+          const pageEnd = Math.min(targets.length, shown + TAG_POLICY_PICKER_PAGE);
+          for (; shown < pageEnd; shown += 1) {
+            const target = targets[shown];
+            const button = doc.createElement('button');
+            button.setAttribute('type', 'button');
+            button.className = TAG_POLICY_TARGET_CLASS;
+            button.setAttribute('data-ptx-target', target);
+            button.textContent = target;
+            const key = tagPolicyKey(source, target);
+            if (cache.has(key)) button.classList.add('is-set');
+            button.addEventListener('click', (event) => {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault();
+              if (menuEl !== root) return;
+              if (!isOwnPage()) {
+                closeMenu();
+                return;
+              }
+              /* 折叠标签没有可见的 `el-tag` 可回写后缀：`tag` 传 null（见 openMenu 的保存分支）。 */
+              openMenu(null, { source, target, key }, x, y);
+            });
+            listNode.appendChild(button);
+          }
+          if (shown < targets.length) {
+            const more = doc.createElement('button');
+            more.setAttribute('type', 'button');
+            more.className = TAG_POLICY_TARGET_CLASS + ' ptx-policy-more';
+            more.setAttribute('data-ptx-more', '1');
+            more.textContent = '继续显示剩余 ' + String(targets.length - shown) + ' 个';
+            more.addEventListener('click', (event) => {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault();
+              if (menuEl !== root) return;
+              appendPage();
+            });
+            listNode.appendChild(more);
+            moreBtn = more;
+          }
+          placeMenu(root, x, y);
+        };
+        appendPage();
+      }, () => {
+        if (menuEl !== root) return;
+        showDraft();
+      });
+  }
+
+  function openMenu(tag, info, x, y) {
+    ensureTagPolicyStyles(doc);
+    closeMenu();
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+    const policy = cache.get(info.key) || { entryCron: '', weeklyCron: '', perDay: 0, perWeek: 0 };
+
+    const root = doc.createElement('div');
+    root.className = TAG_POLICY_MENU_CLASS + menuThemeClass();
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', '投递策略');
+
+    const head = doc.createElement('div');
+    head.className = 'ptx-policy-head';
+    const eyebrow = doc.createElement('span');
+    eyebrow.className = 'ptx-policy-eyebrow';
+    eyebrow.textContent = '投递策略';
+    const who = doc.createElement('span');
+    who.className = 'ptx-policy-who';
+    who.textContent = info.source + ' → ' + info.target;
+    head.appendChild(eyebrow);
+    head.appendChild(who);
+    root.appendChild(head);
+
+    /* 通配行（`*`）没有确定的来源群，服务端按 400 拒收：直接在菜单里说明，不给保存入口。 */
+    if (info.source === '*') {
+      const blocked = doc.createElement('p');
+      blocked.className = 'ptx-policy-hint ptx-policy-blocked';
+      blocked.textContent = '这行是通配来源（*），没有确定的来源群，暂不支持单独策略；请按具体群号建行后再配置。';
+      root.appendChild(blocked);
+      const actions = doc.createElement('div');
+      actions.className = 'ptx-policy-actions';
+      const dismiss = doc.createElement('button');
+      dismiss.setAttribute('type', 'button');
+      dismiss.className = 'ptx-policy-cancel';
+      dismiss.textContent = '知道了';
+      dismiss.addEventListener('click', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        closeMenu();
+      });
+      actions.appendChild(dismiss);
+      root.appendChild(actions);
+      doc.body.appendChild(root);
+      menuEl = root;
+      menuTag = tag;
+      placeMenu(root, x, y);
+      return;
+    }
+
+    /* 一块定时区：标题 + 右侧「立即投」（只清空本块的输入框）+ 输入框 + 预设 chips。
+       日词条与周主题各一块：两者节律不同（每天 / 每周），合成一个输入框必然改一个动另一个。 */
+    function timeSection(base, titleText, placeholder, presets, cron) {
+      const section = doc.createElement('div');
+      section.className = 'ptx-policy-sec ptx-policy-sec-' + base;
+
+      const head = doc.createElement('div');
+      head.className = 'ptx-policy-sec-head';
+      const title = doc.createElement('span');
+      title.className = 'ptx-policy-sec-title';
+      title.textContent = titleText;
+      const clearBtn = doc.createElement('button');
+      clearBtn.setAttribute('type', 'button');
+      clearBtn.className = 'ptx-policy-clear ptx-policy-' + base + '-clear';
+      clearBtn.textContent = '立即投';
+      head.appendChild(title);
+      head.appendChild(clearBtn);
+
+      const input = doc.createElement('input');
+      input.setAttribute('type', 'text');
+      input.setAttribute('spellcheck', 'false');
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('aria-label', titleText + '（cron 表达式）');
+      input.className = 'ptx-policy-input ptx-policy-cron ptx-policy-' + base + '-cron';
+      input.setAttribute('placeholder', placeholder);
+      input.value = cron;
+      clearBtn.addEventListener('click', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        /* 清空即「立即投」：只改本块输入框，是否落盘仍由用户点「保存」决定。 */
+        input.value = '';
+      });
+
+      const chips = doc.createElement('div');
+      chips.className = 'ptx-policy-chips';
+      for (const preset of presets) {
+        const chip = doc.createElement('button');
+        chip.setAttribute('type', 'button');
+        chip.className = 'ptx-policy-chip';
+        chip.setAttribute('data-ptx-cron', preset.cron);
+        chip.textContent = preset.label;
+        chip.addEventListener('click', (event) => {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          /* 预设只填本块的值（保存前的预览），不发请求、不收起菜单。 */
+          input.value = preset.cron;
+        });
+        chips.appendChild(chip);
+      }
+
+      section.appendChild(head);
+      section.appendChild(input);
+      section.appendChild(chips);
+      return { section, input };
+    }
+
+    const entryTime = timeSection(
+      'entry',
+      '日词条投递时间',
+      '0 22 * * *',
+      TAG_POLICY_ENTRY_CRON_PRESETS,
+      policy.entryCron,
+    );
+    const weeklyTime = timeSection(
+      'weekly',
+      '周主题投递时间',
+      '0 9 * * 1',
+      TAG_POLICY_WEEKLY_CRON_PRESETS,
+      policy.weeklyCron,
+    );
+
+    /* 数字控件：`− [ n ] +` 三段。0 展示为「不限」，聚焦 / 点击时换回可编辑的 `0`；
+       `+` / `−` 在 0 与上限处钳制（值域由调用方给）。 */
+    function countField(labelText, base, value, max) {
+      const field = doc.createElement('div');
+      field.className = 'ptx-policy-field ptx-policy-field-' + base;
+      const label = doc.createElement('span');
+      label.className = 'ptx-policy-field-label';
+      label.textContent = labelText;
+
+      const stepper = doc.createElement('div');
+      stepper.className = 'ptx-policy-stepper';
+
+      const down = doc.createElement('button');
+      down.setAttribute('type', 'button');
+      down.className = 'ptx-policy-step ptx-policy-step-down ptx-policy-' + base + '-down';
+      down.setAttribute('aria-label', '减少' + labelText);
+      down.textContent = '−';
+
+      const input = doc.createElement('input');
+      input.setAttribute('type', 'text');
+      input.setAttribute('inputmode', 'numeric');
+      input.setAttribute('autocomplete', 'off');
+      input.setAttribute('aria-label', labelText);
+      input.className = 'ptx-policy-count ptx-policy-' + base;
+
+      const up = doc.createElement('button');
+      up.setAttribute('type', 'button');
+      up.className = 'ptx-policy-step ptx-policy-step-up ptx-policy-' + base + '-up';
+      up.setAttribute('aria-label', '增加' + labelText);
+      up.textContent = '+';
+
+      const clamp = (raw) => {
+        const parsed = Math.trunc(Number(raw));
+        return Math.min(max, Math.max(0, Number.isFinite(parsed) ? parsed : 0));
+      };
+      let current = clamp(value);
+      const render = () => {
+        const unlimited = current === 0;
+        input.value = unlimited ? '不限' : String(current);
+        input.classList.toggle('is-unlimited', unlimited);
+        down.disabled = current <= 0;
+        up.disabled = current >= max;
+      };
+      const commit = (raw) => {
+        current = clamp(raw);
+        render();
+      };
+      /* 输入框里可能是「不限」：解析失败按 0，绝不把 NaN 带进保存。 */
+      const read = () => clamp(input.value);
+      const reveal = () => {
+        if (current !== 0) return;
+        input.value = '0';
+        input.classList.remove('is-unlimited');
+      };
+      input.addEventListener('focus', reveal);
+      input.addEventListener('click', reveal);
+      input.addEventListener('blur', () => commit(input.value));
+      down.addEventListener('click', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        commit(read() - 1);
+      });
+      up.addEventListener('click', (event) => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        commit(read() + 1);
+      });
+
+      stepper.appendChild(down);
+      stepper.appendChild(input);
+      stepper.appendChild(up);
+      field.appendChild(label);
+      field.appendChild(stepper);
+      render();
+      return { field, read };
+    }
+
+    const limitSec = doc.createElement('div');
+    limitSec.className = 'ptx-policy-sec ptx-policy-sec-limit';
+    const limitHead = doc.createElement('div');
+    limitHead.className = 'ptx-policy-sec-head';
+    const limitTitle = doc.createElement('span');
+    limitTitle.className = 'ptx-policy-sec-title';
+    limitTitle.textContent = '限量';
+    limitHead.appendChild(limitTitle);
+    limitSec.appendChild(limitHead);
+
+    /* 值域：词条每天最多 999（与服务端 `MAX_PERIOD_QUOTA` 同一口径，超出会被 400）、
+       周报每周最多 100（更窄的界面护栏）。 */
+    const perDayField = countField('词条 / 日', 'perday', policy.perDay, 999);
+    const perWeekField = countField('周报 / 周', 'perweek', policy.perWeek, 100);
+    limitSec.appendChild(perDayField.field);
+    limitSec.appendChild(perWeekField.field);
+
+    root.appendChild(entryTime.section);
+    root.appendChild(weeklyTime.section);
+    root.appendChild(limitSec);
+
+    const errorNode = doc.createElement('div');
+    errorNode.className = 'ptx-policy-error';
+    const note = doc.createElement('span');
+    note.className = 'ptx-policy-footnote';
+    note.textContent = '0 = 不限 · 空 = 立即投';
+    const footLeft = doc.createElement('div');
+    footLeft.className = 'ptx-policy-foot-left';
+    footLeft.appendChild(note);
+    footLeft.appendChild(errorNode);
+
+    const actions = doc.createElement('div');
+    actions.className = 'ptx-policy-actions';
+    const cancelBtn = doc.createElement('button');
+    cancelBtn.setAttribute('type', 'button');
+    cancelBtn.className = 'ptx-policy-cancel';
+    cancelBtn.textContent = '取消';
+    cancelBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      closeMenu();
+    });
+    const saveBtn = doc.createElement('button');
+    saveBtn.setAttribute('type', 'button');
+    saveBtn.className = 'ptx-policy-save';
+    saveBtn.textContent = '保存';
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+
+    const foot = doc.createElement('div');
+    foot.className = 'ptx-policy-foot';
+    foot.appendChild(footLeft);
+    foot.appendChild(actions);
+    root.appendChild(foot);
+
+    /* 错误占底部左侧说明的位置：有错误时收起说明，成功后恢复。 */
+    const showError = (text) => {
+      const message = text == null ? '' : String(text);
+      errorNode.textContent = message;
+      errorNode.classList.toggle('is-visible', !!message);
+      note.classList.toggle('is-hidden', !!message);
+    };
+
+    let saving = false;
+    saveBtn.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (saving || !writePolicy) return;
+      /* 策略还没读回来就保存，会把服务端上未知的 cron / 限量覆盖成默认值：先补读一次。 */
+      if (!loaded) {
+        showError('策略尚未读取完成，正在重试…');
+        refresh();
+        return;
+      }
+      const next = {
+        source: info.source,
+        target: info.target,
+        entryCron: String(entryTime.input.value == null ? '' : entryTime.input.value).trim(),
+        weeklyCron: String(weeklyTime.input.value == null ? '' : weeklyTime.input.value).trim(),
+        perDay: perDayField.read(),
+        perWeek: perWeekField.read(),
+      };
+      showError('');
+      saving = true;
+      saveBtn.disabled = true;
+      saveBtn.classList.add('is-busy');
+      saveBtn.textContent = '保存中…';
+      const settle = () => {
+        saving = false;
+        saveBtn.disabled = false;
+        saveBtn.classList.remove('is-busy');
+        saveBtn.textContent = '保存';
+      };
+      /* 一次点击最多一次 POST：按钮在回执前不再接受新的保存。 */
+      Promise.resolve()
+        .then(() => writePolicy(next))
+        .then(() => {
+          /* 四字段全默认 = 服务端删掉了这一项（`settings.json` 里不留策略）：缓存必须同步删除，
+             否则折叠徽标的条数与目标列表的「已设置」能把已删除的策略一直当配置显示。 */
+          const stored = normalizeTagPolicy(next);
+          if (isDefaultTagPolicy(stored)) cache.delete(info.key);
+          else cache.set(info.key, stored);
+          if (tag) {
+            applyTagPolicySuffix(doc, tag, stored);
+          }
+          /* 折叠徽标的条数取自缓存：缓存一改就要重画（这次没有可见标签可写时也一样）。 */
+          scanCollapsed();
+          /* 回执可能迟到：这期间用户已打开另一个目标的菜单，此时不能把新菜单关掉。 */
+          if (menuEl === root) closeMenu();
+        }, (err) => {
+          settle();
+          showError(err && err.message ? String(err.message) : '保存失败');
+        });
+    });
+
+    doc.body.appendChild(root);
+    menuEl = root;
+    menuTag = tag;
+    placeMenu(root, x, y);
+  }
+
+  /* ---------------- 生命周期 ---------------- */
+  function attach() {
+    ensureTagPolicyStyles(doc);
+    scan();
+    if (!observer) {
+      const MO = opts.MutationObserver || (win && win.MutationObserver);
+      if (typeof MO === 'function' && doc.body) {
+        observer = new MO(() => {
+          if (scanTimer) return;
+          /* 宿主一次渲染会连发几十条 childList：合并成一轮扫描，不吃掉 Vue 的帧。 */
+          scanTimer = setTimeout(() => {
+            scanTimer = null;
+            /* 标签被宿主重渲染时**不关菜单**：Vue patch 会换掉节点，菜单是用户显式打开的弹层，
+               关掉它等于「鼠标一移开菜单就消失」。菜单只由外部点击 / Esc / 路由变化 / 保存收起。 */
+            scan();
+          }, scanDelay);
+        });
+        observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
+      }
+    }
+    if (!listeners.length && typeof doc.addEventListener === 'function') {
+      /* 滚动也会让 fixed 坐标的菜单脱离标签：滚动即收（菜单自身不滚动）。 */
+      const pairs = [['mousedown', onDocPointer], ['keydown', onDocKey]];
+      for (const pair of pairs) {
+        doc.addEventListener(pair[0], pair[1], true);
+        listeners.push(pair);
+      }
+    }
+  }
+
+  function destroy() {
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+    closeMenu();
+    while (listeners.length) {
+      const pair = listeners.pop();
+      if (typeof doc.removeEventListener === 'function') doc.removeEventListener(pair[0], pair[1], true);
+    }
+    if (doc.querySelectorAll) {
+      const seen = new Set();
+      const nodes = [
+        ...doc.querySelectorAll('.el-tag.is-closable'),
+        ...doc.querySelectorAll('[' + TAG_POLICY_PLUS_ATTR + '="1"]'),
+        ...doc.querySelectorAll('[' + TAG_POLICY_COUNT_ATTR + ']'),
+      ];
+      for (const node of nodes) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        const handler = bound.get(node);
+        if (handler && typeof node.removeEventListener === 'function') node.removeEventListener('contextmenu', handler);
+        bound.delete(node);
+        if (typeof node.removeAttribute !== 'function') continue;
+        node.removeAttribute(TAG_POLICY_BOUND_ATTR);
+        node.removeAttribute(TAG_POLICY_SUFFIX_ATTR);
+        node.removeAttribute(TAG_POLICY_PLUS_ATTR);
+        node.removeAttribute(TAG_POLICY_COUNT_ATTR);
+      }
+    }
+    cache.clear();
+    attempted = false;
+    loaded = false;
+    inflight = null;
+  }
+
+  return { attach, destroy, scan, refresh, syncOwn, openMenu, closeMenu, readTagInfo, formatSuffix: formatTagPolicy };
+}
+// END TAG POLICY MENU
 
 /* ------------------------------------------------------------------ *
  * 13. 挂载 / 路由感应 / 生命周期
@@ -7160,8 +8120,6 @@ function startDataFlow() {
   /* 选项先于数据落地：面板此刻已经可见，下拉 / 轮播条数不该等一次往返。 */
   syncSettingsUI();
   scheduleStatusPoll();
-  /* 停留在投递策略页时本页才变真：补一次读取，否则会永远停在「正在读取」 */
-  if (state.stage === 'policies' && !state.policies.loaded) loadPolicies();
   clearInterval(latestTimer);
   latestTimer = setInterval(() => {
     if (!state.visible) return;
@@ -7410,6 +8368,7 @@ function checkRoute() {
        「不为看不见的页拉数据」是同一条契约，都归 syncAuthGate(false) 管）。 */
     resetRouteProbe('');
     syncAuthGate(false);
+    if (tagPolicyMenu) tagPolicyMenu.syncOwn(false);
     if (state.visible) {
       if (rootEl) rootEl.classList.add('ptx-hidden');
       state.visible = false;
@@ -7437,6 +8396,8 @@ function checkRoute() {
      用户点开胶囊的认领也算数（`routeProbe.userClaimed`）：下一轮判定不能把用户刚要到手的页
      收回去，只有路由 key 变了（resetRouteProbe）才作废。 */
   syncAuthGate(routeMatches());
+  /* 订阅表标签的右键菜单只在本插件页接管；进入本页时读一次策略（一页一次，失败不轮询）。 */
+  if (tagPolicyMenu) tagPolicyMenu.syncOwn(state.own);
 
   if (rootEl) {
     /* 刚进入的页面还没被认领（别人的插件页 / 元数据未画出来）时只留胶囊：
@@ -7481,14 +8442,40 @@ export default function applyPatchouliWikiReader(ctx) {
 
   if (ctx && typeof ctx.on === 'function') {
     ctx.on('dispose', () => {
+      if (tagPolicyMenu) {
+        tagPolicyMenu.destroy();
+        tagPolicyMenu = null;
+      }
       unmount();
       window.__patchouliWikiReader = false;
     });
   }
 
+  /* 订阅表投递群标签的右键菜单：策略真源在 settings.json，读写都走 /api/policies。
+     读挂在 requestJson 上（接口不可用记账），写挂在 writeJson 上（400 的 body.error 直接
+     进菜单；非本插件页连 fetch 都不会发）。 */
+  tagPolicyMenu = createTagPolicyMenu({
+    document,
+    window,
+    MutationObserver: typeof MutationObserver === 'function' ? MutationObserver : null,
+    isOwnPage: () => state.own === true,
+    /* 必须走完整的认领：只 `syncAuthGate(true)` 不写 `routeProbe.userClaimed`，
+       下一轮 checkRoute 的 routeMatches() 仍为 false → syncOwn(false) → 菜单被关，
+       表现就是「闪一下就没」。 */
+    claim: () => claimOwnPage(),
+    /* 右键认领前的归属校验：随机实例 id 的页面要靠元数据 / 路由名认，认不出就不认领
+       ——否则别的插件页上任意「数字列 + 可关闭标签」都能把那一页变成帕秋莉的。 */
+    identify: () => routeMatches(),
+    read: () => requestJson(`${API_BASE}/api/policies`),
+    write: (payload) => writeJson(`${API_BASE}/api/policies`, 'POST', payload),
+    /* `collapse-tags` 把多余目标折叠成 `+ N`：这些目标不在 DOM 里，只能回订阅表取。 */
+    readTargets: () => requestJson(`${API_BASE}/api/subscriptions`),
+  });
+
   const boot = () => {
     /* 配置卡的标签主题与浮窗无关：脚本一启动就铺好，不依赖用户是否打开面板。 */
     ensureSchemaTagTheme();
+    if (tagPolicyMenu) tagPolicyMenu.attach();
     checkRoute();
     state.routeTimer = setInterval(checkRoute, 700);
   };

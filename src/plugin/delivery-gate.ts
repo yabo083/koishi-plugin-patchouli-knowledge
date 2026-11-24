@@ -1,12 +1,13 @@
 /**
- * 定时投递闸门：入队、限额、窗口等待、批量结算。
+ * 定时投递闸门：入队、限额、cron 到点、批量结算。
  *
  * 设计要点（`docs/delivery-schedule.md` §3/§4）：
- *   - **排队不丢弃**：窗口外的事件进队列等下一个窗口，绝不让「讨论结束的时刻」决定词条可见性；
- *   - **限额按目标**：同一事件投三个目标 = 三条独立额度，各自扣一次；
- *   - **批量外发**：一批到期条目渲染后**一次** `broadcast`，按 `outcomes` 逐（产物 × 目标）结算，
+ *   - **排队不丢弃**：策略带 cron 的事件进队列等下一次触发，绝不让「讨论结束的时刻」决定词条可见性；
+ *   - **限额按（来源群 × 目标）**：同一事件投三个目标 = 三条独立额度，各自扣一次；
+ *   - **先判额再渲染**：到点条目先过额度闸门，超额直接出队告警、不白渲染一张图；
+ *   - **批量外发**：额度内的条目渲染后**一次** `broadcast`，按 `outcomes` 逐（产物 × 目标）结算，
  *     成功出队、失败留队退避、不整批回滚；
- *   - **单定时器**：只有一条 wake 定时器指向队列里最早的 `deliverAt`，没有任何轮询。
+ *   - **单定时器**：只有一条 wake 定时器指向队列里最早的 `dueAt`，没有任何轮询。
  *
  * 内存边界：队列本身在 `delivery-state.json`（≤1024 条 / ≤1 MiB），本类只额外暂存
  * **已渲染产物**（≤32 MiB，超出即不再暂存、到点重渲），进程重启后条目靠 `render` 重渲。
@@ -32,7 +33,8 @@ import {
   type DeliveryStateDoc,
   type QueuedDelivery,
 } from './delivery-state';
-import { DEFAULT_POLICY, deliverAtFor, periodKeyFor, windowContains, windowSpecFor } from './policy-resolve';
+import { DEFAULT_POLICY, cronForKind, nextCronAt, parseCron, periodKeyFor, policyKey } from './policy-resolve';
+import { bareChannelId } from './subscriptions';
 
 /** 单批条目上限（事件数）。 */
 export const MAX_BATCH_ITEMS = 20;
@@ -51,7 +53,12 @@ export const MAX_DELIVERY_ATTEMPTS = 10;
 const RETRY_BASE_MS = 60_000;
 const RETRY_MAX_MS = 30 * 60_000;
 
-/** 同目标相邻两条的最小 / 最大间隔（「同目标至少随机间隔 1–3 分钟」）。 */
+/**
+ * 同目标相邻两条的最小 / 最大随机间隔（内部常量，不对外配置）。
+ *
+ * 平台风控看的是「同一收件人短时间连续收到同形态消息」，间隔只需打散成不规律即可；
+ * 条目因此按 `dueAt` 逐个到点，而不是同一毫秒挤进一批。
+ */
 const TARGET_GAP_MIN_MS = 60_000;
 const TARGET_GAP_MAX_MS = 180_000;
 
@@ -61,6 +68,9 @@ const ESTIMATED_ITEM_BYTES = 4096;
 /** 词条 / 周报的投递 scope（透传给 `miyako-delivery`，与旧实现一致）。 */
 const SCOPE_ENTRY = 'patchouli:entry';
 const SCOPE_WEEKLY = 'patchouli:weekly-album';
+
+/** 单次 `setTimer` 的延迟上界：超过它的延迟会被运行时当成 1ms 立即触发（等于空转唤醒）。 */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** 宿主透传的重试策略：维持条目投递的历史行为。 */
 const ENTRY_RETRY: DeliveryRetryOptions = { maxAttempts: 4, baseDelayMs: 3000 };
@@ -87,15 +97,15 @@ export interface DeliveryGateLogger {
 
 /** 一个投递目标的计划：策略键 + 运行期目标本身。 */
 export interface DeliveryTargetPlan {
-  /** 策略 / 计数键：`@chat:<source>` 或 `群号/相册ID`。 */
+  /** 目标键：`@chat:<来源群>` 或 `群号/相册ID`（策略键 = 来源群 ⊕ 它，见 `policyKeyOf`）。 */
   targetKey: string;
   target: DeliveryTargetLike;
 }
 
-/** 一次投递事件（一个事件可带多个目标，各自独立额度 / 窗口）。 */
+/** 一次投递事件（一个事件可带多个目标，各自独立额度 / cron）。 */
 export interface DeliveryOffer {
   kind: DeliveryKind;
-  /** 来源群（`@chat` 目标的策略归属）。 */
+  /** 来源群（策略键的前半段；`@chat` 目标的策略归属也来自它）。 */
   source: string;
   /** 事件键：词条 = `entryId`，周报 = 取材时刻的 `fireKey`。 */
   eventKey: string;
@@ -108,12 +118,12 @@ export interface DeliveryOffer {
 
 /** `offer` 的结算明细（测试与日志用）。 */
 export interface DeliveryOfferResult {
-  /** 真正入队的条目数（`deferred` 是其中需要等窗口的部分）。 */
+  /** 真正入队的条目数（`deferred` 是其中 `dueAt` 在未来的部分）。 */
   accepted: number;
   deferred: number;
-  /** 同（目标 × 事件键）已在队列里，跳过且不扣额。 */
+  /** 同（来源群 × 目标 × 事件键）已在队列里，跳过。 */
   duplicates: number;
-  /** 额度用尽 / 队满 / 目标键非法。 */
+  /** 目标键非法 / 队满。额度在 `drain` 判定，所以这里没有「超额」。 */
   dropped: number;
 }
 
@@ -123,6 +133,7 @@ export interface DeliveryGateDelivery {
   target: DeliveryTargetLike;
   png: Buffer;
   scope: string;
+  /** 下游幂等键：`<来源群>:<事件键>:<目标键>`——三者都对上才算「同一张卡」。 */
   dedupeKey: string;
   retry?: DeliveryRetryOptions;
 }
@@ -155,6 +166,8 @@ export interface DeliveryDrainResult {
   failed: number;
   /** 本轮出队放弃的条数（渲染失败到上限 / 目标失效）。 */
   dropped: number;
+  /** 本轮因额度用尽而未渲染、直接出队的条数（事件已入库，只是没出卡）。 */
+  overQuota: number;
   /** 没有到期项 / 已在 drain / 已销毁。 */
   skipped: boolean;
 }
@@ -165,6 +178,11 @@ export interface DeliveryGateSnapshot {
   counters: DeliveryStateDoc['counters'];
   nextWakeAt: number | undefined;
   disposed: boolean;
+  /**
+   * 某（来源群 × 目标）当期已出卡数：读内存里的计数缓存，不额外读盘。
+   * 面板 / 日志用它回答「今天这个相册还剩几张」。
+   */
+  quotaUsed(kind: DeliveryKind, source: string, targetKey: string, at?: number): number;
 }
 
 interface QuotaStatus {
@@ -245,14 +263,16 @@ export class DeliveryGate {
   /**
    * 投递事件入队（每个目标一条）。
    *
-   * 顺序是硬约束：先判重复（不扣额）→ 再判额度（不占额就不入队）→ 再判队列容量
-   * （拒收时**不**扣额）→ 才占额 + 入队。任何一步失败都不改变已有队列。
+   * 顺序是硬约束：先判重复（同一来源 × 目标 × 事件键不重复入队）→ 再判队列容量
+   * （拒收时不改已有队列）→ 才入队并排定 `dueAt`。**额度不在这里判**：
+   * 到点时才由 `drain` 按当时的周期判定，cron 把事件推到未来的那一段不占额。
    */
   async offer(event: DeliveryOffer): Promise<DeliveryOfferResult> {
     const result: DeliveryOfferResult = { accepted: 0, deferred: 0, duplicates: 0, dropped: 0 };
     if (this.disposed) return { ...result, dropped: event.targets.length };
     await this.ensureReady();
     const at = event.at ?? this.clock();
+    const source = bareChannelId(event.source);
     await this.enqueue(async () => {
       await this.refreshPolicies();
       const seen = new Set<string>();
@@ -264,31 +284,26 @@ export class DeliveryGate {
         }
         seen.add(targetKey);
         const duplicate = this.state.queue.some(
-          (item) => item.targetKey === targetKey && item.eventKey === event.eventKey && item.kind === event.kind,
+          (item) =>
+            item.source === source &&
+            item.targetKey === targetKey &&
+            item.eventKey === event.eventKey &&
+            item.kind === event.kind,
         );
         if (duplicate) {
           result.duplicates += 1;
           continue;
         }
-        const policy = this.policyOf(targetKey);
-        const quota = this.quotaStatus(event.kind, targetKey, at, policy);
-        if (!quota.allowed) {
-          this.deps.logger?.warn(
-            `[Patchouli] ${labelOf(event.kind)}《${event.eventKey}》未投递：目标 ${targetKey} ` +
-              `${quota.periodKey} 额度已用尽（${quota.used}/${quota.limit}）`,
-          );
-          result.dropped += 1;
-          continue;
-        }
-        const deliverAt = this.planDeliverAt(policy, targetKey, at);
+        const policy = this.policyOf(source, targetKey);
+        const dueAt = this.planDueAt(policy, event.kind, source, targetKey, at);
         const item: QueuedDelivery = {
           seq: this.nextSeq,
-          source: event.source,
+          source,
           targetKey,
           kind: event.kind,
           eventKey: event.eventKey,
           createdAt: at,
-          deliverAt,
+          dueAt,
           channelId: plan.target.channelId,
           attempts: 0,
         };
@@ -301,11 +316,10 @@ export class DeliveryGate {
           continue;
         }
         this.nextSeq += 1;
-        this.recordQuota(event.kind, targetKey, quota);
         this.state.queue.push(item);
         if (event.png !== undefined) this.keepPayload(item.seq, event.png);
         result.accepted += 1;
-        if (deliverAt > at) result.deferred += 1;
+        if (dueAt > at) result.deferred += 1;
       }
     });
     if (result.accepted > 0) {
@@ -318,8 +332,12 @@ export class DeliveryGate {
   /**
    * 投递一批到期条目。
    *
-   * 取到期项（≤20 条 / ≤8 MiB）→ 渲染（同一事件多目标只渲一次）→ **一次** 批量外发 →
+   * 取到期项（`dueAt <= at`，≤20 条 / ≤8 MiB）→ 按（来源群 × 目标）判 `perDay` / `perWeek`
+   * 额度（用尽即出队告警，**不再渲染**）→ 渲染（同一事件多目标只渲一次）→ **一次** 批量外发 →
    * 按 `outcomes` 逐条结算（成功出队、失败留队退避、目标失效出队）→ 落盘 → 重排 wake。
+   *
+   * 判额 / 占额与出队都在串行链内完成：并发 drain 看到的永远是同一条队列与同一份计数，
+   * 不会把同一条额度占两次。
    */
   async drain(at = this.clock()): Promise<DeliveryDrainResult> {
     const idle: DeliveryDrainResult = {
@@ -328,14 +346,25 @@ export class DeliveryGate {
       delivered: 0,
       failed: 0,
       dropped: 0,
+      overQuota: 0,
       skipped: true,
     };
     if (this.disposed || this.draining) return idle;
     this.draining = true;
     try {
       await this.ensureReady();
-      const batch = await this.enqueue(() => this.takeDue(at));
-      if (batch.length === 0) return idle;
+      // 额度在到点这一刻判定，所以策略缓存必须先刷新：面板刚存的 cron / 额度本轮就生效。
+      const taken = await this.enqueue(async () => {
+        await this.refreshPolicies();
+        const due = this.takeDue(at);
+        return this.filterByQuota(due, at);
+      });
+      if (taken.admitted.length === 0) {
+        if (taken.overQuota === 0) return idle;
+        await this.persist();
+        return { ...idle, overQuota: taken.overQuota, skipped: false };
+      }
+      const batch = taken.admitted;
       const rendered = await this.renderBatch(batch);
       const prepared = rendered.ready;
       let outcomes: readonly DeliveryOutcomeLike[] = [];
@@ -346,7 +375,10 @@ export class DeliveryGate {
           target: targetOf(entry.item),
           png: entry.png,
           scope: entry.item.kind === 'weekly' ? SCOPE_WEEKLY : SCOPE_ENTRY,
-          dedupeKey: `${entry.item.eventKey}:${entry.item.targetKey}`,
+          /* 幂等键必须带来源群：队列身份是（来源 × 目标 × 事件键），而 `eventKey` 在跨来源时
+             会撞——同一个相册、同一天的同一标题 slug（词条），或同一取材时刻（周报 `fireKey`）。
+             只按事件键 + 目标做键，第二个来源的那张卡会被下游判成「已发过」直接跳过。 */
+          dedupeKey: `${entry.item.source}:${entry.item.eventKey}:${entry.item.targetKey}`,
           retry: entry.item.kind === 'entry' ? ENTRY_RETRY : undefined,
         }));
         try {
@@ -366,7 +398,7 @@ export class DeliveryGate {
       const settled = await this.enqueue(() => this.settle(at, prepared, outcomes, rendered.failures));
       // 落盘在串行链外：一次慢盘写不该挡住新的 `offer`（队列已经定序，写谁都是全量快照）。
       await this.persist();
-      return settled;
+      return { ...settled, overQuota: taken.overQuota };
     } finally {
       this.draining = false;
       this.arm();
@@ -381,20 +413,21 @@ export class DeliveryGate {
       if (this.inflight.has(item.seq)) continue;
       // 过期条目原样返回：`arm()` 用 `max(0, wake - now)` 排一次 0 延迟唤醒，
       // 本轮没取到的部分不能等下一个未来时刻。
-      if (wake === undefined || item.deliverAt < wake) wake = item.deliverAt;
+      if (wake === undefined || item.dueAt < wake) wake = item.dueAt;
     }
     return wake;
   }
 
   /**
-   * 该目标现在还有额度吗（周报取材前的预筛，最终以 `offer` 占额为准）。
+   * 该目标现在还有额度吗（周报取材前的预筛，最终以 `drain` 到点判定为准）。
    *
    * 同步读内存快照：`offer` / `drain` 会刷新策略缓存，因此这里的结果最多滞后一次投递事件。
    */
-  allows(kind: DeliveryKind, targetKey: string, at = this.clock()): boolean {
-    const policy = this.policiesCache[targetKey];
+  allows(kind: DeliveryKind, source: string, targetKey: string, at = this.clock()): boolean {
+    const key = this.policyKeyOf(source, targetKey);
+    const policy = this.policiesCache[key];
     if (policy === undefined) return true;
-    return this.quotaStatus(kind, targetKey, at, policy).allowed;
+    return this.quotaStatus(kind, key, at, policy).allowed;
   }
 
   /** 状态快照（只读副本）。 */
@@ -406,6 +439,7 @@ export class DeliveryGate {
       ),
       nextWakeAt: this.nextWakeAt(),
       disposed: this.disposed,
+      quotaUsed: (kind, source, targetKey, at = this.clock()) => this.quotaUsed(kind, source, targetKey, at),
     };
   }
 
@@ -469,43 +503,62 @@ export class DeliveryGate {
     }
   }
 
-  private policyOf(targetKey: string): TargetPolicy {
-    return this.policiesCache[targetKey] ?? DEFAULT_POLICY;
+  /** 策略键：`<来源群>\u0000<目标键>`（来源群去平台前缀，同一个群的不同写法认同一份策略）。 */
+  private policyKeyOf(source: string, targetKey: string): string {
+    return policyKey(bareChannelId(source), targetKey);
   }
 
-  /** 额度状态（只读）：`limit <= 0` = 不限量。 */
-  private quotaStatus(kind: DeliveryKind, targetKey: string, at: number, policy: TargetPolicy): QuotaStatus {
-    const limit = kind === 'entry' ? policy.entryPerDay : policy.weeklyPerWeek;
+  private policyOf(source: string, targetKey: string): TargetPolicy {
+    return this.policiesCache[this.policyKeyOf(source, targetKey)] ?? DEFAULT_POLICY;
+  }
+
+  /** 额度状态（只读）：`limit <= 0` = 不限量。`key` 是策略键（计数与策略同一口径）。 */
+  private quotaStatus(kind: DeliveryKind, key: string, at: number, policy: TargetPolicy): QuotaStatus {
+    const limit = kind === 'entry' ? policy.perDay : policy.perWeek;
     if (limit <= 0) return { allowed: true, limit, used: 0, periodKey: '' };
     const periodKey = periodKeyFor(kind, at);
-    const counter = this.state.counters[counterKey(kind, targetKey)];
+    const counter = this.state.counters[counterKey(kind, key)];
     const used = counter !== undefined && counter.periodKey === periodKey ? counter.used : 0;
     return { allowed: used < limit, limit, used, periodKey };
   }
 
-  private recordQuota(kind: DeliveryKind, targetKey: string, quota: QuotaStatus): void {
+  private recordQuota(kind: DeliveryKind, key: string, quota: QuotaStatus): void {
     if (quota.limit <= 0) return;
-    this.state.counters[counterKey(kind, targetKey)] = { periodKey: quota.periodKey, used: quota.used + 1 };
+    this.state.counters[counterKey(kind, key)] = { periodKey: quota.periodKey, used: quota.used + 1 };
+  }
+
+  /** 当期已出卡数（只读缓存；`limit <= 0` 的无限量目标按 0 算，与计数口径一致）。 */
+  private quotaUsed(kind: DeliveryKind, source: string, targetKey: string, at: number): number {
+    const key = this.policyKeyOf(source, targetKey);
+    return this.quotaStatus(kind, key, at, this.policiesCache[key] ?? DEFAULT_POLICY).used;
   }
 
   /**
-   * 该条目的投递时刻：策略窗口 + 抖动（`deliverAtFor`），再加同目标的 1–3 分钟间隔。
+   * 该条目的到期时刻（epoch ms）。
    *
-   * 间隔只在「加完仍在窗口内」时生效——把条目推出窗口等于让它多等一整天。
+   * - 定时取**本类型**的那一条 cron（词条 `entryCron` / 周报 `weeklyCron`）；
+   * - 空 cron（或解析不出来）：`at`，立即投；
+   * - 非空 cron：`nextCronAt`（严格大于 `at` 的下一次触发，上海时区）；
+   * - 同（来源群 × 目标）在队列里已有条目时再退一个随机间隔：相邻两条不挤在同一毫秒。
    */
-  private planDeliverAt(policy: TargetPolicy, targetKey: string, at: number): number {
-    const spec = windowSpecFor(policy);
-    if (spec === null) return at;
-    const candidate = deliverAtFor(spec, at, this.random);
+  private planDueAt(
+    policy: TargetPolicy,
+    kind: DeliveryKind,
+    source: string,
+    targetKey: string,
+    at: number,
+  ): number {
+    const cron = cronForKind(policy, kind);
+    const spec = cron === '' ? null : parseCron(cron);
+    const candidate = spec === null ? at : nextCronAt(spec, at);
     let previous: number | undefined;
     for (const item of this.state.queue) {
-      if (item.targetKey !== targetKey) continue;
-      if (previous === undefined || item.deliverAt > previous) previous = item.deliverAt;
+      if (item.source !== source || item.targetKey !== targetKey) continue;
+      if (previous === undefined || item.dueAt > previous) previous = item.dueAt;
     }
     if (previous === undefined || candidate >= previous + TARGET_GAP_MIN_MS) return candidate;
     const gap = TARGET_GAP_MIN_MS + Math.floor(this.random() * (TARGET_GAP_MAX_MS - TARGET_GAP_MIN_MS + 1));
-    const spaced = previous + gap;
-    return windowContains(spec, spaced) ? spaced : candidate;
+    return previous + gap;
   }
 
   /** 准入：条数与序列化字节都不得越界（越界拒收，已有条目原样保留）。 */
@@ -546,12 +599,17 @@ export class DeliveryGate {
    * 内部：drain 三段（取件 / 渲染 / 结算）
    * ---------------------------------------------------------------- */
 
+  /**
+   * 取到期待发的一批（≤20 条 / ≤8 MiB），并标记在途。
+   *
+   * 这里只决定「谁到点了」，不判额度：额度是独立的一步，见 `filterByQuota`。
+   */
   private takeDue(at: number): QueuedDelivery[] {
     const due: QueuedDelivery[] = [];
     let bytes = 0;
     for (const item of this.state.queue) {
       if (due.length >= MAX_BATCH_ITEMS) break;
-      if (this.inflight.has(item.seq) || item.deliverAt > at) continue;
+      if (this.inflight.has(item.seq) || item.dueAt > at) continue;
       const size = this.payloads.get(item.seq)?.length ?? ESTIMATED_ITEM_BYTES;
       if (due.length > 0 && bytes + size > MAX_BATCH_BYTES) break;
       bytes += size;
@@ -559,6 +617,46 @@ export class DeliveryGate {
     }
     for (const item of due) this.inflight.add(item.seq);
     return due;
+  }
+
+  /**
+   * 渲染前的额度闸门：读额度 → 判定 → 占额 → 超额出队。
+   *
+   * 必须在串行链内调用（`drain` 已如此），否则并发 drain 会读到同一份 `used` 各占一次。
+   * 超额条目**不渲染**：词条已经入库，缺的只是这张卡，丢掉比空转一次渲染更划算。
+   * 重试中的条目（`attempts > 0`）跳过判额：首次到点时已经占过额，重试不能再扣一次。
+   */
+  private filterByQuota(
+    batch: readonly QueuedDelivery[],
+    at: number,
+  ): { admitted: QueuedDelivery[]; overQuota: number } {
+    const admitted: QueuedDelivery[] = [];
+    const rejected = new Set<number>();
+    for (const item of batch) {
+      if (item.attempts > 0) {
+        admitted.push(item);
+        continue;
+      }
+      const key = this.policyKeyOf(item.source, item.targetKey);
+      const quota = this.quotaStatus(item.kind, key, at, this.policiesCache[key] ?? DEFAULT_POLICY);
+      if (!quota.allowed) {
+        rejected.add(item.seq);
+        this.deps.logger?.warn(
+          `今日卡片配额已满，词条已入库未出卡：${item.kind} ${item.targetKey} ${item.eventKey}`,
+        );
+        continue;
+      }
+      this.recordQuota(item.kind, key, quota);
+      admitted.push(item);
+    }
+    if (rejected.size > 0) {
+      this.state.queue = this.state.queue.filter((item) => !rejected.has(item.seq));
+      for (const seq of rejected) {
+        this.releasePayload(seq);
+        this.inflight.delete(seq);
+      }
+    }
+    return { admitted, overQuota: rejected.size };
   }
 
   /** 逐条取产物：同事件多目标只渲一次；渲染失败只记该条，不连坐同批。 */
@@ -570,7 +668,10 @@ export class DeliveryGate {
     const cache = new Map<string, Buffer>();
     const missing = new Set<string>();
     for (const item of batch) {
-      const key = `${item.kind}\u0000${item.eventKey}`;
+      /* 产物身份必须带来源群，与队列身份 / 下游幂等键同一口径：`eventKey` 会跨来源撞
+         （周报同一取材时刻的 `fireKey`、词条同一天的标题 slug），只按「种类 + 事件键」
+         缓存会让第二个来源的卡片拿到第一个来源的 PNG。 */
+      const key = `${item.kind}\u0000${item.source}\u0000${item.eventKey}`;
       const cached = cache.get(key);
       if (cached !== undefined) {
         ready.push({ item, png: cached });
@@ -621,6 +722,7 @@ export class DeliveryGate {
       delivered: 0,
       failed: 0,
       dropped: 0,
+      overQuota: 0,
       skipped: false,
     };
     const drop = (item: QueuedDelivery, reason: string): void => {
@@ -639,7 +741,7 @@ export class DeliveryGate {
         return;
       }
       item.attempts = attempts;
-      item.deliverAt = at + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempts - 1));
+      item.dueAt = at + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempts - 1));
       this.inflight.delete(item.seq);
       result.failed += 1;
       this.deps.logger?.warn(
@@ -691,7 +793,7 @@ export class DeliveryGate {
    * 内部：定时器 / 串行链 / 落盘
    * ---------------------------------------------------------------- */
 
-  /** 单定时器：永远指向队列里最早的 `deliverAt`。 */
+  /** 单定时器：永远指向队列里最早的 `dueAt`。 */
   private arm(): void {
     if (this.disposed) return;
     if (this.timer !== undefined) {
@@ -700,7 +802,9 @@ export class DeliveryGate {
     }
     const wake = this.nextWakeAt();
     if (wake === undefined) return;
-    const delay = Math.max(0, wake - this.clock());
+    /* 超过 `MAX_TIMER_DELAY_MS` 的延迟会被当成 1ms 立即触发：夹到上界后到点再排一次，
+       绝不把「很久以后」变成空转唤醒（`nextCronAt` 的兜底就可能排在 8 年后）。 */
+    const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, wake - this.clock()));
     this.timer = this.setTimer(() => {
       this.timer = undefined;
       void this.drain().catch((error: unknown) => {

@@ -712,9 +712,9 @@ function refreshSubscriptionTargets(
   const next: StartupTargetValues = { albums: [...albums], configured: values.configured, bindings: values.bindings };
   // 解析表 = 落盘绑定（不随候选变）；展示表 = 本轮候选。
   installTargetTables(next);
+  const items = albumUnionItems(albums, values.configured, { targets: true });
   const union = Config.dict?.['subscriptions']?.inner?.dict?.['targets']?.inner;
-  if (union === undefined) return next;
-  union.list = albumUnionItems(albums, values.configured, { targets: true });
+  if (union !== undefined) union.list = items;
   return next;
 }
 
@@ -823,7 +823,7 @@ function subscriptionProbeSources(
 }
 
 /**
- * 插件页配置：只保留七块高频项（模型置顶、启用、管理员、订阅表、功能总闸、知识库目录、面板密钥）。
+ * 插件页配置：只保留八块高频项（模型置顶、启用、管理员、订阅表、投递策略、功能总闸、知识库目录、面板密钥）。
  *
  * 调参面（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）已撤出控制台，改由自建面板写
  * `<wikiDir>/.patchouli/settings.json`（`SETTINGS_META` 是唯一字段表）。旧配置里的值仍然
@@ -867,11 +867,11 @@ export const Config: Schema<PluginOptions> = Schema.object({
     .role('table')
     .default([])
     .max(256),
-  // ── 4. 功能总闸 ───────────────────────────────────────────────────────
+  // ── 5. 功能总闸 ───────────────────────────────────────────────────────
   features: Schema.object(FEATURES_FIELDS).description('功能总闸：关掉即整条链路不跑。'),
-  // ── 5. 知识库目录 ─────────────────────────────────────────────────────
+  // ── 6. 知识库目录 ─────────────────────────────────────────────────────
   storage: STORAGE_FIELDS,
-  // ── 6. 面板密钥 ───────────────────────────────────────────────────────
+  // ── 7. 面板密钥 ───────────────────────────────────────────────────────
   security: SECURITY_FIELDS,
   /**
    * 历史字段：`advancedMode` 是 0.8.66 条件表单的判别位，现在只用于让旧配置过校验。
@@ -3103,8 +3103,8 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
     await deliveryGate.refresh();
     // 没有任何相册目标就别占掉本轮的触发槽（`gateDailySlot` 一旦放行即算跑过）。
     // 额度预筛：本周已用尽的相册不算「有目标」——否则会白占触发槽、还白跑一次取材。
-    const weeklySources = planWeeklyAlbumSources(snapshot, config.albumDelivery.albums, (album) =>
-      deliveryGate.allows('weekly', album, firedAt),
+    const weeklySources = planWeeklyAlbumSources(snapshot, config.albumDelivery.albums, (album, source) =>
+      deliveryGate.allows('weekly', source, album, firedAt),
     );
     if (weeklySources.length === 0) {
       return { ok: false, reason: 'album-not-configured', uploaded: 0 };
@@ -3141,7 +3141,7 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
           maxHeight: system.settings('query').cardMaxHeight,
           weekLabel,
         }),
-      allowTarget: (album) => deliveryGate.allows('weekly', album, firedAt),
+      allowTarget: (album, source) => deliveryGate.allows('weekly', source, album, firedAt),
       deliver: async (album, png, _dedupeKey, source) => {
         const separator = album.indexOf('/');
         const groupId = album.slice(0, separator).trim();

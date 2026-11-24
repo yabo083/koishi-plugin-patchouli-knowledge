@@ -13,7 +13,7 @@
  *   3. **同路径串行**：同一进程内对同一文件的读改写依次执行，最后一次 `rename`
  *      一定是完整文档。
  *
- * 计数口径：键 = `<kind>\u0000<targetKey>`，值 = 该目标当前周期的用量。
+ * 计数口径：键 = `<kind>\u0000<来源群>\u0000<目标键>`，值 = 该目标当前周期的用量。
  * 周期切换是**惰性**的——比较 `periodKey` 不同就清零，不做定时任务。
  * 同一事件投多个目标时每个目标各扣一次（目标各自独立额度）。
  */
@@ -54,8 +54,11 @@ export interface QueuedDelivery {
   /** 事件键：词条 = `entryId`，周报 = 取材时刻的 `fireKey`。 */
   eventKey: string;
   createdAt: number;
-  /** 已含抖动与窗口约束的投递时刻。 */
-  deliverAt: number;
+  /**
+   * 到期时刻（epoch ms）：cron 的下一次触发点（含同目标随机间隔），
+   * 空 cron = 入队时刻（立即投）。重启后照此值续跑，绝不重算。
+   */
+  dueAt: number;
   /** 实际投递频道（`@chat` 是来源群，相册是相册所属群）。 */
   channelId: string;
   /** 已尝试次数（渲染或批量投递失败后 +1），用于退避与放弃。 */
@@ -76,9 +79,9 @@ export interface DeliveryStateDoc {
   counters: Record<string, DeliveryCounter>;
 }
 
-/** 计数的存储键：`<kind>\u0000<targetKey>`（每目标每种类只留当前周期一格）。 */
-export function counterKey(kind: DeliveryKind, targetKey: string): string {
-  return `${kind}\u0000${targetKey}`;
+/** 计数的存储键：`<kind>\u0000<策略键>`（策略键 = `<来源群>\u0000<目标键>`；每目标每种类只留当前周期一格）。 */
+export function counterKey(kind: DeliveryKind, policyKey: string): string {
+  return `${kind}\u0000${policyKey}`;
 }
 
 /** 状态文件路径：`<wikiDir>/.patchouli/delivery-state.json`。 */
@@ -130,14 +133,15 @@ function sanitizeQueuedDelivery(raw: unknown): QueuedDelivery | undefined {
   const eventKey = boundedText(raw.eventKey, MAX_FIELD_CHARS);
   const channelId = boundedText(raw.channelId, MAX_CHANNEL_CHARS);
   const createdAt = finiteNumber(raw.createdAt);
-  const deliverAt = finiteNumber(raw.deliverAt);
+  // 旧版状态文件写的是 `deliverAt`（窗口语义）：绝对时刻仍然有效，读回当 `dueAt` 续投。
+  const dueAt = finiteNumber(raw.dueAt) ?? finiteNumber(raw.deliverAt);
   if (
     source === undefined ||
     targetKey === undefined ||
     eventKey === undefined ||
     channelId === undefined ||
     createdAt === undefined ||
-    deliverAt === undefined
+    dueAt === undefined
   ) {
     return undefined;
   }
@@ -149,7 +153,7 @@ function sanitizeQueuedDelivery(raw: unknown): QueuedDelivery | undefined {
     kind,
     eventKey,
     createdAt,
-    deliverAt,
+    dueAt,
     channelId,
     attempts: attempts !== undefined && attempts >= 0 ? Math.floor(attempts) : 0,
   };
