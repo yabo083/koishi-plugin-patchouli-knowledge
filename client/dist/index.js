@@ -60,24 +60,20 @@ const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
    多实例 / 分组时是宿主生成的随机 id。
    两次判定必须分开，否则随机实例 id 的页面连浮窗都不会出现：
    - `isPluginPage()`：**宽**——只要在某个插件的插件页上就挂载（浮窗与胶囊是只读入口，不遮宿主）；
-   - `routeMatches()`：**窄**——名字或页面身份文本认出本插件才展开、才弹全屏鉴权门。 */
+   - `routeMatches()`：**窄**——名字认出本插件、页面身份元数据命中，或用户点开胶囊认领，才展开、
+     才弹全屏鉴权门。 */
 const ROUTE_SEGMENT = '/plugins/';
 /* 本插件在 console 里的页面名（koishi-plugin- 前缀已去掉）；`:实例 id` 后缀同样命中。 */
 const PLUGIN_ROUTE_NAMES = ['patchouli-knowledge', 'patchouli'];
-/* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」（展开 + 鉴权门）；名字认得出时
-   只影响自动展开。 */
+/* 页面身份只认**元数据**：标题 / 面包屑 / h1 / data-*，全是宿主专为页面身份画的取样点。
+   正文文本一概不读 —— 页面归属是开集问题，靠正文猜永远挡不住下一条反例（SPA 残留的旧视图、
+   隐藏子树、别的插件设置表单里随口写的「知识库」…），取样越宽误认领的代价越大：
+   全屏门与 /api 请求会落到别人的配置页上。随机实例 id 且元数据读不到的页面改由
+   「用户点开胶囊即认领」兜底（见 expandPanel）。 */
 const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
-/* 专有标识：只认**本插件独有**的名字。泛化词（「知识库」）不在其中 —— 别的插件页正文随口提一句
-   「知识库」，就把整页认领走，全屏门与 /api 请求全落到别人的配置页上。
-   宽容器（h2 / 页头 / header / class 带 plugin 的容器）与页面正文只允许这一集。
-   命中任一即认领（要求多个会漏掉只画了名字的宿主版本）。 */
-const DEEP_PROBE_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识阅读器', '大图书馆'];
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
-   面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
+   面包屑，第一轮读不到元数据不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
 const IDENTITY_PROBE_TICKS = 8;
-/* 用户意图兜底：用户手动点开胶囊时允许一次深探测（页面正文前 600 字）认领本页。
-   有界取样是硬要求：正文可能极长，绝不能整段进内存参与比对。 */
-const DEEP_PROBE_CHARS = 600;
 const ROOT_ID = 'patchouli-organic-root';
 const STYLE_ID = 'patchouli-organic-style';
 const PREFIX = 'ptxClient';
@@ -226,6 +222,11 @@ const REQUEST_TIMEOUT_MS = 15000;
 /* 非本插件页时请求被拦下的错误文案：调用方的 catch 会把它当普通失败展示。 */
 const NOT_OWN_PAGE = '非本插件页：已暂停取数';
 const NOT_OWN_PAGE_WRITE = '当前不在本插件页';
+/* 「接口不可用」：404 / 405 / 410 与「响应不是 JSON」说明这台宿主上根本没有这套接口（插件没启用 /
+   路径被反代吞掉 / 落到了静态站），和「连不上服务」（网络错误 / 5xx）是两回事：前者重连多少次都
+   不会好，把用户引向网络排查是错误归因。401 不算 —— 那是会话问题，走生成块的 gate() 流程。
+   连续两次才报（单次抖动不改判定）。 */
+const API_UNAVAILABLE_STREAK = 2;
 /* 读写的唯一物理闸口：本页标记 + 超时。
    浮窗挂在**任何** /plugins/** 页上（宿主用随机实例 id 渲染插件页时，不挂就等于用户看不到入口），
    但取数与写入都只属于本插件页 —— 别的插件页既不为其拉数据，也不许改它的设置；
@@ -248,11 +249,38 @@ function guardedFetch(url, options, notify) {
     });
 }
 
+/* 读请求的失败分级：只有「404 / 405 / 410」与「响应不是 JSON」算接口不可用（见
+   `API_UNAVAILABLE_STREAK`）。错误对象上带标记，供 `noteApiRead` 记账。 */
+function readFailure(status) {
+  const err = new Error(status ? `HTTP ${status}` : '响应不是 JSON');
+  err.apiUnavailable = true;
+  return err;
+}
+
 function requestJson(url, options) {
-  return guardedFetch(url, options).then((res) => {
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    return res.json();
-  });
+  return guardedFetch(url, options)
+    .then((res) => {
+      if (!res.ok) {
+        const status = Number(res.status) || 0;
+        /* 401 / 5xx / 网络层是「连接」问题，不在这一档 */
+        if (status === 404 || status === 405 || status === 410) throw readFailure(status);
+        throw new Error('HTTP ' + res.status);
+      }
+      if (typeof res.json !== 'function') return res;
+      return res.json().catch(() => { throw readFailure(0); });
+    })
+    .then((data) => { noteApiRead(null); return data; }, (err) => { noteApiRead(err); throw err; });
+}
+
+/* 接口可用性记账：连续命中「接口不可用」才置位；任何一次成功都清零。
+   置位/清零时重画状态位 —— 监控条与胶囊说的必须是同一件事。 */
+function noteApiRead(err) {
+  state.apiStreak = err && err.apiUnavailable ? state.apiStreak + 1 : 0;
+  const next = state.apiStreak >= API_UNAVAILABLE_STREAK;
+  if (next === state.apiUnavailable) return;
+  state.apiUnavailable = next;
+  refreshPhase();
+  if (state.stage === 'metrics') updateMetrics();
 }
 
 /* 写请求（设置 / 出图选项 / 提示词 / 词条修正与删除 / 清空知识库）一律走同一个闸口：
@@ -321,6 +349,8 @@ const PHASE_LABELS = {
   OFFLINE: '连接中断',
   /* 未认领本页：数据面没启动，不是「连不上」——两者混用会让用户白排查网络。 */
   UNOWNED: '当前不是本插件页',
+  /* 用户点开胶囊认领的页面上接口整片不存在（404 / 非 JSON）：重连不会好，也不是断线。 */
+  API_UNAVAILABLE: '接口不可用',
 };
 
 function phaseLabel(phase) {
@@ -337,6 +367,7 @@ const PHASE_TIPS = {
   SUMMARIZING: '正在生成词条',
   OFFLINE: '无法连接服务，请检查后刷新',
   UNOWNED: '在本插件的插件页打开才取数',
+  API_UNAVAILABLE: '本页没有这套接口：确认插件已启用，且 /patchouli/api 未被反代拦截',
 };
 
 /* 词条状态中文映射：后端只有 verified / tentative / open 三态 */
@@ -3031,6 +3062,10 @@ const state = {
   detailLoading: false,
   status: null,
   statusChecked: false,
+  /* 接口可用性账：连续命中「404 / 非 JSON」的次数与置位（见 requestJson / noteApiRead）。
+     置位只在用户点开胶囊认领的页面上显示成「接口不可用」，不撤销认领。 */
+  apiStreak: 0,
+  apiUnavailable: false,
   tickerIndex: 0,
   lastView: '',
   idleTimer: null,
@@ -4036,10 +4071,13 @@ function monitorViewport() { return viewportEl; }
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
-  /* 监控条状态文案的唯一真源：**不是本插件页**与**真断线**必须分开说。
-     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向。 */
+  /* 监控条状态文案的唯一真源：**不是本插件页** / **接口不可用** / **真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向；
+     用户点开胶囊认领的页面上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
+     认领不撤销 —— 用户已经明确要用这个面板，能做的只是把原因说准。 */
   function monitorStatusText() {
     if (!state.own) return '当前不是本插件页';
+    if (routeProbe.userClaimed && state.apiUnavailable) return '接口不可用';
     return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
   }
 
@@ -4957,10 +4995,13 @@ function startTicker() {
 }
 
 function refreshPhase() {
-  /* 未认领本页时状态位说「不是本插件页」：数据面没启动，报 OFFLINE（连接中断）是错误归因。 */
-  const phase = state.own
-    ? (state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING'))
-    : 'UNOWNED';
+  /* 两种「不是断线」的态要分开说：未认领本页（数据面没启动）、认领后接口整片不存在
+     （404 / 非 JSON，重连也不会好）。报 OFFLINE 是错误归因。 */
+  const phase = !state.own
+    ? 'UNOWNED'
+    : (routeProbe.userClaimed && state.apiUnavailable
+      ? 'API_UNAVAILABLE'
+      : (state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING')));
   if (frameEl) frameEl.setAttribute('data-phase', phase);
   if (!phaseEl) return;
   phaseEl.setAttribute('data-phase', phase);
@@ -5904,9 +5945,14 @@ function collapsePanel() {
 function expandPanel() {
   if (!frameEl) return;
   clearIdleTimer();
-  /* 用户手动点开胶囊 = 明确要这个面板：随机实例 id 的插件页里 DOM 身份文本可能全不命中，
-     这里才允许一次深探测认领本页（不产生任何网络请求）。 */
-  if (!state.own) probeOwnershipDeep();
+  /* 点开即认领：胶囊只在本插件的插件页上出现在用户眼前（壳层挂在任何 /plugins/** 页上，
+     但未认领的页面只留胶囊）。宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / h1 可能
+     一个都读不到 —— 归属是开集问题，正文文本不再参与推断，用户点开胶囊就是唯一凭据：
+     认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。 */
+  if (!state.own && isPluginPage()) {
+    routeProbe.userClaimed = true;
+    syncAuthGate(true);
+  }
   state.collapsed = false;
   if (pillEl) pillEl.classList.remove('is-visible');
   // 先摘除 docked 让面板立即可见，再撤销折叠态播放展开过渡
@@ -6867,13 +6913,15 @@ function isPluginPage() {
 }
 
 /* 窄判定：是不是**本插件**的插件页。
-   名字命中（`/plugins/patchouli-knowledge[:id]`）无条件认领；名字是宿主生成的随机实例 id 时，
-   退回页面身份文本（标题 / 面包屑 / data-plugin-name）。它只影响展开与鉴权门，不影响挂载。 */
+   三条凭据任一成立即认领：路由 key 就是本插件名（`/plugins/patchouli-knowledge[:id]`）、
+   页面身份元数据命中（标题 / 面包屑 / data-* / h1）、用户在胶囊上点开过（`userClaimed`，
+   随机实例 id 的页面唯一可用的凭据）。它只影响展开与鉴权门，不影响挂载。 */
 function routeMatches() {
   const key = pluginRouteKey();
   if (key === '') return false;
   if (routeKeyOwned(key)) return true;
-  return pageIdentityMatches();
+  if (pageIdentityMatches()) return true;
+  return routeProbe.userClaimed;
 }
 
 /* 当前路由键：路径 + hash 变了才重新做软校验（宿主是 SPA，pushState 不会重载脚本）。 */
@@ -6883,30 +6931,12 @@ function currentRouteKey() {
   return `${path}${hash}`;
 }
 
-/* 页面身份取样：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。
-   宿主各版本画的标题层级不一样（h1 / h2 / el-page-header / 自绘 header），单点取样经常落空，
-   所以铺开一排取样点 —— 但**按证据强度分级**，不是把文本拼成一条再判一次：容器越宽，里面越可能
-   装着与本插件无关的普通设置文案（别的插件页写着「知识库范围」就被认领走），泛化词一旦进宽容器，
-   全屏门与 /api 请求就落到别人的配置页上。
-   - 精确源：路由 + `document.title` + data-* / 面包屑 / h1，宿主专为页面身份画的，全部标识都算数；
-   - 宽容器：装的是整块设置表单，只认本插件独有的名字（`DEEP_PROBE_HINTS`）；
-   - 页面正文：只在用户点开胶囊后的深探测里读，同样只认专有名字。
-   自动软校验与深探测共用这张表：新增取样点只改这里，不要再写第二份判断。 */
-const IDENTITY_PRECISE_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
-const IDENTITY_WIDE_SELECTORS = [
-  'h2',
-  '.el-page-header__content',
-  '.el-page-header',
-  'header',
-  '[class*="page-header"]',
-  '[class*="plugin"]',
-];
-const IDENTITY_BODY_SOURCE = { hints: DEEP_PROBE_HINTS, body: true };
-const IDENTITY_SOURCES = [
-  { hints: IDENTITY_HINTS, route: true, selectors: IDENTITY_PRECISE_SELECTORS },
-  { hints: DEEP_PROBE_HINTS, selectors: IDENTITY_WIDE_SELECTORS },
-  IDENTITY_BODY_SOURCE,
-];
+/* 页面身份取样：只读**元数据** —— `document.title` 与宿主专为页面身份画的取样点
+   （data-* / 面包屑 / h1）。正文与宽容器一概不读：归属是开集问题，容器越宽越可能装着与本插件
+   无关的普通设置文案（别的插件页写着「知识库范围」就被认领走），全屏门与 /api 请求就落到别人的
+   配置页上。读不到元数据就当作「认不出」而不是「不是本插件」—— 随机实例 id 的页面由用户点开
+   胶囊认领（见 expandPanel），这条路不需要任何文本推断。 */
+const IDENTITY_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
 
 /* 取样落在浮窗自己的 DOM 里就丢弃：壳层的文案本身带「LLMWiki 知识阅读器」，
    拿它当页面身份会自我认领 —— 别的插件页一挂载就被判成本插件页。 */
@@ -6919,145 +6949,40 @@ function insideOwnPanel(node) {
   return false;
 }
 
-/* 命中判定：`hints` 是这一档允许的标识集，文本小写后比对。 */
-function identityHits(text, hints) {
+/* 命中判定：文本小写后与 `IDENTITY_HINTS` 比对（不区分大小写，包含即算）。 */
+function identityHits(text) {
   if (typeof text !== 'string' || !text) return false;
   const lower = text.toLowerCase();
-  return hints.some((hint) => lower.includes(hint));
+  return IDENTITY_HINTS.some((hint) => lower.includes(hint));
 }
 
-/* 一个证据源的文本。路由与 `document.title` 属精确源；`body` 源走页面正文取样（深探测专用）。
-   取样落在浮窗自身子树里一律丢弃 —— 壳层文案带「LLMWiki 知识阅读器」，读进来就是自我认领。 */
-function identitySourceText(source) {
-  if (source.body) return pageBodyText();
+/* 软校验：元数据命中任一标识即认为当前页是本插件的配置页。命中失败只影响自动展开，不影响挂载。
+   取样量恒有界（一个标题 + 四个节点的 textContent），不遍历页面、不读正文。 */
+function pageIdentityMatches() {
   const parts = [];
-  if (source.route) {
-    try {
-      parts.push(window.location.pathname || '', window.location.hash || '', window.location.search || '');
-    } catch (err) { /* 宿主没暴露 location 时按「认不出」处理 */ }
-    try {
-      if (typeof document.title === 'string') parts.push(document.title);
-    } catch (err) { /* 同上 */ }
-  }
-  for (const selector of source.selectors) {
+  try {
+    if (typeof document.title === 'string') parts.push(document.title);
+  } catch (err) { /* 宿主没暴露 title 时按「认不出」处理 */ }
+  for (const selector of IDENTITY_SELECTORS) {
     let node = null;
     try { node = document.querySelector(selector); } catch (err) { node = null; }
     if (!node || insideOwnPanel(node)) continue;
     const text = typeof node.textContent === 'string' ? node.textContent : '';
     if (text) parts.push(text);
   }
-  return parts.join(' ');
-}
-
-/* 软校验：逐个证据源按它允许的标识集比对，命中任一即认为当前页是本插件的配置页。
-   命中失败只影响自动展开，不影响挂载。正文源不在这里读：那是用户点开胶囊后才跑的深探测，
-   600 字取样不该搭在每轮路由判定上。 */
-function pageIdentityMatches() {
-  for (const source of IDENTITY_SOURCES) {
-    if (source.body) continue;
-    if (identityHits(identitySourceText(source), source.hints)) return true;
-  }
-  return false;
+  return identityHits(parts.join(' '));
 }
 
 /* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。
-   `deepTried` / `deepOwned` 是用户意图兜底的账本：每页只深探测一次，认领结果跟着本页走。 */
-let routeProbe = { key: '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
+   `userClaimed` 是「用户点开胶囊」的凭据：认领跟着本页走 —— 同一页内的 700ms 轮询不清，
+   路由 key 一变（切到别的页）立刻作废。 */
+let routeProbe = { key: '', identified: false, ticks: 0, promoted: false, userClaimed: false };
 
 function resetRouteProbe(key) {
-  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
-}
-
-/* 这些元素的内容不是可见正文：读进来只会制造假命中（脚本里的变量名、样式里的注释文案）。 */
-const DEEP_PROBE_SKIP = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
-
-/* 可见性判定：宿主是 SPA，切换页面时不销毁旧视图 —— 上一个插件页的整块内容、折叠的菜单、
-   没打开的 dialog 都还留在 DOM 里。那些文本不是用户眼前的正文，读进来就会在别人的插件页上
-   命中专有标识而误认领。优先 `checkVisibility`（一次覆盖 display / visibility /
-   content-visibility / opacity，且已算上祖先的 display:none）；内核没实现时退回
-   `getClientRects`（不可见元素没有盒子）。两者都取不到（非 DOM 桩）按可见处理：
-   宁可漏判一次隐藏，也不能把真实正文整片判成不可见。 */
-function isVisibleElement(el) {
-  if (!el) return false;
-  try {
-    if (typeof el.checkVisibility === 'function') {
-      return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) === true;
-    }
-    if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
-  } catch (err) {
-    /* 结点不是真元素（或被克隆走了方法）时按可见处理，交给上面两道文本过滤兜底 */
-  }
-  return true;
-}
-
-/* NodeFilter 常量按数值写：NodeFilter 是浏览器全局，Client 产物在剥离 DOM 的环境里也解析这份
-   源码，单独取会 ReferenceError。4 = SHOW_TEXT，1 = FILTER_ACCEPT，2 = FILTER_REJECT。 */
-const NODE_FILTER_SHOW_TEXT = 4;
-const NODE_FILTER_ACCEPT = 1;
-const NODE_FILTER_REJECT = 2;
-
-/* 页面正文（可见文本）样本：TreeWalker 边遍历边累加，凑满 `DEEP_PROBE_CHARS` 立刻在
-   `walker.currentNode` 处中断。**不用 `body.innerText`**：它先把整页可见文本物化成一条长字符串
-   （一次重排 + 一次全量拷贝），页面越大主线程尖峰越高，而判定只需要最前面的 600 字。
-   这里每个文本节点只取还缺的那几个字符，累计量恒 ≤ 600。
-   浮窗自己的子树一律跳过（壳层文案带「LLMWiki 知识阅读器」，不剔掉就会自我认领）；
-   宿主留在 DOM 里但没画在屏上的子树（别的 SPA 视图 / 折叠菜单 / 没打开的 dialog）同样跳过 ——
-   它们的文本不属于「用户眼前的这一页」，读进来会在别人的插件页上误认领。 */
-function pageBodyText() {
-  const body = document.body;
-  if (!body || typeof document.createTreeWalker !== 'function') return '';
-  let text = '';
-  try {
-    /* 同一父元素下的兄弟文本节点共享可见性：判定一次即可，Map 只活一次取样（≤ 600 字）。 */
-    const visibleParents = new Map();
-    const parentVisible = (el) => {
-      let visible = visibleParents.get(el);
-      if (visible === undefined) {
-        visible = isVisibleElement(el);
-        visibleParents.set(el, visible);
-      }
-      return visible;
-    };
-    const walker = document.createTreeWalker(body, NODE_FILTER_SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement || node.parentNode;
-        if (parent && DEEP_PROBE_SKIP[parent.nodeName]) return NODE_FILTER_REJECT;
-        if (insideOwnPanel(node)) return NODE_FILTER_REJECT;
-        if (parent && !parentVisible(parent)) return NODE_FILTER_REJECT;
-        return NODE_FILTER_ACCEPT;
-      },
-    });
-    let node = walker.nextNode();
-    while (node) {
-      const value = typeof node.nodeValue === 'string' ? node.nodeValue : '';
-      const need = DEEP_PROBE_CHARS - text.length;
-      if (need > 0) text += value.length > need ? value.slice(0, need) : value;
-      /* 够 600 字就停在 currentNode：不把余下的正文遍历完再截断。 */
-      if (text.length >= DEEP_PROBE_CHARS) break;
-      node = walker.nextNode();
-    }
-  } catch (err) {
-    /* 宿主 DOM 不可遍历时按「认不出」处理：宁可让用户多点一次，也不误认别人的页 */
-  }
-  return text;
-}
-
-/* 用户意图兜底：宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / 标题层级可能全都不命中，
-   浮窗只能挂成胶囊。用户**手动点开胶囊**就是明确表态「我要用这个面板」，此时才允许一次深探测：
-   正文前 600 字里出现**专有标识**（`DEEP_PROBE_HINTS`，泛化词不算）即认领本页（启动数据面 + 门禁）。
-   取样已排除浮窗自身子树，命中不会来自壳层文案。
-   每页只探测一次；纯 DOM 读取，不产生任何网络请求。 */
-function probeOwnershipDeep() {
-  if (state.own) return true;
-  if (routeProbe.deepTried) return false;
-  routeProbe.deepTried = true;
-  /* 正文源与宽容器同一档（`IDENTITY_SOURCES`）：只认专有名字，泛化词不算。 */
-  if (!identityHits(identitySourceText(IDENTITY_BODY_SOURCE), IDENTITY_BODY_SOURCE.hints)) return false;
-  /* 认领结果记在本页上：下一次 checkRoute 现算 routeMatches() 时不能把用户刚要到手的页收回去。 */
-  routeProbe.deepOwned = true;
-  routeProbe.identified = true;
-  syncAuthGate(true);
-  return true;
+  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, userClaimed: false };
+  /* 认领作废，接口可用性账一起清：新页面的失败要重新累计，不能带着上一页的「接口不可用」。 */
+  state.apiStreak = 0;
+  state.apiUnavailable = false;
 }
 
 /* 挂载即收回：软校验没认出本插件页时只留悬浮胶囊，不遮住别的插件页。
@@ -7150,11 +7075,12 @@ function checkRoute() {
   if (fresh) mount();
 
   /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。
-     深探测认领过的页面同样是本页：用户在胶囊上的点击不该被下一轮判定反悔。 */
-  syncAuthGate(routeMatches() || routeProbe.deepOwned);
+     用户点开胶囊的认领也算数（`routeProbe.userClaimed`）：下一轮判定不能把用户刚要到手的页
+     收回去，只有路由 key 变了（resetRouteProbe）才作废。 */
+  syncAuthGate(routeMatches());
 
   if (rootEl) {
-    /* 刚进入的页面还没被认领（别人的插件页 / 身份文本未画出来）时只留胶囊：
+    /* 刚进入的页面还没被认领（别人的插件页 / 元数据未画出来）时只留胶囊：
        整窗不盖住宿主表单；用户自己点开的胶囊不再被下一次判定收回。 */
     if ((fresh || newRoute) && !routeProbe.identified) collapseQuietly();
     rootEl.classList.remove('ptx-hidden');

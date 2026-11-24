@@ -45,10 +45,13 @@ export function trafficRuntime(): string {
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
-  /* 监控条状态文案的唯一真源：**不是本插件页**与**真断线**必须分开说。
-     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向。 */
+  /* 监控条状态文案的唯一真源：**不是本插件页** / **接口不可用** / **真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向；
+     用户点开胶囊认领的页面上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
+     认领不撤销 —— 用户已经明确要用这个面板，能做的只是把原因说准。 */
   function monitorStatusText() {
     if (!state.own) return '当前不是本插件页';
+    if (routeProbe.userClaimed && state.apiUnavailable) return '接口不可用';
     return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
   }
 
