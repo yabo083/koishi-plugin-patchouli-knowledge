@@ -15,12 +15,14 @@ import {
   readSettingsOverridesSync,
   readTargetBindingMigration,
   readTargetBindings,
+  readTargetPolicies,
   registerWebUi,
   settingsPath,
   validateSettingsPatch,
   writeSettingsOverrides,
   writeSubscriptionOverride,
   writeTargetBindings,
+  writeTargetPolicies,
 } from '../lib/index.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
@@ -932,6 +934,135 @@ test('SETTINGS-STORE-15: 保存 media.dir 后素材池立即换扫描根', async
       // 清空新根 → 归零：证明读的确实是新目录，而不是把旧目录的结果缓存下来。
       await rm(path.join(secondDir, 'image'), { recursive: true, force: true });
       assert.deepEqual(await system.media.stats('image'), { pending: 0, used: 0 });
+    } finally {
+      system.dispose();
+    }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-16: 策略与绑定表同一次原子写；坏文档读空、写拒绝', async () => {
+  const wikiDir = await makeWiki();
+  const policy = { window: '* 22:00-23:30', entryPerDay: 3, weeklyPerWeek: 1, jitterMinutes: 15 };
+  try {
+    // ① 并发写：策略与绑定表共用同一个文件、同一条串行链，两个键必须同时存在。
+    const [policies, bindings] = await Promise.all([
+      writeTargetPolicies(wikiDir, { '100/A1': policy }),
+      writeTargetBindings(wikiDir, { 周报相册: '100/A1' }),
+    ]);
+    assert.deepEqual(policies, { '100/A1': policy });
+    assert.deepEqual(bindings, { 周报相册: '100/A1' });
+
+    const raw = JSON.parse(await readFile(settingsPath(wikiDir), 'utf8'));
+    assert.equal(raw.version, 1);
+    assert.deepEqual(raw.policies, { '100/A1': policy }, '并发写不得互相抹掉');
+    assert.deepEqual(raw.targetBindings, { 周报相册: '100/A1' });
+    assert.equal(raw.bindingMigration, 1, '绑定表与迁移标记仍是同一次落盘');
+    assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy });
+
+    // ② 标量段 / 订阅表写入必须原样保留策略（单文档读改写）。
+    await writeSettingsOverrides(wikiDir, 'query', { cardMaxHeight: 7200 });
+    await writeSubscriptionOverride(wikiDir, [{ source: '100', targets: ['@chat'], entry: true, weekly: false }]);
+    assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy });
+    assert.deepEqual(await readTargetBindings(wikiDir), { 周报相册: '100/A1' });
+
+    // ③ 清洗：坏窗口 / 非法键 / 越界数值一律丢弃；全空 = 删除键（没有策略）。
+    const cleaned = await writeTargetPolicies(wikiDir, {
+      '100/A1': { ...policy, window: '25:00-26:00' },
+      '@chat:*': policy,
+      'not-a-target': policy,
+      '@chat:200': { window: '1 09:00', entryPerDay: 1000, weeklyPerWeek: 0, jitterMinutes: 0 },
+    });
+    assert.deepEqual(cleaned, {}, '非法项一律丢弃，绝不半信半疑地落盘');
+    assert.equal(
+      JSON.parse(await readFile(settingsPath(wikiDir), 'utf8')).policies,
+      undefined,
+      '空表与键缺失同一语义：不写键',
+    );
+
+    // ④ `~N` 归一到字段（单一真源）：文本去掉后缀，抖动只认 `jitterMinutes`。
+    assert.deepEqual(
+      await writeTargetPolicies(wikiDir, {
+        '@chat:200': { window: '* 22:00-23:00 ~20', entryPerDay: 2, weeklyPerWeek: 0, jitterMinutes: 0 },
+      }),
+      { '@chat:200': { window: '* 22:00-23:00', entryPerDay: 2, weeklyPerWeek: 0, jitterMinutes: 20 } },
+    );
+
+    // ⑤ 坏文档：读路径空表（绝不带病运行），写路径拒绝且文件字节不变。
+    const file = settingsPath(wikiDir);
+    const corrupt = '{"version":1,"policies":{"@chat:200":';
+    await writeFile(file, corrupt, 'utf8');
+    assert.deepEqual(await readTargetPolicies(wikiDir), {});
+    await assert.rejects(
+      writeTargetPolicies(wikiDir, { '100/A1': policy }),
+      (error) => error instanceof SettingsDocumentError && /已拒绝写入/u.test(error.message),
+      '坏文件下一次保存不得把整份设置抹掉',
+    );
+    assert.equal(await readFile(file, 'utf8'), corrupt, '被拒写入不得改动文件字节');
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-17: /api/settings 读写 policies 段并给出目标清单', async () => {
+  const wikiDir = await makeWiki();
+  const policy = { window: '* 22:00-23:30', entryPerDay: 3, weeklyPerWeek: 1, jitterMinutes: 15 };
+  try {
+    // 绑定表先落盘：面板的目标清单取**稳定地址**，不是可读名。
+    await writeTargetBindings(wikiDir, { 周报相册: '100/A1' });
+    const system = new PatchouliKnowledgeSystem(
+      Config({
+        storage: { wikiDir },
+        security: { apiToken: GUARD_API_TOKEN },
+        subscriptions: [{ source: '200', targets: ['@chat'], entry: true, weekly: false }],
+      }),
+      quiet,
+    );
+    try {
+      await system.ready;
+      const { router, request } = createGuardRouterDouble();
+      registerWebUi({ router }, system, '/patchouli');
+
+      const getCtx = guardKoaCtx();
+      await request('GET /patchouli/api/settings', getCtx);
+      assert.equal(getCtx.status, 200);
+      assert.deepEqual(getCtx.body.policies, {}, '未配置 = 空表');
+      assert.deepEqual(getCtx.body.targets, ['100/A1', '@chat:200'], '绑定表的稳定地址 + 每个投递 @chat 的行');
+
+      // 合法保存：整张表落盘，响应即新真源。
+      const postCtx = guardKoaCtx({ body: { section: 'policies', patch: { '100/A1': policy } } });
+      await request('POST /patchouli/api/settings', postCtx);
+      assert.equal(postCtx.status, 200);
+      assert.deepEqual(postCtx.body, { ok: true, value: { '100/A1': policy } });
+      assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy });
+
+      const after = guardKoaCtx();
+      await request('GET /patchouli/api/settings', after);
+      assert.deepEqual(after.body.policies, { '100/A1': policy });
+      assert.deepEqual(after.body.targets, ['100/A1', '@chat:200']);
+
+      // 非法键 / 非法窗口 / 非对象都是 400，且文件不变。
+      for (const patch of [{ '@chat:*': policy }, { 'not-a-target': policy }, { '100/A1': { ...policy, window: '99:00-00:00' } }, null]) {
+        const badCtx = guardKoaCtx({ body: { section: 'policies', patch } });
+        await request('POST /patchouli/api/settings', badCtx);
+        assert.equal(badCtx.status, 400, `${JSON.stringify(patch)} 必须 400`);
+        assert.equal(badCtx.body.ok, false);
+        assert.match(badCtx.body.error, /policies/u);
+      }
+      assert.deepEqual(await readTargetPolicies(wikiDir), { '100/A1': policy }, '400 不得改动文件');
+
+      // 清空 = 删除策略；标量段保存不受影响。
+      const clearCtx = guardKoaCtx({ body: { section: 'policies', patch: {} } });
+      await request('POST /patchouli/api/settings', clearCtx);
+      assert.equal(clearCtx.status, 200);
+      assert.deepEqual(clearCtx.body.value, {});
+      assert.deepEqual(await readTargetPolicies(wikiDir), {});
+
+      const queryCtx = guardKoaCtx({ body: { section: 'query', patch: { cardMaxHeight: 7300 } } });
+      await request('POST /patchouli/api/settings', queryCtx);
+      assert.equal(queryCtx.status, 200, '原有标量段保存路径不得被 policies 分支影响');
+      assert.equal((await readSettingsOverrides(wikiDir)).query.cardMaxHeight, 7300);
     } finally {
       system.dispose();
     }

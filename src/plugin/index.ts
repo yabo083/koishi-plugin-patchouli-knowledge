@@ -67,6 +67,7 @@ import {
   readTargetBindingMigration,
   readTargetBindings,
   readTargetBindingsSync,
+  readTargetPolicies,
   validateMergedSettings,
   validateSettingsPatch,
   writeSettingsOverrides,
@@ -94,7 +95,9 @@ import { normalizeTopicSettingsPatch, readTopicSettings } from './topic-settings
 import { resolveTopicSystemPrompt } from '../dispatcher/prompts';
 import { TopicCurator, type TopicRunResult } from '../wiki/topics';
 import { renderWeeklyAlbumSummaryPng } from './card';
-import { deliverCardPng, deliverCardToTargets, deliverElements } from './delivery';
+import { deliverElements } from './delivery';
+import { DeliveryGate, createBroadcastDeliver } from './delivery-gate';
+import { DeliveryStateStore, deliveryStatePath } from './delivery-state';
 import { maskPublicView } from '../wiki/mask';
 import { toPublicView } from '../wiki/public-view';
 import { TopicScheduler } from './topic-scheduler';
@@ -138,10 +141,11 @@ import { ShadowLedger } from '../telemetry/shadow-ledger';
 import type { PatchouliInspector } from '../telemetry/inspector';
 import { CardSequence, cardSequencePath } from '../media/card-sequence';
 import { collectSessionNames, renderEntryCard } from './card-pipeline';
-import { planEntryTargets } from './entry-delivery';
+import { planEntryTargets, type EntryDeliveryTarget } from './entry-delivery';
 import {
   ALBUM_TARGET_PATTERN,
   CHAT_TARGET,
+  bareChannelId,
   compileSubscriptions,
   entryTargetsFor,
   formatSubscriptionLogLines,
@@ -193,6 +197,7 @@ export {
   readSubscriptionOverrideSync,
   readTargetBindings,
   readTargetBindingsSync,
+  readTargetPolicies,
   redactSettingsSection,
   sanitizeTargetBindings,
   settingsPath,
@@ -2853,11 +2858,44 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
     );
   }
 
-  // 素材池补货：不阻塞插件挂载，断网 / 上游 5xx 只留一条警告。
+  // 素材池补货：不阻塞插件挂载，断网 / 5xx 只留一条警告。
   void system.prefillMedia();
 
-  // 词条投递：每轮讨论沉淀后立刻出图并投递（相册目标复用「知识周报」的相册选择）。
+  // 投递闸门：词的定时窗口、每目标限量、随机抖动与批量外发都收敛到这里。
+  // 状态独立落在 `.patchouli/delivery-state.json`（队列 + 每目标周期计数），
+  // 与 `settings.json`（用户配置）分开：一次面板保存不该抹掉待投队列。
+  const deliveryGate = new DeliveryGate({
+    store: new DeliveryStateStore({ path: deliveryStatePath(system.wikiDir), logger }),
+    policies: () => readTargetPolicies(system.wikiDir),
+    render: async (item) => {
+      // 进程重启后队列里只剩规格没有产物：词条按 id 重渲，周报产物随进程丢失（见 delivery-gate 注释）。
+      if (item.kind !== 'entry') return undefined;
+      const rendered = await renderEntryCard(ctx, system, item.eventKey, {
+        maskNames: system.getCardSettings().maskNames,
+        maxHeight: system.settings('query').cardMaxHeight,
+      });
+      return rendered.kind === 'image' ? rendered.image : undefined;
+    },
+    deliver: createBroadcastDeliver(ctx, logger),
+    logger,
+  });
+  void deliveryGate.start().catch((error: unknown) => {
+    logger.warn(`[Patchouli] 投递闸门启动失败: ${error instanceof Error ? error.message : String(error)}`);
+  });
+
+  /**
+   * 词条投递目标的策略键：相册用稳定地址 `群号/相册ID`，群聊用 `@chat:<来源群>`。
+   *
+   * `@chat` 必须带来源群：同一个 `@chat` 在不同来源行里指向不同群，只写 `@chat` 会让策略互相覆盖。
+   */
+  function entryTargetKey(target: EntryDeliveryTarget, source: string): string {
+    if (target.kind === 'album') return `${bareChannelId(target.channelId)}/${target.albumId}`;
+    return `${CHAT_TARGET}:${bareChannelId(source)}`;
+  }
+
+  // 词条投递：每轮讨论沉淀后立刻出图并入队（相册目标复用「知识周报」的相册选择）。
   // `redirectChannelId` 非空时全部改发该群聊天，用于灰度观察。
+  // 入队之后由闸门决定「什么时候发、还能发几条」：窗口外排队，超额丢弃。
   system.setEntryCardSink(async (entryId: string, sourceChannelId: string) => {
     // 功能总闸：词条投递关闭时直接返回（沉淀与索引照常，只是不外发）。
     if (config.features.entries === false) return;
@@ -2885,26 +2923,21 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       logger.warn(`[Patchouli] 词条《${entryId}》出图失败（${rendered.kind}），本轮不投递`);
       return;
     }
-    // 重试与幂等归 miyako-delivery：这里只透传策略，退避由服务实现（指数退避 + Write-Ahead）。
-    const batch = await deliverCardToTargets(ctx, targets, rendered.image, {
-      scope: 'patchouli:entry',
-      dedupeKeyOf: (target) =>
-        `${entryId}:${target.channelId}${target.kind === 'album' ? `/${target.albumId}` : ''}`,
-      retry: { maxAttempts: 4, baseDelayMs: 3000 },
+    const offer = await deliveryGate.offer({
+      kind: 'entry',
+      source: sourceChannelId,
+      eventKey: entryId,
+      targets: targets.map((target) => ({ targetKey: entryTargetKey(target, sourceChannelId), target })),
+      png: rendered.image,
     });
-    for (const outcome of batch.outcomes) {
-      if (!outcome.ok && outcome.skipped === undefined) {
-        logger.warn(
-          `[Patchouli] 词条投递失败 ${outcome.error?.code ?? 'UNKNOWN'}（尝试 ${outcome.attempts} 次）` +
-            `: ${outcome.error?.message ?? ''}`,
-        );
-      }
-    }
     const targetText = targets
       .map((target) => (target.kind === 'album' ? `相册 ${target.channelId}/${target.albumId}` : `群 ${target.channelId}`))
       .join('、');
     logger.info(
-      `[Patchouli] 词条《${entryId}》投递 ${batch.delivered}/${batch.total}（来源群 ${sourceChannelId}，目标：${targetText}）`,
+      `[Patchouli] 词条《${entryId}》投递入队 ${offer.accepted}/${targets.length}` +
+        (offer.deferred > 0 ? `（${offer.deferred} 个待窗口）` : '') +
+        (offer.dropped > 0 ? `（${offer.dropped} 个超额 / 队满丢弃）` : '') +
+        `（来源群 ${sourceChannelId}，目标：${targetText}）`,
     );
   });
 
@@ -3066,8 +3099,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
     const weekKey = isoWeekKey(firedAt);
     const fireKey = String(Math.floor(firedAt / 60_000));
     const snapshot = system.subscriptions();
+    // 面板刚存过策略：预筛前先刷新一次，免得拿挂载时的旧缓存去判断本周额度。
+    await deliveryGate.refresh();
     // 没有任何相册目标就别占掉本轮的触发槽（`gateDailySlot` 一旦放行即算跑过）。
-    if (planWeeklyAlbumSources(snapshot, config.albumDelivery.albums).length === 0) {
+    // 额度预筛：本周已用尽的相册不算「有目标」——否则会白占触发槽、还白跑一次取材。
+    const weeklySources = planWeeklyAlbumSources(snapshot, config.albumDelivery.albums, (album) =>
+      deliveryGate.allows('weekly', album, firedAt),
+    );
+    if (weeklySources.length === 0) {
       return { ok: false, reason: 'album-not-configured', uploaded: 0 };
     }
     if (options.force !== true) {
@@ -3102,16 +3141,34 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
           maxHeight: system.settings('query').cardMaxHeight,
           weekLabel,
         }),
-      deliver: (album, png, dedupeKey) => {
+      allowTarget: (album) => deliveryGate.allows('weekly', album, firedAt),
+      deliver: async (album, png, _dedupeKey, source) => {
         const separator = album.indexOf('/');
         const groupId = album.slice(0, separator).trim();
         const albumId = album.slice(separator + 1).trim();
-        return deliverCardPng(
-          ctx,
-          { kind: 'album', channelId: `onebot:${groupId}`, albumId },
+        if (separator <= 0 || groupId === '' || albumId === '') {
+          return { ok: false, error: { code: 'INVALID_TARGET', message: `相册目标不合法：${album}` } };
+        }
+        // 产物进闸门而不是直接外发：目标窗口外就排队，本周额度用尽就丢弃（都记账告警）。
+        const offer = await deliveryGate.offer({
+          kind: 'weekly',
+          source,
+          eventKey: fireKey,
+          targets: [
+            {
+              targetKey: `${groupId}/${albumId}`,
+              target: { kind: 'album', channelId: `onebot:${groupId}`, albumId },
+            },
+          ],
           png,
-          { scope: 'patchouli:weekly-album', dedupeKey },
-        );
+        });
+        if (offer.accepted > 0) return { ok: true };
+        return {
+          ok: false,
+          ...(offer.duplicates > 0
+            ? { skipped: 'already-queued' }
+            : { error: { code: 'POLICY_DROP', message: `目标 ${album} 本周额度已用尽或队列已满` } }),
+        };
       },
     });
   }
@@ -3205,6 +3262,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   });
 
   ctx.on('dispose', () => {
+    // 停闸先行：定时器停下后不再有新的批量外发，随后清理各子系统才不会撞上半销毁状态。
+    try {
+      deliveryGate.dispose();
+    } catch (error) {
+      logger.warn(
+        `[Patchouli] 卸载清理失败（deliveryGate）: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     // 同样不可抛：调度器与系统各清各的，一个失败不得连累另一个。
     try {
       topicScheduler.dispose();

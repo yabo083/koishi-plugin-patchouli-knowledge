@@ -14,7 +14,9 @@ import {
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
-import { SETTINGS_META } from '../plugin/settings-store';
+import { SETTINGS_META, readTargetPolicies, writeTargetPolicies } from '../plugin/settings-store';
+import { validatePolicies } from '../plugin/policy-resolve';
+import { CHAT_TARGET } from '../plugin/subscriptions';
 import { albumTargetValues, albumValue, loadAlbumCatalog, type AlbumCandidate } from '../plugin/albums';
 import {
   DEFAULT_TUNING_PARAMETERS,
@@ -877,6 +879,27 @@ async function readAlbumCatalogFor(
   }
 }
 
+/**
+ * 面板「投递策略」区块的目标清单：当前订阅里真实存在的目标稳定地址。
+ *
+ * 由绑定表的**值**（`群号/相册ID`）与每个投递 `@chat` 的行（`@chat:<来源群>`）合成：
+ * 策略挂在稳定地址上，可读名 / 探测顺序变化都不该产生新目标。去重后按字典序排序，
+ * 面板顺序稳定（不随绑定表插入顺序抖动）。
+ */
+function policyTargetKeys(system: PatchouliKnowledgeSystem): string[] {
+  const keys = new Set<string>();
+  if (typeof system.targetBindingsSnapshot === 'function') {
+    for (const address of Object.values(system.targetBindingsSnapshot())) keys.add(address);
+  }
+  if (typeof system.subscriptionTable === 'function') {
+    for (const row of system.subscriptionTable().rows) {
+      // 同一行里的 `@chat` 指向该行的来源群：键必须带来源，否则不同群互相覆盖策略。
+      if (row.targets.includes(CHAT_TARGET)) keys.add(`${CHAT_TARGET}:${row.source}`);
+    }
+  }
+  return [...keys].sort();
+}
+
 export function registerWebUi(
   ctx: Context,
   system: PatchouliKnowledgeSystem,
@@ -1148,16 +1171,25 @@ export function registerWebUi(
     }
   });
 
-  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）
+  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判 / 投递策略）
   //
-  // GET 返回**合并后**的五段值（覆盖层 > koishi.yml > Schema 默认值）与字段元数据；
-  // POST 只接受 {section, patch}，未知键丢弃、非法值 400。写入落在
+  // GET 返回**合并后**的五段值（覆盖层 > koishi.yml > Schema 默认值）与字段元数据，
+  // 外加投递策略（`policies`）与当前真实存在的目标清单（`targets`，面板据此渲染区块）。
+  // POST 只接受 {section, patch}，未知键丢弃、非法值 400；`section: 'policies'` 走
+  // 严格的整表校验（键形状 / 窗口语法 / 数值边界）。写入落在
   // `<wikiDir>/.patchouli/settings.json`，绝不改宿主 config（ADR-022）。
   // 校验分两层且都在落盘之前：字段级 + 「合并后」跨字段（触发器的 `normalizeTriggerOptions`）。
   // 任一层不过都是 400 且文件与运行态都不变——不会再出现「500 但坏值已落盘」。
-  router.get(`${cleanBase}/api/settings`, (kCtx: KoishiKoaContext) => {
+  router.get(`${cleanBase}/api/settings`, async (kCtx: KoishiKoaContext) => {
     kCtx.type = 'application/json';
-    kCtx.body = { sections: system.getSettingsSections(), meta: SETTINGS_META };
+    const wikiDir = typeof system.wikiDir === 'string' && system.wikiDir.trim() !== '' ? system.wikiDir : undefined;
+    kCtx.body = {
+      sections: system.getSettingsSections(),
+      meta: SETTINGS_META,
+      // 策略缺失 / 文件损坏 → 空表（= 全天不限量），读路径绝不 500。
+      policies: wikiDir === undefined ? {} : await readTargetPolicies(wikiDir),
+      targets: policyTargetKeys(system),
+    };
   });
 
   router.post(`${cleanBase}/api/settings`, async (kCtx: KoishiKoaContext) => {
@@ -1165,6 +1197,29 @@ export function registerWebUi(
     if (typeof body !== 'object' || body === null) {
       kCtx.status = 400;
       kCtx.body = { ok: false, error: 'Invalid payload' };
+      return;
+    }
+    // 投递策略是整张结构化表，不是标量段：严格校验后与订阅表 / 绑定表共用同一次原子写。
+    if (body.section === 'policies') {
+      kCtx.type = 'application/json';
+      const checked = validatePolicies(body.patch);
+      if (!checked.ok) {
+        kCtx.status = 400;
+        kCtx.body = { ok: false, error: checked.error };
+        return;
+      }
+      const wikiDir = typeof system.wikiDir === 'string' && system.wikiDir.trim() !== '' ? system.wikiDir : undefined;
+      if (wikiDir === undefined) {
+        kCtx.status = 500;
+        kCtx.body = { ok: false, error: '知识库目录不可用，投递策略无法落盘' };
+        return;
+      }
+      try {
+        kCtx.body = { ok: true, value: await writeTargetPolicies(wikiDir, checked.value) };
+      } catch (err: unknown) {
+        kCtx.status = 500;
+        kCtx.body = { ok: false, error: errorMessage(err) };
+      }
       return;
     }
     try {

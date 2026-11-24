@@ -194,6 +194,7 @@
 | **API-TOPICS-01** | 手动主题校准入口 | 缺省按**订阅目标群**扇出（订阅表生效时只跑来源群，表为空才回退旧白名单；`features.topics` 总闸关掉时目标为空）、`force` 透传、逐群返回 `createdTopicIds/updatedTopicIds/assignedEntryIds`；指定 `channelId` 只跑该群且不再解析目标表 | `registerWebUi` 路由 + `topicTargets` / `runTopics` 调用记录；真 system 侧见 `SUBS-HTTP-10` |
 | **AUTH-01..17** | 管理面鉴权（会话 + 首次初始化） | 未配置 fail closed；登录换 64 位会话、Cookie/Bearer 双通道；错误令牌 / 未知会话 / 无凭据分别归类；长期令牌可运维直连；过期即拒且过半滑动续期；登出吊销幂等；守卫 401 短路；Cookie 不含长期令牌；`/session` 自检与 `bootstrapRequired`；会话表上限；`/bootstrap` 生成 32B 密钥并落盘 0600、自定义密钥 ≥16、已配置 409、重启用落盘密钥恢复；私网/回环判定；公网或 `x-forwarded-for` 透传公网时 423 且不落定 | `TokenAuthority` / `handleBootstrap` |
 | **DELIVERY-BATCH-01..04** | 批量投递 | 有 `broadcast` 时单次提交并透传 retry；只有 `deliver` 时退化为逐个；无服务时相册目标结构化失败；空目标表直接成功 | `deliverCardToTargets` |
+| **SCHED-01..17** | 定时投递闸门（窗口 / 限量 / 抖动 / 批量） | 无策略直通；窗口内立即投、窗口外排队到窗口首刻；跨午夜 `22:00-02:00` 的 01:30 属开始日；每目标独立额度、跨自然日 / 自然周惰性清零；同一事件投 3 目标各扣 1 次；队列与计数跨重启且同事件键不重复扣；抖动 `deliverAt` 落库、重启不重算；3 条同时到期只发一次 `broadcast`；按 `outcomes` 只重试失败目标；第 1025 条拒收且旧项保留；坏状态文件按空状态运行且不被覆盖；并发 `offer` 只入队一次；`dispose` 停闸不再发送；目标失效出队并告警 | `DeliveryGate`（注入时钟 / 定时器 / render / broadcast 桩） |
 | **ENTRY-DELIVER-01..05** | 词条投递目标 | 未改道时按相册表逐个投递；配置 `redirectChannelId` 后只发该群聊天（相册被忽略）；改道目标允许带平台前缀；非法 / 重复相册串丢弃；两者皆空返回空表供调用方告警 | `planEntryTargets` |
 | **MEDIA-01..08** | 卡片素材池 | 目录为空即禁用（零 I/O）；低于水位补到 `batch` 条、达水位不重复请求；在线消费即删并返回 `data:` URI；文件名 FIFO；一言去重并截断 120 字；离线模式不触网、消费转入 `used/`、冷却后回到队列（环形）；非图片响应不落盘；配置 `apiKey` 时附加 `key` 参数且保留既有查询串、未配置则匿名 | `MediaPool` + 桩 fetch |
 | **CARDSEQ-01..06** | 卡片序号（按群独立） | 每群各自从 1 递增；同一词条恒同号且与传入群无关；跨实例延续（文件 `{version:2,channels:{群:{next,map}}}`）；同 id 并发同号、异 id 不重号；结构不符 / 损坏一律当空表从头数；空路径只内存计数 | `CardSequence` |
@@ -324,6 +325,7 @@
 | **API-TOPIC-02** | 手动主题校准按目标群扇出、force 透传并返回逐群结果 | `api.test.mjs` |
 | **API-TOPIC-03** | 无 channelId 的批量校准只跑订阅目标（不碰 `config.channels` 旧群与库内历史群） | `api.test.mjs` |
 | **CARD-07** | 每周相册总结一页列出主题，不复制正文，PNG 裁剪到实际高度 | `card-delivery.test.mjs` |
+| **SCHED-01..17 / DELIVERY-GATE-*** | 闸门 17 条时序用例 + 渲染失败 3 次退避、单批 20 条切批、`scope` / 去重键、`@chat` 按来源群建策略键 | `delivery-gate.test.mjs` |
 | **DELIVERY-BATCH-02** | 服务只有 deliver、没有 broadcast → NO_BROADCAST，不退化逐个投递 | `delivery-batch.test.mjs` |
 | **DELIVERY-BATCH-03** | 无投递服务时结构化失败，不抛出 | `delivery-batch.test.mjs` |
 | **DELIVERY-BATCH-04** | 空目标表直接成功返回，不发任何请求 | `delivery-batch.test.mjs` |

@@ -609,6 +609,35 @@ export interface SubscriptionRow {
 }
 
 /**
+ * 单个投递目标的策略（定时窗口 / 限量 / 抖动）。
+ *
+ * 宿主是**投递目标**（稳定地址），不是订阅行：同一行里的不同目标各自独立配置。
+ * 没有任何策略的目标 = 全天不限时、不限量、不抖动，行为与升级前完全一致。
+ */
+export interface TargetPolicy {
+  /**
+   * 投递窗口文本；空串 = 全天不限时。语法见 `plugin/policy-resolve.ts`：
+   * `* HH:MM-HH:MM` / `W HH:MM-HH:MM` / `W HH:MM` / `HH:MM-HH:MM`，可带 `~N` 抖动后缀。
+   * 归一化后不带 `~N`——抖动只认 `jitterMinutes`（单一真源）。
+   */
+  window: string;
+  /** 词条每自然日上限（上海日切）；0 = 不限。 */
+  entryPerDay: number;
+  /** 周报每自然周上限（ISO 周，周一起）；0 = 不限。 */
+  weeklyPerWeek: number;
+  /** 窗口内随机抖动上界（分钟）；0 = 不抖动，绝不越过窗口右边界。 */
+  jitterMinutes: number;
+}
+
+/**
+ * 投递策略表：键 = 目标稳定地址，与 `targetBindings` 并列、**同一次原子写**。
+ *
+ * 键只能是 `@chat:<来源群>`（同一个 `@chat` 在不同来源行里指向不同群，必须带来源）
+ * 或 `群号/相册ID`。面板保存整张表，未出现的键 = 无策略。
+ */
+export type TargetPolicies = Record<string, TargetPolicy>;
+
+/**
  * 高级设置：控制台里由 `advancedMode` 开关**条件渲染**（关闭时不显示，但默认值仍在）。
  *
  * 运行时由 `apply()` 与 `PatchouliKnowledgeSystem` 构造**摊平到顶层**，
