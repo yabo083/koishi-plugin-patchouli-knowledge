@@ -430,6 +430,23 @@ export class DeliveryGate {
     return this.quotaStatus(kind, key, at, policy).allowed;
   }
 
+  /**
+   * 本期额度已满时，这个目标还有没有下一班。
+   *
+   * `allows()` 只看**当前周期**的计数，所以「今天就满了」不等于「这条没机会」：
+   * cron 把下一次到点排在下一个自然日 / 自然周时，那一条该入队等新周期的额度，
+   * 而不是在预筛里被当成超额丢掉。返回值 = 候选 `dueAt` 落在别的周期。
+   *
+   * 同步只读：与 `allows()` 同一份策略缓存口径，不占额、不改计数。
+   */
+  wouldDeferPastPeriod(kind: DeliveryKind, source: string, targetKey: string, at = this.clock()): boolean {
+    const policy = this.policiesCache[this.policyKeyOf(source, targetKey)];
+    // 无策略 = 立即投，下一次到点就是现在，不存在「等到下一周期」。
+    if (policy === undefined) return false;
+    const dueAt = this.cronDueAt(policy, kind, at);
+    return periodKeyFor(kind, dueAt) !== periodKeyFor(kind, at);
+  }
+
   /** 状态快照（只读副本）。 */
   snapshot(): DeliveryGateSnapshot {
     return {
@@ -534,12 +551,25 @@ export class DeliveryGate {
   }
 
   /**
-   * 该条目的到期时刻（epoch ms）。
+   * cron 给出的候选到期时刻（epoch ms，不含队列随机间隔）。
    *
    * - 定时取**本类型**的那一条 cron（词条 `entryCron` / 周报 `weeklyCron`）；
    * - 空 cron（或解析不出来）：`at`，立即投；
-   * - 非空 cron：`nextCronAt`（严格大于 `at` 的下一次触发，上海时区）；
-   * - 同（来源群 × 目标）在队列里已有条目时再退一个随机间隔：相邻两条不挤在同一毫秒。
+   * - 非空 cron：`nextCronAt`（严格大于 `at` 的下一次触发，上海时区）。
+   */
+  private cronDueAt(policy: TargetPolicy, kind: DeliveryKind, at: number): number {
+    const cron = cronForKind(policy, kind);
+    const spec = cron === '' ? null : parseCron(cron);
+    /* 同一分钟内的触发要算「现在」：全局 cron 生成周报的时刻通常就等于目标的 weeklyCron
+       时刻，而 `nextCronAt` 是严格大于，会把每份周报整整推迟一周。回看一分钟即覆盖「本分钟已到点」。 */
+    const sameMinute = spec !== null && nextCronAt(spec, at - 60_000) <= at;
+    return spec === null || sameMinute ? at : nextCronAt(spec, at);
+  }
+
+  /**
+   * 该条目的到期时刻（epoch ms）。
+   *
+   * 见 `cronDueAt`；同（来源群 × 目标）在队列里已有条目时再退一个随机间隔，相邻两条不挤在同一毫秒。
    */
   private planDueAt(
     policy: TargetPolicy,
@@ -548,12 +578,7 @@ export class DeliveryGate {
     targetKey: string,
     at: number,
   ): number {
-    const cron = cronForKind(policy, kind);
-    const spec = cron === '' ? null : parseCron(cron);
-    /* 同一分钟内的触发要算「现在」：全局 cron 生成周报的时刻通常就等于目标的 weeklyCron
-       时刻，而 `nextCronAt` 是严格大于，会把每份周报整整推迟一周。回看一分钟即覆盖「本分钟已到点」。 */
-    const sameMinute = spec !== null && nextCronAt(spec, at - 60_000) <= at;
-    const candidate = spec === null || sameMinute ? at : nextCronAt(spec, at);
+    const candidate = this.cronDueAt(policy, kind, at);
     let previous: number | undefined;
     for (const item of this.state.queue) {
       if (item.source !== source || item.targetKey !== targetKey) continue;

@@ -6506,6 +6506,9 @@ const TAG_POLICY_COUNT_ATTR = 'data-ptx-policy-count';
 const TAG_POLICY_PLUS_TEXT = /^\+\s*\d+$/;
 const TAG_POLICY_PICKER_CLASS = 'ptx-policy-picker';
 const TAG_POLICY_TARGET_CLASS = 'ptx-policy-target';
+/* 认不出来源时的两条提示：同名目标挂在多行 → 不确定；行内与缓存都读不到 → 还没读到。 */
+const TAG_POLICY_NOTICE_AMBIGUOUS = '无法确定所属监听群，请点开下拉后重试';
+const TAG_POLICY_NOTICE_UNKNOWN = '读不到所属监听群，请点开投递群下拉后重试';
 /* 一行最多 16 个目标、同一监听群可以有多行，目标总数因此没有单独上限（≤ 行数 × 16）。
    列表一次只铺一页按钮把单屏 DOM 压住，剩下的用「继续显示」翻页——每个目标都必须点得到。 */
 const TAG_POLICY_PICKER_PAGE = 32;
@@ -6923,6 +6926,70 @@ function ensureTagPolicyStyles(doc) {
   doc.head.appendChild(style);
 }
 
+/* ---------------- 订阅表回执缓存（按目标名反查监听群） ----------------
+ * 宿主把「监听群」渲染成输入框，且部分版本连 `input.value` 都不落在我们读得到的地方，
+ * 行内解析因此可能整行读空。此时唯一还能回答「这个标签属于哪个监听群」的是订阅表接口：
+ * `refresh()` 预取一次、`openTargetPicker` 取过一次都写进这里。
+ *
+ * 物理边界：整页只留一条（`{ rows, at }`，≤1 项），60s 过期；行数与每行目标数都封顶，
+ * 超出的部分直接丢弃——兜底路径读不全就返回「认不出」，不把整张表常驻进内存。
+ * 缓存里只存 `{ source, targets }`：策略真源在 `/api/policies`，行内其它字段一概不留。 */
+const SUBSCRIPTION_CACHE_TTL = 60000;
+const SUBSCRIPTION_CACHE_MAX_ROWS = 512;
+const SUBSCRIPTION_CACHE_MAX_TARGETS = 32;
+let subscriptionCache = { rows: [], at: 0 };
+
+function cacheSubscriptionRows(payload) {
+  const source = payload && Array.isArray(payload.rows) ? payload.rows : (Array.isArray(payload) ? payload : []);
+  const rows = [];
+  for (const row of source) {
+    if (rows.length >= SUBSCRIPTION_CACHE_MAX_ROWS) break;
+    if (!row || typeof row !== 'object') continue;
+    const group = String(row.source == null ? '' : row.source).trim();
+    if (!group) continue;
+    const list = Array.isArray(row.targets) ? row.targets : [];
+    const targets = [];
+    for (const raw of list) {
+      if (targets.length >= SUBSCRIPTION_CACHE_MAX_TARGETS) break;
+      const target = typeof raw === 'string' ? raw.trim() : '';
+      if (target && targets.indexOf(target) < 0) targets.push(target);
+    }
+    if (targets.length) rows.push({ source: group, targets });
+  }
+  subscriptionCache = { rows, at: Date.now() };
+  return subscriptionCache;
+}
+
+function liveSubscriptionRows() {
+  if (!subscriptionCache.at) return null;
+  if (Date.now() - subscriptionCache.at > SUBSCRIPTION_CACHE_TTL) {
+    subscriptionCache = { rows: [], at: 0 };
+    return null;
+  }
+  return subscriptionCache.rows.length ? subscriptionCache.rows : null;
+}
+
+/**
+ * 按标签文本反查监听群。
+ * 恰好命中一行 → `{ source }`；命中多行 → `{ ambiguous: true }`（同名目标可以同时挂在
+ * 多个监听群下，猜一个等于替用户改错群，交给调用方提示重试）；无缓存 / 无匹配 → null。
+ */
+function resolveSourceByTarget(target) {
+  const name = String(target == null ? '' : target).trim();
+  if (!name) return null;
+  const rows = liveSubscriptionRows();
+  if (!rows) return null;
+  let matches = 0;
+  let group = '';
+  for (const row of rows) {
+    if (row.targets.indexOf(name) < 0) continue;
+    matches += 1;
+    group = row.source;
+    if (matches > 1) return { ambiguous: true };
+  }
+  return matches === 1 ? { source: group } : null;
+}
+
 /**
  * 投递群标签右键菜单。
  * 依赖全部注入（document / isOwnPage / identify / claim / read / write / readTargets），本段因此可被测试单独载入。
@@ -6931,7 +6998,8 @@ function ensureTagPolicyStyles(doc) {
  * `read` 返回 `GET /api/policies` 的载荷（数组或 `{ policies }`），`write` 抛错时
  * 的 `message` 会原样显示在菜单里（服务端 400 的 body.error 已在 writeJson 里抬出来）。
  * `readTargets` 返回 `GET /api/subscriptions` 的载荷（`{ rows: [{ source, targets }] }`）：
- * 只有 `+ N` 折叠标签需要它——被折叠的目标不在 DOM 里，只能从订阅表取回。
+ * 只有 `+ N` 折叠标签需要它列目标；标签行内读不到监听群时（宿主把群号藏进组件状态）
+ * 也靠它按目标名反查所属行。回执会缓存成整页一条、60s 过期，给右键时的兜底用。
  */
 function createTagPolicyMenu(options) {
   const opts = options || {};
@@ -7003,20 +7071,33 @@ function createTagPolicyMenu(options) {
     return source;
   }
 
+  /* 标签文本 = 目标名。老版本 Element Plus 没有 `.el-tag__content`：去掉关闭按钮的文字后取剩余。 */
+  function readTagTarget(tag) {
+    if (!tag || typeof tag.querySelector !== 'function') return '';
+    const labelNode = tag.querySelector('.el-tag__content');
+    let target = String((labelNode && labelNode.textContent) || '').trim();
+    if (!target) {
+      const closeBtn = tag.querySelector('.el-tag__close');
+      const raw = String(tag.textContent == null ? '' : tag.textContent);
+      target = (closeBtn && closeBtn.textContent ? raw.split(closeBtn.textContent).join('') : raw).trim();
+    }
+    return target;
+  }
+
   function readTagInfo(tag) {
     if (!tag || typeof tag.closest !== 'function') return null;
     const row = tag.closest('tr') || tag.closest('[role="row"]');
     if (!row) return null;
-    const source = readRowSource(row);
-    const labelNode = tag.querySelector ? tag.querySelector('.el-tag__content') : null;
-    let target = String((labelNode && labelNode.textContent) || '').trim();
-    if (!target) {
-      /* 老版本 Element Plus 没有 `.el-tag__content`：去掉关闭按钮的文字后取剩余。 */
-      const closeBtn = tag.querySelector ? tag.querySelector('.el-tag__close') : null;
-      const raw = String(tag.textContent == null ? '' : tag.textContent);
-      target = (closeBtn && closeBtn.textContent ? raw.split(closeBtn.textContent).join('') : raw).trim();
+    const target = readTagTarget(tag);
+    if (!target) return null;
+    let source = readRowSource(row);
+    if (!source) {
+      /* 行内读不到监听群（宿主把它藏在组件状态里）：按目标名回查订阅表缓存。
+         命中多行 / 无缓存时不猜，返回 null 由调用方提示——绝不拿别的群号改写策略。 */
+      const hit = resolveSourceByTarget(target);
+      if (!hit || hit.ambiguous) return null;
+      source = hit.source;
     }
-    if (!source || !target) return null;
     return { row, source, target, key: tagPolicyKey(source, target) };
   }
 
@@ -7106,17 +7187,82 @@ function createTagPolicyMenu(options) {
     paintCollapsed(host);
   }
 
+  /* 认不出来源时的轻提示：一行说明 + 关闭。静默什么都不发生是最坏的结果——
+     用户以为右键坏了，实际上只要点开下拉让行内出现群号就能配置。 */
+  function openNotice(tag, text, x, y) {
+    ensureTagPolicyStyles(doc);
+    closeMenu();
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+    const root = doc.createElement('div');
+    root.className = TAG_POLICY_MENU_CLASS + ' ptx-policy-notice' + menuThemeClass();
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', '投递策略');
+
+    const head = doc.createElement('div');
+    head.className = 'ptx-policy-head';
+    const eyebrow = doc.createElement('span');
+    eyebrow.className = 'ptx-policy-eyebrow';
+    eyebrow.textContent = '投递策略';
+    const who = doc.createElement('span');
+    who.className = 'ptx-policy-who';
+    who.textContent = readTagTarget(tag) || '未识别目标';
+    head.appendChild(eyebrow);
+    head.appendChild(who);
+    root.appendChild(head);
+
+    const blocked = doc.createElement('p');
+    blocked.className = 'ptx-policy-hint ptx-policy-blocked';
+    blocked.textContent = text;
+    root.appendChild(blocked);
+
+    const actions = doc.createElement('div');
+    actions.className = 'ptx-policy-actions';
+    const dismiss = doc.createElement('button');
+    dismiss.setAttribute('type', 'button');
+    dismiss.className = 'ptx-policy-cancel';
+    dismiss.textContent = '关闭';
+    dismiss.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      closeMenu();
+    });
+    actions.appendChild(dismiss);
+    root.appendChild(actions);
+
+    doc.body.appendChild(root);
+    menuEl = root;
+    menuTag = tag;
+    placeMenu(root, x, y);
+  }
+
+  /* 提示文案按成因分：多行同名目标 = 无法确定；缓存没赶上 / 行内彻底读空 = 还没读到。 */
+  function noticeTextFor(tag) {
+    const hit = resolveSourceByTarget(readTagTarget(tag));
+    return hit && hit.ambiguous ? TAG_POLICY_NOTICE_AMBIGUOUS : TAG_POLICY_NOTICE_UNKNOWN;
+  }
+
   function bindTag(tag) {
     if (!tag || typeof tag.addEventListener !== 'function') return;
-    const info = readTagInfo(tag);
-    if (!info) return;
+    /* 不在表格行里的可关闭标签（宿主别处的输入框）不归本段管：连右键都不接管。 */
+    const row = typeof tag.closest === 'function' ? (tag.closest('tr') || tag.closest('[role="row"]')) : null;
+    if (!row) return;
     /* 少数版本的 `+ N` 折叠标签也带 `is-closable`：它是「选择目标」入口，不是投递目标本身。 */
-    if (TAG_POLICY_PLUS_TEXT.test(info.target)) return;
+    if (TAG_POLICY_PLUS_TEXT.test(readTagTarget(tag))) return;
+    /* 此刻读不到监听群**不再放弃绑定**：右键时缓存可能已经回来，再试一次；仍读不到就弹提示。 */
+    const info = readTagInfo(tag);
     tag.setAttribute(TAG_POLICY_BOUND_ATTR, '1');
     const handler = (event) => {
-      const fresh = readTagInfo(tag);
-      if (!fresh) return;
+      /* 认不出本插件页：既不认领也不吞宿主菜单，连提示都不给（这页不归我们管）。 */
       if (!claimAllowed()) return;
+      const fresh = readTagInfo(tag);
+      if (!fresh) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+        /* 本页已 own 时右键同样是一次认领（幂等），与能识别来源时保持一致。 */
+        if (claimPage) claimPage();
+        if (!isOwnPage()) return;
+        openNotice(tag, noticeTextFor(tag), Number(event && event.clientX) || 0, Number(event && event.clientY) || 0);
+        return;
+      }
       if (event && typeof event.preventDefault === 'function') event.preventDefault();
       if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
       /* 右键 = 「我要在这页配置」。认得出本插件页时**无条件**走认领（幂等）：已 own 时
@@ -7128,7 +7274,7 @@ function createTagPolicyMenu(options) {
     };
     tag.addEventListener('contextmenu', handler);
     bound.set(tag, handler);
-    applyTagPolicySuffix(doc, tag, cache.get(info.key));
+    if (info) applyTagPolicySuffix(doc, tag, cache.get(info.key));
   }
 
   /* ---------------- 策略读取 ---------------- */
@@ -7150,6 +7296,9 @@ function createTagPolicyMenu(options) {
           cache.set(tagPolicyKey(source, target), normalizeTagPolicy(raw));
         }
         loaded = true;
+        /* 首屏就预取一次订阅表：行内读不到监听群时，右键不必等一个来回才认出来源。
+           不并进 refresh 的返回链——后缀回显是热路径，不能为兜底多等一个慢 I/O。 */
+        prefetchSubscriptions();
         scan();
         return true;
       }, () => false)
@@ -7158,6 +7307,16 @@ function createTagPolicyMenu(options) {
         return ok;
       });
     return inflight;
+  }
+
+  /* 订阅表预取：只填缓存给兜底用，失败静默（右键时还会再试一次读，读不到就提示）。 */
+  function prefetchSubscriptions() {
+    if (!readTargets) return;
+    Promise.resolve()
+      .then(() => readTargets())
+      .then((payload) => {
+        cacheSubscriptionRows(payload);
+      }, () => {});
   }
 
   /* 本插件页归属变化：变真 → 本次进入只读一次策略；变假 → 收起菜单（请求零发出）。 */
@@ -7320,6 +7479,8 @@ function createTagPolicyMenu(options) {
     Promise.resolve()
       .then(() => readTargets())
       .then((payload) => {
+        /* 订阅表回执顺带填缓存：行内读不到监听群的标签靠它反查所属行。 */
+        cacheSubscriptionRows(payload);
         /* 回执可能迟到：菜单已被收起 / 换成了别的菜单时不能再往里写。 */
         if (menuEl !== root) return;
         const targets = resolveRowTargets(payload, source);
@@ -7756,6 +7917,8 @@ function createTagPolicyMenu(options) {
       }
     }
     cache.clear();
+    /* 订阅表缓存是模块级的（整页一条）：本实例拆除后不再持有整张表。 */
+    subscriptionCache = { rows: [], at: 0 };
     attempted = false;
     loaded = false;
     inflight = null;

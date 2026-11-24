@@ -698,6 +698,8 @@ test('TAG-11: `+ N` 折叠标签被识别并绑定，右键列出该行全部目
   assert.equal(row.tag.getAttribute('data-ptx-policy-tag'), '1', '可见标签照常绑定');
   assert.equal(row.tag.getAttribute('data-ptx-policy-count'), null, '条数徽标只挂在折叠标签上');
 
+  /* refresh 会预取一次订阅表填兜底缓存，右键再读一次列目标。 */
+  const readsBeforePick = client.calls.targetReads;
   row.plusTag.dispatchEvent(makeEvent('contextmenu', { clientX: 512, clientY: 240 }));
   const picker = client.document.querySelector('.ptx-policy-picker');
   assert.ok(picker, '右键折叠标签要弹「选择投递目标」');
@@ -709,7 +711,7 @@ test('TAG-11: `+ N` 折叠标签被识别并绑定，右键列出该行全部目
   const targets = picker.querySelectorAll('.ptx-policy-target').map((node) => node.textContent);
   assert.deepEqual(targets, ['甲群', '乙群', '丙群'], '项数 = 该行 targets 数');
   assert.equal(picker.querySelectorAll('.ptx-policy-target.is-set').length, 1, '已配策略的目标要有标记');
-  assert.equal(client.calls.targetReads, 1, '一次右键只读一次订阅表');
+  assert.equal(client.calls.targetReads, readsBeforePick + 1, '一次右键只读一次订阅表');
   assert.equal(client.document.querySelectorAll('.ptx-policy-menu').length, 1);
 
   /* 重复扫描不得重复绑定 / 重复请求。 */
@@ -983,7 +985,88 @@ function buildInputTable(doc, row) {
   return { tr, tag, content, close, input };
 }
 
-test('TAG-17: 输入框里的短群号（1–5 位）也认得出，右键能开策略菜单', async () => {
+/* 行内读不到监听群（宿主把群号藏进组件状态）时的兜底：订阅表回执按目标名反查。
+   `refresh()` 预取填缓存；右键时再读一次，仍读不到就弹提示而不是静默。 */
+test('TAG-17: 行内 input.value 为空时，用订阅表回执按目标名反查监听群并开策略菜单', async () => {
+  const client = setup({
+    policies: [],
+    subscriptions: { rows: [{ source: '111111', targets: ['甲群', '乙群'] }] },
+  });
+  const row = buildInputTable(client.document, { source: '', target: '甲群' });
+  client.menu.attach();
+  await client.menu.refresh();
+  /* 预取不并进 refresh 的返回链（热路径不吃慢 I/O），回执在下一次 tick 落地。 */
+  await flush();
+
+  const info = client.menu.readTagInfo(row.tag);
+  assert.ok(info, '行内读不到监听群时，唯一命中一行就要认出来源');
+  assert.equal(info.source, '111111');
+  assert.equal(info.key, '111111\u0000甲群');
+
+  row.tag.dispatchEvent(makeEvent('contextmenu', { clientX: 140, clientY: 96 }));
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  assert.ok(menu, '右键要能开策略菜单');
+  assert.equal(menu.querySelector('.ptx-policy-who').textContent, '111111 → 甲群');
+
+  menu.querySelector('.ptx-policy-save').dispatchEvent(makeEvent('click'));
+  await flush();
+  assert.equal(client.calls.writes.length, 1);
+  assert.equal(client.calls.writes[0].source, '111111', 'POST 的 source 必须来自反查结果');
+  assert.equal(client.calls.writes[0].target, '甲群');
+});
+
+test('TAG-18: 同一目标出现在多行时提示无法确定所属监听群，不发 POST', async () => {
+  const client = setup({
+    policies: [],
+    subscriptions: {
+      rows: [
+        { source: '111111', targets: ['甲群'] },
+        { source: '222222', targets: ['甲群'] },
+      ],
+    },
+  });
+  const row = buildInputTable(client.document, { source: '', target: '甲群' });
+  client.menu.attach();
+  await client.menu.refresh();
+  await flush();
+
+  assert.equal(client.menu.readTagInfo(row.tag), null, '多行同名目标不得猜一个来源群');
+  const event = makeEvent('contextmenu', { clientX: 300, clientY: 180 });
+  row.tag.dispatchEvent(event);
+
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  assert.ok(menu, '认不出来源也要有反馈');
+  assert.match(menu.textContent, /无法确定所属监听群/u);
+  assert.equal(menu.querySelectorAll('.ptx-policy-save').length, 0, '不确定来源时没有保存入口');
+  assert.equal(client.calls.writes.length, 0, '不得发 POST（改错群比不改更糟）');
+  assert.equal(event.defaultPrevented, true);
+});
+
+test('TAG-19: 缓存为空且行内也读不到监听群时，右键弹提示而不是静默', async () => {
+  const client = setup({ policies: [], subscriptions: { rows: [] } });
+  const row = buildInputTable(client.document, { source: '', target: '甲群' });
+  client.menu.attach();
+  await client.menu.refresh();
+  await flush();
+
+  assert.equal(client.menu.readTagInfo(row.tag), null);
+  const event = makeEvent('contextmenu', { clientX: 260, clientY: 150 });
+  row.tag.dispatchEvent(event);
+
+  assert.equal(event.defaultPrevented, true, '已认领的本插件页上右键要被接管');
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  assert.ok(menu, '不能静默什么都不发生');
+  assert.match(menu.textContent, /读不到所属监听群/u);
+  assert.match(menu.textContent, /点开/u, '提示要告诉用户下一步怎么做');
+  assert.equal(menu.querySelectorAll('.ptx-policy-save').length, 0);
+  assert.equal(client.calls.writes.length, 0);
+
+  /* 关闭入口真的收掉提示。 */
+  menu.querySelector('.ptx-policy-cancel').dispatchEvent(makeEvent('click'));
+  assert.equal(client.document.querySelectorAll('.ptx-policy-menu').length, 0);
+});
+
+test('TAG-20: 输入框里的短群号（1–5 位）也认得出，右键能开策略菜单', async () => {
   const client = setup({ policies: [] });
   const row = buildInputTable(client.document, { source: '12345', target: '@chat' });
   client.menu.attach();
@@ -1005,7 +1088,7 @@ test('TAG-17: 输入框里的短群号（1–5 位）也认得出，右键能开
   assert.equal(client.calls.writes[0].source, '12345', 'POST 的 source 原样是短群号');
 });
 
-test('TAG-18: 认不出归属的页面右键不认领、不吞宿主菜单；认得出才认领', async () => {
+test('TAG-21: 认不出归属的页面右键不认领、不吞宿主菜单；认得出才认领', async () => {
   const foreign = setup({ own: false, identify: () => false, policies: [] });
   const [row] = buildSubscriptionTable(foreign.document, [{ source: '111111', target: '甲群' }]);
   foreign.menu.attach();
@@ -1036,7 +1119,7 @@ test('TAG-18: 认不出归属的页面右键不认领、不吞宿主菜单；认
   assert.ok(own.document.querySelector('.ptx-policy-menu'), '认领后菜单要开');
 });
 
-test('TAG-19: 保存成全缺省 = 删项，缓存 / 折叠徽标 / 目标列表的已设置同步消失', async () => {
+test('TAG-22: 保存成全缺省 = 删项，缓存 / 折叠徽标 / 目标列表的已设置同步消失', async () => {
   const client = setup({
     policies: [{ source: '111111', target: '甲群', entryCron: '0 22 * * *', weeklyCron: '', perDay: 3, perWeek: 0 }],
     subscriptions: { rows: [{ source: '111111', targets: ['甲群', '乙群'] }] },
@@ -1078,7 +1161,7 @@ test('TAG-19: 保存成全缺省 = 删项，缓存 / 折叠徽标 / 目标列表
   );
 });
 
-test('TAG-20: 超过一页的目标分页展示，第 33 个起的每个目标都点得到', async () => {
+test('TAG-23: 超过一页的目标分页展示，第 33 个起的每个目标都点得到', async () => {
   const targets = [];
   for (let index = 1; index <= 40; index += 1) targets.push('相册' + String(index));
   const client = setup({

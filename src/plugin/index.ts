@@ -2915,10 +2915,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       );
       return;
     }
-    /* 额度必须在渲染之前判：配额耗尽时不该再画一张图。drain 里还会再判一次，那是最终权威。 */
-    const candidates = targets.filter((target) =>
-      deliveryGate.allows('entry', sourceChannelId, entryTargetKey(target, sourceChannelId)),
-    );
+    /* 额度必须在渲染之前判：配额耗尽时不该再画一张图。drain 里还会再判一次，那是最终权威。
+       `allows()` 只看当前周期的计数，所以「今天满了」不等于「没机会」：cron 把下一班排在
+       明天时，这条必须入队等新周期的额度——只有「本周期内就到期且已满额」的目标才真的该丢。 */
+    const candidates = targets.filter((target) => {
+      const key = entryTargetKey(target, sourceChannelId);
+      if (deliveryGate.allows('entry', sourceChannelId, key)) return true;
+      return deliveryGate.wouldDeferPastPeriod('entry', sourceChannelId, key);
+    });
     if (candidates.length === 0) {
       logger.warn(`[Patchouli] 词条《${entryId}》今日卡片配额已满，未出卡（来源群 ${sourceChannelId}）`);
       return;

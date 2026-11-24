@@ -401,7 +401,9 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   周报产物同理（`runWeeklyAlbumUpload` 的 `deliver` 依赖换成 offer）。入队粒度是「事件 × 目标」：
   一条词条投三个相册 = 三条队列项，各自 cron、各自额度、各自来源群。
 - **排队不丢弃**：带 cron 的事件等到下一次触发，绝不让「讨论结束的时刻」决定词条可见性；
-  额度在**到点那一刻**判定（`cron` 把事件推到未来的那一段不占额）。
+  额度在**到点那一刻**判定（`cron` 把事件推到未来的那一段不占额）。词条 sink 的渲染前预筛同理：
+  满额但 `gate.wouldDeferPastPeriod('entry', …)` 为真的目标（下一班已落在下一个自然日）照常入队等
+  新周期的额度，只有「本周期内就到期且满额」的目标才丢弃并 warn。
 - **限量按（来源群 × 目标）**：词条按自然日（上海 00:00 切）、周报按周一起算的自然周，
   惰性比较 `periodKey` 清零；到点超额 warn 并**出队丢弃**。同一事件投多个目标时每个目标各判一次。
 - **同目标随机间隔**：同一（来源群 × 目标）相邻两条至少 60–180 秒随机（内部常量、不可配置），
@@ -495,6 +497,7 @@ if (!filename2.startsWith(this.root) && !filename2.includes('node_modules')) ret
 
 | 日期 | 变更 |
 | :--- | :--- |
+| 2026-11-25 | **词条 sink 预筛不再把「满额但有下一班」的目标丢掉**（Codex PR #8 P2）：`DeliveryGate` 新增 `wouldDeferPastPeriod(kind, source, targetKey, at?)`——与 `planDueAt` 共用同一段 cron 计算（抽成 `cronDueAt`），返回候选 `dueAt` 的 `periodKeyFor` 是否已翻到下一个周期；`setEntryCardSink` 的渲染前预筛改为「`allows()` 通过 **或** `wouldDeferPastPeriod()` 为真」才保留，只有「本周期内就到期且已满额」的目标才丢弃并 warn——此前某个目标的 `entryCron` 把下一次到点排到明天时，今日满额会让它被剔除，全部目标都被剔除时词条直接丢弃。测试 `SCHED-24` / `SCHED-25` / `ENTRY-QUOTA-02` |
 | 2026-11-24 | **投递时间按投递类型拆分（`entryCron` / `weeklyCron`）**：①`TargetPolicy` 改为 `{ entryCron, weeklyCron, perDay, perWeek }`——日词条与周主题各一条 cron；②读盘时旧的单一 `cron` 视为 `entryCron`、`weeklyCron` 置空（写盘只写新字段），`isDefaultPolicy` 改为四字段全默认；③`policy-resolve` 新增 `cronForKind(policy, kind)`，闸门 `planDueAt` 按 `kind` 取对应 cron 再 `nextCronAt`（额度 / 随机间隔 / 批量不变）；④`POST /api/policies` 改**局部更新**（没给的字段沿用该项现值，出现旧字段 `cron` 直接 400），`GET` 返回两条 cron；⑤订阅表标签右键菜单拆成「日词条投递时间」「周主题投递时间」两块（各带「立即投」与每日 / 每周预设 chips），标签后缀为 `entryCron·周weeklyCron·限量`。 |
 | 2026-11-24 | **投递策略改为 cron + （监听群 × 目标）键，入口移到订阅表标签右键菜单**：①`TargetPolicy` 收敛为 `{ cron, perDay, perWeek }`（窗口 / `entryPerDay` / `weeklyPerWeek` / `jitterMinutes` 删除；抖动与同目标 1–3 分钟随机间隔内化为投递逻辑常量）；②策略键 = `<来源群>\u0000<目标键>`，同一个投递群在不同监听群下各有一份独立策略与额度；③`policy-resolve` 用 `parseCron`（5 字段，`*` / 数字 / `a-b` / 步进 / 逗号列表，非法即 `null`）与 `nextCronAt`（上海时区，**严格大于**入队时刻）替换窗口语法；④闸门 `offer` 排定 `dueAt`（cron + 同目标随机间隔，落库不重算），额度改在 `drain` **到点**判定（cron 推后的那一段不占额，重试不重复判额），队列项字段 `deliverAt` → `dueAt`（旧状态文件读回兼容）；⑤删除插件页 `deliveryPolicies` 表格、`normalizeDeliveryPolicyRows` / `syncDeliveryPolicies` 与 `albums.ts` 的候选依赖，`apply()` 只读 `settings.json.policies`；⑥新增 `GET/POST /api/policies`（GET 把键拆成 `{source,target,cron,perDay,perWeek}` 且 `target` 回显订阅表写法；POST 逐项 upsert、三项全缺省 = 删项、400 不改文件，`upsertTargetPolicy` 在同一条串行链上读改写）、`/api/settings.policies` 改数组形状；⑦`planWeeklyAlbumSources` 的 `allowTarget(album, source)` 带上来源群。测试新增 CRON-01..06 / SCHED-18 / POLICY-10..13 / POLICY-API-01。 |
 | 2026-11-24 | **定时投递 / 限量 / 抖动落地（`delivery-gate.ts` / `delivery-state.ts`）**：新增闸门 `DeliveryGate`（`offer` / `drain` / `nextWakeAt` / `dispose`，单定时器）与状态文件 `.patchouli/delivery-state.json`（`0600`、原子写、同路径串行；队列 ≤1024 条且序列化 ≤1 MiB，满则拒收并 warn、不淘汰旧项；计数 `Record<'<kind>\u0000<目标键>',{periodKey,used}>` 惰性清零；坏文件当空状态 + warn、写路径拒绝覆盖）；`handleQuiescence` 的词条投递改为按（行 × 目标）`offer`，`runWeeklyAlbumUpload` 的产物同样入队，周报 `planWeeklyAlbumSources` 按本周剩余额度预筛；`dispose()` 停闸。批量外发仍是**一次** `broadcast`，按 `outcomes` 逐（产物 × 目标）结算（成功出队、失败退避、目标失效出队、渲染失败 3 次出队）。 |

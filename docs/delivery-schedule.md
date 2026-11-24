@@ -208,6 +208,12 @@ interface QueuedDelivery {
 | `SCHED-19` 超额不渲染 | `perDay=2`、5 条同时到点：渲染桩只跑 2 次、3 条出队并 warn、`overQuota=3`、`deliver` 只收到 2 条 |
 | `SCHED-20` 重试不重复占额 | 首次投递失败退避，重试仍算同一额度（`attempts > 0` 跳过判额） |
 | `SCHED-21` 并发 drain | 串行链内判额 / 占额只跑一遍，同一额度不会被两轮 drain 各占一次 |
+| `SCHED-22` 同一分钟 | 入队时刻与 `weeklyCron` 同一分钟 → 当场到期，不推迟一周 |
+| `SCHED-23` 错过本分钟 | 匹配分钟已过（09:01:30）→ 排到下一个周一 09:00，不补发 |
+| `SCHED-24` 满额但有下一班 | `perDay=1` 已投 + `entryCron='0 9 * * *'`，10:00 入队：`allows=false` 但 `wouldDeferPastPeriod=true`，该条留在队列、`dueAt` = 次日 09:00，次日新周期照常投 |
+| `SCHED-25` 满额且无下一班 | 空 cron（立即投）+ 满额：`wouldDeferPastPeriod=false`，到点出队丢弃（`overQuota=1`） |
+| `ENTRY-QUOTA-01` sink 预筛 | `allows=false` 的目标被剔除，不渲染、不入队、不动额度；周期滚动后重新放行 |
+| `ENTRY-QUOTA-02` sink 满额留队 | 满额但下一班在明天的目标与有额度的目标都进 `offer`（A 排次日 / B 当场到点）；只有「本周期就到期且满额」的剔除 |
 | `POLICY-CRON-SPLIT-01` 两条 cron 分流 | 同一目标 `entryCron='0 22 * * *'` / `weeklyCron='0 9 * * 1'`：词条 `dueAt` = 当天 22:00，周报 = 下周一 09:00，两批各自到点才发 |
 | `POLICY-CRON-SPLIT-02` 旧数据迁移 | 只有 `cron` 的旧项读成 `entryCron`、`weeklyCron` 为空；新旧同时出现以 `entryCron` 为准 |
 | `POLICY-10..13` | 键形状、归一（含 `cronForKind`）、整表清洗与严格校验、周期键 |
