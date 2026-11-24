@@ -22,7 +22,14 @@ export * from './wiki/mask';
 export * from './plugin/index';
 // 启动期迁移判据与「读不懂的 settings.json」错误类型：`plugin/index.ts` 的显式转发列表
 // 由插件主入口维护，这里按名补一条，让包入口（以及调用方）能直接引用。
-export { readTargetBindingMigration, SettingsDocumentError } from './plugin/settings-store';
+// 投递策略的读写与解析同理：面板与投递闸门都要用，未进插件主入口的转发列表。
+export {
+  readTargetBindingMigration,
+  readTargetPolicies,
+  SettingsDocumentError,
+  writeTargetPolicies,
+} from './plugin/settings-store';
+export * from './plugin/policy-resolve';
 export * from './plugin/rich-message';
 export * from './plugin/media-registry';
 export * from './plugin/card';

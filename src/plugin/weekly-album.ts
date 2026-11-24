@@ -55,15 +55,22 @@ export interface WeeklyAlbumDeps {
   readonly snapshot: SubscriptionSnapshot;
   /** 订阅表为空时的相册候选（`albumDelivery.albums`，非相册形状的项会被丢弃）。 */
   readonly fallbackAlbums: readonly string[];
+  /**
+   * 额度预筛（按稳定地址判断该相册本周还有额度）：用尽的目标不取材、不渲染。
+   * 只是省算力，**最终仍以 `deliver` 里的占额为准**。
+   */
+  readonly allowTarget?: (album: string) => boolean;
   readonly logger: WeeklyAlbumLogger;
   readonly recentEntries: (channelId: string | undefined, limit: number) => Promise<readonly WikiEntryRecord[]>;
   /** 词条 → 脱敏后的公开视图；读正文 / 原始会话失败时返回 `undefined`。 */
   readonly buildView: (record: WikiEntryRecord) => Promise<PublicWikiView | undefined>;
   readonly render: (views: readonly PublicWikiView[], weekKey: string) => Promise<Buffer | null>;
+  /** 投递一个相册产物；`source` 是本次取材来源（投递策略 / 日志据此归属）。 */
   readonly deliver: (
     album: string,
     png: Buffer,
     dedupeKey: string,
+    source: string,
   ) => Promise<WeeklyAlbumDeliveryOutcome>;
 }
 
@@ -82,13 +89,21 @@ export interface WeeklyAlbumSourcePlan {
 /**
  * 订阅表 → 来源计划。订阅表为空（`active=false`）时退回旧的全局行为：
  * 全库主题 → `fallbackAlbums` 里的全部相册。
+ *
+ * `allowTarget` 是**额度预筛**：周报每目标每自然周限量，已经用尽的目标不必取材、
+ * 不必渲染（最终仍以投递前的占额为准——预筛只是省掉一次无用的取材与渲染）。
  */
 export function planWeeklyAlbumSources(
   snapshot: SubscriptionSnapshot,
   fallbackAlbums: readonly string[],
+  allowTarget?: (album: string) => boolean,
 ): WeeklyAlbumSourcePlan[] {
   if (!snapshot.active) {
-    const albums = uniqueStrings(fallbackAlbums.filter((value) => ALBUM_TARGET_PATTERN.test(value)));
+    const albums = uniqueStrings(
+      fallbackAlbums.filter(
+        (value) => ALBUM_TARGET_PATTERN.test(value) && (allowTarget === undefined || allowTarget(value)),
+      ),
+    );
     return albums.length === 0 ? [] : [{ source: WEEKLY_ALL_SOURCES, albums }];
   }
   const bySource = new Map<string, string[]>();
@@ -102,7 +117,9 @@ export function planWeeklyAlbumSources(
       // 剩下的按「绑定表里的名字 → 稳定地址」解析：未绑定 / 已变更的名字拿不到地址，
       // 停投 + warn（解析层负责告警），绝不改投到同名相册。
       const value = albumValueOfTarget(trimmed);
-      if (value !== undefined && !collected.includes(value)) collected.push(value);
+      if (value === undefined || collected.includes(value)) continue;
+      if (allowTarget !== undefined && !allowTarget(value)) continue;
+      collected.push(value);
     }
     bySource.set(row.source, collected);
   }
@@ -117,7 +134,7 @@ export function planWeeklyAlbumSources(
  * 无主题 `no-topics`（不算失败）、渲染不出来 `render-failed`、一张都没投出去 `upload-failed`。
  */
 export async function runWeeklyAlbumDelivery(deps: WeeklyAlbumDeps): Promise<WeeklyAlbumRunResult> {
-  const plans = planWeeklyAlbumSources(deps.snapshot, deps.fallbackAlbums);
+  const plans = planWeeklyAlbumSources(deps.snapshot, deps.fallbackAlbums, deps.allowTarget);
   if (plans.length === 0) return { ok: false, reason: 'album-not-configured', uploaded: 0 };
 
   /** 主题 id 集合 → PNG（`null` = 渲染失败，避免同一批主题反复撞 puppeteer）。 */
@@ -156,7 +173,7 @@ export async function runWeeklyAlbumDelivery(deps: WeeklyAlbumDeps): Promise<Wee
     }
 
     for (const album of plan.albums) {
-      const outcome = await deps.deliver(album, png, `${deps.fireKey}:${plan.source}:${album}`);
+      const outcome = await deps.deliver(album, png, `${deps.fireKey}:${plan.source}:${album}`, plan.source);
       if (outcome.ok && outcome.skipped === undefined) uploaded += 1;
       else if (!outcome.ok && outcome.skipped === undefined) {
         deps.logger.warn(

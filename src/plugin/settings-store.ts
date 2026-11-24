@@ -22,7 +22,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import { resolveWikiLayout } from '../wiki/layout';
 import { normalizeTriggerOptions } from '../trigger/detector';
-import type { SubscriptionRow, TriggerOptions } from '../types';
+import type { SubscriptionRow, TargetPolicies, TriggerOptions } from '../types';
 import {
   ALBUM_TARGET_PATTERN,
   CHAT_TARGET,
@@ -30,6 +30,7 @@ import {
   TARGET_GROUP_PREFIX,
   normalizeSubscriptionRows,
 } from './subscriptions';
+import { parsePolicies } from './policy-resolve';
 
 /** 面板可调的五个段（顺序即 GET 响应里的展示顺序）。 */
 export const SETTINGS_SECTIONS = ['trigger', 'topics', 'media', 'query', 'judge'] as const;
@@ -435,6 +436,14 @@ const SUBSCRIPTIONS_KEY = 'subscriptions';
 const TARGET_BINDINGS_KEY = 'targetBindings';
 
 /**
+ * 文档里与绑定表并列的投递策略表：**目标稳定地址 → 策略**。
+ *
+ * 键是稳定地址（`@chat:<来源群>` / `群号/相册ID`），不是可读名——改相册名不该重置策略；
+ * 删掉绑定即自动失效（不存在悬空目标）。与绑定表**同一次原子写**、同一条串行链。
+ */
+const POLICIES_KEY = 'policies';
+
+/**
  * 首轮绑定迁移的完成标记（`bindingMigration: 1`）。
  *
  * 与绑定表**同一次原子写**，只写一次。语义：有标记 + 空表 = 用户把绑定删光了，
@@ -483,6 +492,8 @@ interface StoredDocument {
   subscriptions: SubscriptionRow[] | null;
   /** 名字 → 稳定地址；空表且没有迁移标记 = 尚未建立绑定（首轮迁移会尝试填充一次）。 */
   bindings: Record<string, string>;
+  /** 目标稳定地址 → 策略；空表 = 所有目标全天不限量（与升级前行为一致）。 */
+  policies: TargetPolicies;
   /** 首轮绑定迁移已完成；`true` 且绑定表为空 = 用户删光了绑定，不得再自动解析。 */
   bindingMigration: boolean;
 }
@@ -491,6 +502,7 @@ const EMPTY_DOCUMENT: StoredDocument = {
   sections: {},
   subscriptions: null,
   bindings: {},
+  policies: {},
   bindingMigration: false,
 };
 
@@ -518,6 +530,8 @@ function parseDocument(text: string): DocumentParse {
       sections: sanitizeSections(doc.sections),
       subscriptions: Array.isArray(subscriptions) ? normalizeSubscriptionRows(subscriptions) : null,
       bindings,
+      // 策略表是结构化对象：脏项在这里被丢弃（非法键 / 非法窗口 / 越界数值 / 超 256 项）。
+      policies: parsePolicies(doc[POLICIES_KEY]),
       // 有绑定 = 迁移早已发生过（升级前的文件没有标记）；标记只在首次迁移 / 面板保存后落盘。
       bindingMigration: doc[BINDING_MIGRATION_KEY] === 1 || Object.keys(bindings).length > 0,
     },
@@ -631,6 +645,14 @@ export function readTargetBindingsSync(wikiDir: string): Record<string, string> 
 }
 
 /**
+ * 读取投递策略表（目标稳定地址 → 策略）。缺键 / 损坏 / 非法项 → 空表或已清洗的表：
+ * 「没有策略」= 全天不限时、不限量、不抖动（与升级前一致），绝不回退到按可读名猜。
+ */
+export async function readTargetPolicies(wikiDir: string): Promise<TargetPolicies> {
+  return lenientDocument(await readDocumentAt(settingsPath(wikiDir))).policies;
+}
+
+/**
  * 「首轮绑定迁移是否已经做过」——启动期迁移的唯一判据。
  *
  * - `true`：`settings.json` 里有 `bindingMigration: 1`（首次迁移或面板保存时同一次原子写），
@@ -674,6 +696,8 @@ async function writeDocument(target: string, document: StoredDocument): Promise<
   if (document.subscriptions !== null) payload[SUBSCRIPTIONS_KEY] = document.subscriptions;
   // 绑定表同理：空表不写键（「尚未建立绑定」与「空对象」同一个语义）。
   if (Object.keys(document.bindings).length > 0) payload[TARGET_BINDINGS_KEY] = document.bindings;
+  // 策略表同理：空表 = 没有策略 = 全天不限量，不写键。
+  if (Object.keys(document.policies).length > 0) payload[POLICIES_KEY] = document.policies;
   // 迁移标记：与绑定表**同一次原子写**。缺键 = 从未迁移过（首轮迁移的入口）；
   // 有标记 + 空表 = 用户删光了绑定，重启后不得再拿当前候选猜同名相册。
   if (document.bindingMigration) payload[BINDING_MIGRATION_KEY] = 1;
@@ -830,4 +854,24 @@ export async function writeTargetBindings(
     return migrated;
   });
   return next.bindings;
+}
+
+/**
+ * 写入整张投递策略表（面板保存的唯一入口），返回落盘后的值。
+ *
+ * 与订阅表 / 绑定表 / 五段标量**同一个文件、同一条串行链**：策略写入只替换
+ * `policies` 键，其余键原样保留，并发的绑定表写入不会互相抹掉。写前按 `parsePolicies`
+ * 清洗（非法键 / 非法窗口 / 越界数值丢弃），空表 = 删除该键（没有策略）。
+ *
+ * 空表写盘后不再有 `policies` 键：与绑定表一致，「键缺失」与「空对象」同一语义。
+ */
+export async function writeTargetPolicies(
+  wikiDir: string,
+  policies: Readonly<TargetPolicies>,
+): Promise<TargetPolicies> {
+  const target = settingsPath(wikiDir);
+  const next = await enqueueWrite(target, () =>
+    performDocumentWrite(target, (current) => ({ ...current, policies: parsePolicies(policies) })),
+  );
+  return next.policies;
 }
