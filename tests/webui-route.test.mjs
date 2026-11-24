@@ -788,3 +788,33 @@ test('ROUTE-27: 响应头正常但 body 流被 reset → 说「连接中断」�
   assert.equal(api.monitorStatusText(), '连接中断，保留最后一次数据');
   assert.equal(api.phase(), 'OFFLINE', '状态格报断线，不报接口不可用');
 });
+
+test('ROUTE-28: 切页后 tick 到来前点胶囊 → 上一页的接口失败账不带到新页', async () => {
+  /* 旧页（随机实例 id）点开胶囊后 /api 整片 404，先把「接口不可用」触到置位 */
+  const api = loadClient({ pathname: '/plugins/0848oh', title: 'Koishi', apiMissing: true });
+  api.checkRoute();
+  api.expandPanel();
+  await settle();
+  assert.equal(api.state.apiUnavailable, true, '旧页先触到不可用阈值');
+  assert.ok(api.state.apiStreak >= 2, '失败连胜记在旧页上');
+
+  /* 宿主切到新插件页，700ms 轮询还没跑用户就点开胶囊：认领跟着点击时刻的路由走，
+     带走的是「本页归我」，而不是旧页的失败账 —— 新页一次请求都还没发过，
+     不能一挂载就报「接口不可用」。 */
+  api.win.location.pathname = '/plugins/9x2fq7';
+  api.expandPanel();
+
+  assert.equal(api.probeState().key, '/plugins/9x2fq7', '认领绑到点击时刻的路由');
+  assert.equal(api.state.apiUnavailable, false, '换页即清接口可用性账');
+  assert.equal(api.state.apiStreak, 0, '失败连胜从零开始累计');
+  assert.equal(api.state.own, true, '本页仍然被认领');
+
+  api.checkRoute();
+  assert.equal(api.state.own, true, '下一轮 tick 不把这次认领丢掉');
+  assert.equal(api.probeState().userClaimed, true);
+
+  /* 新页第一次请求失败只是「1 次」，没到阈值：旧账跟着过来的话这里立刻就是不可用 */
+  await settle();
+  assert.ok(api.state.apiStreak < 2, `失败账从零累计，实际 ${api.state.apiStreak}`);
+  assert.equal(api.state.apiUnavailable, false, '新页要自己的连续失败够数才置位');
+});

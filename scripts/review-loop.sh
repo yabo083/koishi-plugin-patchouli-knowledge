@@ -9,7 +9,9 @@
 set -uo pipefail
 
 REPO="yabo083/koishi-plugin-patchouli-knowledge"
+BOT="chatgpt-codex-connector"
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
+IO="$PROJECT/scripts/review-loop-io.mjs"
 PUBLIC="${REVIEW_PUBLIC:-$(dirname "$PROJECT")/pk-loop}"
 PR="${1:?usage: review-loop.sh <pr> [max_rounds]}"
 MAX_ROUNDS="${2:-6}"
@@ -22,13 +24,14 @@ cd "$PROJECT" || exit 1
 
 log() { printf '[loop %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
-# 拉未处理意见：id 大于已处理最大值
+# 拉未处理意见：id 大于已处理最大值。
+# 一律按 JSONL 整条传递（`tojson`）：正文里的换行 / 制表符留在 JSON 字符串里转义，
+# 不会像 `-r` 直接拼进 TSV 那样把一条意见拆成多行、让下游按行过滤时丢掉后半截。
+# 拼 prompt 与水位过滤在 review-loop-io.mjs 里做（有用例覆盖）；本函数打印 "<条数> <最大 id>"。
 collect() {
   gh api "repos/$REPO/pulls/$PR/comments" --paginate \
-    --jq '.[] | select(.user.login | startswith("chatgpt-codex-connector")) | "\(.id)\t\(.path):\(.line // .original_line)\t\(.body)"' \
-    > "$WORK/all.tsv" 2>/dev/null || return 1
-  awk -F'\t' -v last="$(cat "$STATE")" '$1 > last' "$WORK/all.tsv" > "$WORK/new.tsv"
-  wc -l < "$WORK/new.tsv" | tr -d ' '
+    --jq ".[] | select(.user.login | startswith(\"$BOT\")) | tojson" > "$WORK/comments.jsonl" 2>/dev/null || return 1
+  node "$IO" collect --in "$WORK/comments.jsonl" --state-file "$STATE" --bot "$BOT" --pr "$PR" "$@" || return 1
 }
 
 # 等下一轮审查跑完：出现比当前时间更新的 codex 评论，或超时
@@ -59,7 +62,10 @@ ROUND=0
 IDLE=0
 while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
   ROUND=$((ROUND + 1))
-  N="$(collect)" || { log "拉取评论失败，退出"; exit 1; }
+  # prompt 由 collect 一并写出（多行正文在那边还原成真实换行）
+  COLLECTED="$(collect --prompt "$WORK/prompt-$ROUND.md")" || { log "拉取评论失败，退出"; exit 1; }
+  N="${COLLECTED%% *}"
+  MAX_ID="${COLLECTED##* }"
   if [ "${N:-0}" -eq 0 ]; then
     IDLE=$((IDLE + 1))
     log "第 $ROUND 轮：无新意见（连续 $IDLE 轮）"
@@ -69,28 +75,14 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
   IDLE=0
   log "第 $ROUND 轮：$N 条新意见"
 
-  {
-    echo "# 任务"
-    echo "以下是 PR #$PR 上自动审查的未处理意见。逐条对照当前代码核实，**只修仍然成立的问题**；"
-    echo "如果某条属于已知限制或已有等价修复，写明理由后跳过（不要为凑数改动）。"
-    echo
-    echo "## 硬约束"
-    echo "- TypeScript 严格无 \`any\`；不降低既有测试语义；每条修复补一个用例。"
-    echo "- 不 commit、不 tag、不部署、不修改 \`.context/\` 之外的文档口径。"
-    echo "- 完成后跑 \`npx tsc --noEmit\`、\`pnpm build\`、\`pnpm test\`，全绿才算完成。"
-    echo
-    echo "## 意见"
-    cut -f2,3 "$WORK/new.tsv" | sed 's/^/### /'
-  } > "$WORK/prompt-$ROUND.md"
-
   log "调用 omp 修复（prompt-$ROUND.md）"
-  omp -p "$(cat "$WORK/prompt-$ROUND.md")" --mode text > "$WORK/omp-$ROUND.log" 2>&1
+  omp -p "$(cat "$WORK/prompt-$ROUND.md")" --auto-approve --mode text > "$WORK/omp-$ROUND.log" 2>&1
   OMP_STATUS=$?
   tail -5 "$WORK/omp-$ROUND.log"
 
   if ! VERIFY; then
     log "验证未通过，让 omp 再修一次"
-    omp -p "上一轮改动未通过验证（tsc / build / test 之一失败）。请读取 tmp/review-loop/omp-$ROUND.log 的结尾与本轮 diff，修复直到 npx tsc --noEmit、pnpm build、pnpm test 全绿。不要新增无关改动。" \
+    omp -p --auto-approve "上一轮改动未通过验证（tsc / build / test 之一失败）。请读取 tmp/review-loop/omp-$ROUND.log 的结尾与本轮 diff，修复直到 npx tsc --noEmit、pnpm build、pnpm test 全绿。不要新增无关改动。" \
       > "$WORK/omp-$ROUND-retry.log" 2>&1
     if ! VERIFY; then
       log "重试后仍不通过，保留现场并退出（未提交）"
@@ -98,21 +90,24 @@ while [ "$ROUND" -lt "$MAX_ROUNDS" ]; do
     fi
   fi
 
-  if git diff --quiet && git diff --cached --quiet; then
-    log "本轮无代码改动（可能全部判为已知限制），仍继续下一轮"
-  else
-    cut -f1 "$WORK/new.tsv" | sort -n | tail -1 > "$STATE"
-    if [ ! -d "$PUBLIC/.git" ]; then
-      log "公开工作树不存在：$PUBLIC（先 git worktree add 并设置 REVIEW_PUBLIC）"
-      exit 3
-    fi
-    node "$PROJECT/scripts/export-public.mjs" "$PUBLIC" >/dev/null 2>&1 || { log "导出失败"; exit 3; }
-    git -C "$PUBLIC" add -A
-    git -C "$PUBLIC" commit -q -m "fix(review): 第 $ROUND 轮自动审查修复（$N 条）
-
-详见 tmp/review-loop/prompt-$ROUND.md" || log "无变更可提交"
-    git -C "$PUBLIC" push -q origin HEAD && log "已推送公开仓库 $(git -C "$PUBLIC" rev-parse --short HEAD)"
+  if [ ! -e "$PUBLIC/.git" ]; then
+    log "公开工作树不存在：$PUBLIC（先 git worktree add 并设置 REVIEW_PUBLIC）"
+    exit 3
   fi
+  node "$PROJECT/scripts/export-public.mjs" "$PUBLIC" >/dev/null 2>&1 || { log "导出失败"; exit 3; }
+  # 提交 + 推送 + 推进已处理水位都在这里：工作树有改动（含未跟踪文件）才推，推送失败时水位不动，
+  # 且本脚本必须在失败处终止——带着未发布的修复去触发下一轮审查只会让循环假收敛。
+  if ! VERDICT="$(node "$IO" publish --project "$PROJECT" --public "$PUBLIC" --state-file "$STATE" --max-id "$MAX_ID" \
+      --message "fix(review): 第 $ROUND 轮自动审查修复（$N 条）
+
+详见 tmp/review-loop/prompt-$ROUND.md" 2>&1)"; then
+    log "发布失败（提交 / 推送），已处理水位未推进，退出：$VERDICT"
+    exit 4
+  fi
+  case "$VERDICT" in
+    *pushed\ *) log "已推送公开仓库 ${VERDICT##*pushed }" ;;
+    *) log "本轮无代码改动（可能全部判为已知限制），仍继续下一轮" ;;
+  esac
 
   gh pr comment "$PR" --body "@codex review" >/dev/null 2>&1 && log "已触发下一轮审查"
   wait_review || break

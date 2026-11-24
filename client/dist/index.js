@@ -5964,8 +5964,12 @@ function expandPanel() {
        下一轮 tick 会把它当跨页认领清掉，新页白点一次。
        这一句对已认领的页面同样要跑（`state.own` 还是上一页的判定结果），
        而点胶囊在任何插件页上都是「本页归我」的凭据 —— 元数据认领的页面切走后，
-       新页第一个可用的凭据就是这一下点击。 */
-    routeProbe.key = currentRouteKey();
+       新页第一个可用的凭据就是这一下点击。
+       路由确实变了就走整轮重置（与 checkRoute 的 newRoute 分支同一出口）：
+       只改 key 会让下一轮 tick 认为「没换页」，上一页的接口失败连胜与「接口不可用」
+       就记到新页头上，新页还没发过请求就先触到不可用阈值。 */
+    const key = currentRouteKey();
+    if (routeProbe.key !== key) resetRouteProbe(key);
     routeProbe.userClaimed = true;
     syncAuthGate(true);
   }
