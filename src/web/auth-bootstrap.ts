@@ -40,8 +40,11 @@ export function authBootstrap(basePath: string): string {
   let overlayOpen = false;
   /* 门禁只属于**本插件页**：Console 浮窗挂在任何 /plugins/** 页上，但全屏遮罩只许盖在
      本插件自己的配置页 —— 否则别人的插件页会被登录 / 首次初始化对话框堵住。
-     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。 */
-  let ownPage = true;
+     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。
+     读一律走 isOwnPage() **现读**：路由标记每 700ms 才更新一轮，任何一次快照都可能
+     在用户已经离开本页之后还认为「这是我的页」，于是把遮罩盖到别人的插件页上。 */
+  let ownPageState = true;
+  const isOwnPage = () => ownPageState === true;
 
   const shell = (inner) => {
     const root = document.createElement('div');
@@ -186,7 +189,8 @@ export function authBootstrap(basePath: string): string {
            别的插件页上这块全屏遮罩会盖住宿主的表单，而那不是用户此刻在操作的页面。
            数据面本身也只在本插件页取数（Console 侧 requestJson 同一条契约），这里是兜底。 */
         clear();
-        if (ownPage) gate('会话已过期，请重新输入。');
+        /* 现读：请求在途时用户可能已经离开本插件页（路由轮询 700ms 一轮）。 */
+        if (isOwnPage()) gate('会话已过期，请重新输入。');
       }
       return response;
     });
@@ -198,17 +202,28 @@ export function authBootstrap(basePath: string): string {
    */
   const gate = (message) => {
     /* 兜底：非本插件页一律不开门禁（含 401 路径与宿主直接调用）。 */
-    if (!ownPage) return;
+    if (!isOwnPage()) return;
     if (overlayOpen) return;
+    /* /session 探测是异步的：用户可能在探测在途时离开本插件页。每次回写都现读标记，
+       晚到的结果一律丢弃 —— 清票据可以，遮罩绝不能盖到别人的插件页上。 */
+    const leftSinceProbe = () => {
+      if (isOwnPage()) return false;
+      clear();
+      return true;
+    };
     if (!session()) {
       rawFetch(base + '/session', { credentials: 'same-origin' })
         .then((response) => response.json())
         .then((state) => {
+          if (leftSinceProbe()) return;
           if (state && state.authenticated === true) return;
           if (state && state.bootstrapRequired === true) showInit();
           else showLogin(message || '');
         })
-        .catch(() => showLogin(message || '网络错误'));
+        .catch(() => {
+          if (leftSinceProbe()) return;
+          showLogin(message || '网络错误');
+        });
       return;
     }
     rawFetch(base + '/session', {
@@ -217,6 +232,7 @@ export function authBootstrap(basePath: string): string {
     })
       .then((response) => response.json())
       .then((state) => {
+        if (leftSinceProbe()) return;
         if (state && state.authenticated === true) {
           if (state.expiresAt) write(EXPIRY_KEY, String(state.expiresAt));
           return;
@@ -225,16 +241,19 @@ export function authBootstrap(basePath: string): string {
         if (state && state.bootstrapRequired === true) showInit();
         else showLogin('会话已失效，请重新输入。');
       })
-      .catch(() => undefined);
+      .catch(() => {
+        /* 网络抖动不算会话失效：只在本页仍需遵循「离开即清票据」这一条。 */
+        leftSinceProbe();
+      });
   };
 
   window.__ptxAuth = {
     gate,
     dismiss: finish,
     hasSession: () => session() !== null,
-    /* 本插件页判定：Console 组件按路由写入；门禁与 401 兜底都只看这一个标记。 */
-    setOwnPage: (value) => { ownPage = value === true; },
-    isOwnPage: () => ownPage,
+    /* 本插件页判定：Console 组件按路由写状态源；门禁与 401 兜底每次现读 isOwnPage。 */
+    setOwnPage: (value) => { ownPageState = value === true; },
+    isOwnPage,
   };
 })();`;
 }

@@ -217,22 +217,51 @@ function clip(text, limit) {
 const REQUEST_TIMEOUT_MS = 15000;
 /* 非本插件页时请求被拦下的错误文案：调用方的 catch 会把它当普通失败展示。 */
 const NOT_OWN_PAGE = '非本插件页：已暂停取数';
-function requestJson(url, options) {
-  /* 数据面的唯一闸口：浮窗挂在**任何** /plugins/** 页上（宿主用随机实例 id 渲染插件页时，
-     不挂就等于用户看不到入口），但取数只属于本插件页 —— 别的插件页既不为其拉数据，
-     也就没有 401 去弹门禁（生成块里的 401 兜底同样按本页标记判定）。 */
-  if (!state.own) return Promise.reject(new Error(NOT_OWN_PAGE));
+const NOT_OWN_PAGE_WRITE = '当前不在本插件页';
+/* 读写的唯一物理闸口：本页标记 + 超时。
+   浮窗挂在**任何** /plugins/** 页上（宿主用随机实例 id 渲染插件页时，不挂就等于用户看不到入口），
+   但取数与写入都只属于本插件页 —— 别的插件页既不为其拉数据，也不许改它的设置；
+   零请求也就没有 401 去弹门禁（生成块里的 401 兜底同样按本页标记判定）。
+   `notify` 只给写路径用：按钮刚被按过，用户需要知道为什么没生效；读失败由各调用方展示。 */
+function guardedFetch(url, options, notify) {
+  if (!state.own) {
+    if (notify) toast(NOT_OWN_PAGE_WRITE);
+    return Promise.reject(new Error(NOT_OWN_PAGE));
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   return fetch(url, Object.assign({ credentials: 'same-origin' }, options, { signal: controller.signal }))
     .then((res) => {
       clearTimeout(timer);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
+      return res;
     }, (err) => {
       clearTimeout(timer);
       throw err;
     });
+}
+
+function requestJson(url, options) {
+  return guardedFetch(url, options).then((res) => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.json();
+  });
+}
+
+/* 写请求（设置 / 出图选项 / 提示词 / 词条修正与删除 / 清空知识库）一律走同一个闸口：
+   非本插件页直接 reject 且**不发 fetch**。失败原因优先用服务端 body 里的 error
+   —— HTTP 400 的原因只有 body 里有，状态码本身对用户没有意义。 */
+function writeJson(url, method, payload) {
+  const init = { method };
+  if (payload !== undefined) {
+    init.headers = { 'Content-Type': 'application/json' };
+    init.body = JSON.stringify(payload);
+  }
+  return guardedFetch(url, init, true).then((res) => res.json().catch(() => null).then((data) => {
+    if (!res.ok || (data && data.ok === false)) {
+      throw new Error(data && data.error ? String(data.error) : `HTTP ${res.status}`);
+    }
+    return data;
+  }));
 }
 
 function tip(text, pos) {
@@ -3565,28 +3594,10 @@ function loadRuntimeSettings() {
     });
 }
 
-/* 失败要显示服务端给的原因（HTTP 400 的 body），因此不用只抛出状态码的 requestJson */
+/* 失败要显示服务端给的原因（HTTP 400 的 body）：writeJson 优先抛出 body 里的 error，
+   而不是只有状态码的 requestJson；写入本身与读共用 guardedFetch 的本页闸口。 */
 function postRuntimeSettings(section, patch) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  return fetch(`${API_BASE}/api/settings`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ section, patch }),
-    signal: controller.signal,
-  }).then((res) => {
-    clearTimeout(timer);
-    return res.json().catch(() => null).then((data) => {
-      if (!res.ok || (data && data.ok === false)) {
-        throw new Error(data && data.error ? String(data.error) : `HTTP ${res.status}`);
-      }
-      return data;
-    });
-  }, (err) => {
-    clearTimeout(timer);
-    throw err;
-  });
+  return writeJson(`${API_BASE}/api/settings`, 'POST', { section, patch });
 }
 
 /* 服务端值写回控件：保存后归一化与失败回滚共用同一条路径 */
@@ -3746,11 +3757,7 @@ function loadCardSettings() {
 /* 图片匿名化开关：切换即落盘并热生效，作用于下一次出图 */
 function toggleCardMask(node) {
   const next = !(state.cardSettings.settings.maskNames !== false);
-  return requestJson(`${API_BASE}/api/card/settings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ settings: { maskNames: next } }),
-  })
+  return writeJson(`${API_BASE}/api/card/settings`, 'POST', { settings: { maskNames: next } })
     .then((data) => {
       if (data && data.settings) state.cardSettings.settings = data.settings;
       const on = state.cardSettings.settings.maskNames !== false;
@@ -3765,11 +3772,7 @@ function toggleCardMask(node) {
 }
 
 function postPrompt(payload) {
-  return requestJson(`${API_BASE}/api/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  return writeJson(`${API_BASE}/api/prompt`, 'POST', payload);
 }
 
 /* 保存：内容与默认提示词完全一致时按「恢复默认」提交，绝不留下一份同文的伪自定义副本 */
@@ -6015,16 +6018,12 @@ function saveEntry() {
   if (!EDITOR_STATUSES.includes(status)) status = 'open';
   const button = viewportEl ? viewportEl.querySelector('[data-action="save-entry"]') : null;
   if (button) button.classList.add('is-busy');
-  return requestJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title,
-      status,
-      tags: splitTags(editorValue('entry-tags')),
-      summary: editorValue('entry-summary').trim(),
-      markdown,
-    }),
+  return writeJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, 'PUT', {
+    title,
+    status,
+    tags: splitTags(editorValue('entry-tags')),
+    summary: editorValue('entry-summary').trim(),
+    markdown,
   })
     .then((data) => {
       if (data && typeof data === 'object') state.detail = data;
@@ -6048,7 +6047,7 @@ function removeEntry() {
   if (!id) return Promise.resolve();
   const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-delete-entry"]') : null;
   if (button) button.classList.add('is-busy');
-  return requestJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  return writeJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, 'DELETE')
     .then(() => {
       state.activeId = null;
       state.detail = null;
@@ -6075,11 +6074,7 @@ function removeEntry() {
 function clearKnowledgeBase() {
   const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-clear-kb"]') : null;
   if (button) button.classList.add('is-busy');
-  return requestJson(`${API_BASE}/api/clear`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: '{}',
-  })
+  return writeJson(`${API_BASE}/api/clear`, 'POST', {})
     .then(() => {
       state.entries = [];
       state.entriesLoaded = true;
@@ -6401,8 +6396,11 @@ function ensureSchemaTagTheme() {
   let overlayOpen = false;
   /* 门禁只属于**本插件页**：Console 浮窗挂在任何 /plugins/** 页上，但全屏遮罩只许盖在
      本插件自己的配置页 —— 否则别人的插件页会被登录 / 首次初始化对话框堵住。
-     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。 */
-  let ownPage = true;
+     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。
+     读一律走 isOwnPage() **现读**：路由标记每 700ms 才更新一轮，任何一次快照都可能
+     在用户已经离开本页之后还认为「这是我的页」，于是把遮罩盖到别人的插件页上。 */
+  let ownPageState = true;
+  const isOwnPage = () => ownPageState === true;
 
   const shell = (inner) => {
     const root = document.createElement('div');
@@ -6547,7 +6545,8 @@ function ensureSchemaTagTheme() {
            别的插件页上这块全屏遮罩会盖住宿主的表单，而那不是用户此刻在操作的页面。
            数据面本身也只在本插件页取数（Console 侧 requestJson 同一条契约），这里是兜底。 */
         clear();
-        if (ownPage) gate('会话已过期，请重新输入。');
+        /* 现读：请求在途时用户可能已经离开本插件页（路由轮询 700ms 一轮）。 */
+        if (isOwnPage()) gate('会话已过期，请重新输入。');
       }
       return response;
     });
@@ -6559,17 +6558,28 @@ function ensureSchemaTagTheme() {
    */
   const gate = (message) => {
     /* 兜底：非本插件页一律不开门禁（含 401 路径与宿主直接调用）。 */
-    if (!ownPage) return;
+    if (!isOwnPage()) return;
     if (overlayOpen) return;
+    /* /session 探测是异步的：用户可能在探测在途时离开本插件页。每次回写都现读标记，
+       晚到的结果一律丢弃 —— 清票据可以，遮罩绝不能盖到别人的插件页上。 */
+    const leftSinceProbe = () => {
+      if (isOwnPage()) return false;
+      clear();
+      return true;
+    };
     if (!session()) {
       rawFetch(base + '/session', { credentials: 'same-origin' })
         .then((response) => response.json())
         .then((state) => {
+          if (leftSinceProbe()) return;
           if (state && state.authenticated === true) return;
           if (state && state.bootstrapRequired === true) showInit();
           else showLogin(message || '');
         })
-        .catch(() => showLogin(message || '网络错误'));
+        .catch(() => {
+          if (leftSinceProbe()) return;
+          showLogin(message || '网络错误');
+        });
       return;
     }
     rawFetch(base + '/session', {
@@ -6578,6 +6588,7 @@ function ensureSchemaTagTheme() {
     })
       .then((response) => response.json())
       .then((state) => {
+        if (leftSinceProbe()) return;
         if (state && state.authenticated === true) {
           if (state.expiresAt) write(EXPIRY_KEY, String(state.expiresAt));
           return;
@@ -6586,16 +6597,19 @@ function ensureSchemaTagTheme() {
         if (state && state.bootstrapRequired === true) showInit();
         else showLogin('会话已失效，请重新输入。');
       })
-      .catch(() => undefined);
+      .catch(() => {
+        /* 网络抖动不算会话失效：只在本页仍需遵循「离开即清票据」这一条。 */
+        leftSinceProbe();
+      });
   };
 
   window.__ptxAuth = {
     gate,
     dismiss: finish,
     hasSession: () => session() !== null,
-    /* 本插件页判定：Console 组件按路由写入；门禁与 401 兜底都只看这一个标记。 */
-    setOwnPage: (value) => { ownPage = value === true; },
-    isOwnPage: () => ownPage,
+    /* 本插件页判定：Console 组件按路由写状态源；门禁与 401 兜底每次现读 isOwnPage。 */
+    setOwnPage: (value) => { ownPageState = value === true; },
+    isOwnPage,
   };
 })();
 // END GENERATED AUTH GATE

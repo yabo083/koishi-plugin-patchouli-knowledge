@@ -14,14 +14,18 @@ const CLIENT_SOURCE = fs.readFileSync(new URL('../client/dist/index.js', import.
 const BEGIN = '// BEGIN GENERATED AUTH GATE';
 const END = '// END GENERATED AUTH GATE';
 
-/** 载入生成块本体（不含浮窗代码），返回记账桩。 */
-function loadGate() {
+/** 载入生成块本体（不含浮窗代码），返回记账桩。
+ *  `holdSession`：把 `/session` 探测卡住，直到 `release()` —— 用来复现
+ *  「探测在途时用户离开本插件页」的竞态。 */
+function loadGate({ holdSession = false } = {}) {
   const start = CLIENT_SOURCE.indexOf(BEGIN);
   const stop = CLIENT_SOURCE.indexOf(END, start);
   assert.ok(start >= 0 && stop > start, '客户端产物里缺鉴权门的生成标记');
 
   const requests = [];
   let overlays = 0;
+  let releaseSession = null;
+  const sessionHeld = holdSession ? new Promise((resolve) => { releaseSession = resolve; }) : null;
   const createNode = () => ({
     id: '',
     innerHTML: '',
@@ -45,7 +49,8 @@ function loadGate() {
     if (url.includes('/api/')) {
       return Promise.resolve({ status: 401, ok: false, json: async () => ({}) });
     }
-    return Promise.resolve({ status: 200, ok: true, json: async () => ({ authenticated: false }) });
+    const answer = { status: 200, ok: true, json: async () => ({ authenticated: false }) };
+    return sessionHeld ? sessionHeld.then(() => answer) : Promise.resolve(answer);
   };
 
   const storage = new Map([
@@ -75,6 +80,7 @@ function loadGate() {
     requests,
     overlays: () => overlays,
     session: () => storage.get('patchouli.session') ?? null,
+    release: () => { if (releaseSession) releaseSession(); },
   };
 }
 
@@ -128,4 +134,27 @@ test('GATE-03: 非本插件页时直接调 gate() / 再点开登录也不挂遮�
   gate.api.gate();
   await flush();
   assert.equal(gate.overlays(), 1, '回到本插件页后门禁恢复');
+});
+
+test('GATE-04: 401 晚到的 /session 探测不弹门禁（探测在途时已离开本插件页）', async () => {
+  const gate = loadGate({ holdSession: true });
+
+  /* 401 落在**本插件页**上（标记此刻仍为真），门禁链起来并发出 /session 探测；
+     探测被卡在半路，正是宿主路由 700ms 轮询窗口里的那一段。 */
+  const response = await gate.win.fetch('/patchouli/api/entries');
+  assert.equal(response.status, 401);
+  assert.deepEqual(
+    gate.requests.filter((url) => url.includes('/session')),
+    ['/patchouli/session'],
+    '401 当时还是本插件页：门禁照常探会话',
+  );
+  assert.equal(gate.session(), null, '401 先清票据');
+
+  // 用户在探测返回前离开本插件页：路由标记下一轮才写进来，这里是写进来之后
+  gate.api.setOwnPage(false);
+  gate.release();
+  await flush();
+
+  assert.equal(gate.overlays(), 0, '晚到的探测结果一律丢弃：绝不在别人的插件页上盖遮罩');
+  assert.equal(gate.session(), null, '离开本页时票据保持清空');
 });
