@@ -6,7 +6,8 @@
  *   成功后把密钥**一次性**展示（可复制），同时已写入 `<wikiDir>/.patchouli/api-token.txt`；
  * - 其余：普通登录——粘贴已保存的密钥换会话。
  *
- * 之后每个 `/api` 请求自动带 `Authorization: Bearer <sid>`；401 清票据重弹。
+ * 之后每个 `/api` 请求自动带 `Authorization: Bearer <sid>`；401 清票据，**只在本插件页**
+ * 重弹门禁（Console 浮窗也挂在别的插件页上，那里盖全屏遮罩会堵住宿主表单）。
  * 浏览器只存短票据，长期密钥永不落 localStorage。
  */
 
@@ -37,6 +38,10 @@ export function authBootstrap(basePath: string): string {
 
   const rawFetch = window.fetch.bind(window);
   let overlayOpen = false;
+  /* 门禁只属于**本插件页**：Console 浮窗挂在任何 /plugins/** 页上，但全屏遮罩只许盖在
+     本插件自己的配置页 —— 否则别人的插件页会被登录 / 首次初始化对话框堵住。
+     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。 */
+  let ownPage = true;
 
   const shell = (inner) => {
     const root = document.createElement('div');
@@ -177,8 +182,11 @@ export function authBootstrap(basePath: string): string {
     if (!isApi) return pending;
     return pending.then((response) => {
       if (response.status === 401) {
+        /* 票据确实过期 / 被吊销：一律清掉，但不一定重弹门禁 ——
+           别的插件页上这块全屏遮罩会盖住宿主的表单，而那不是用户此刻在操作的页面。
+           数据面本身也只在本插件页取数（Console 侧 requestJson 同一条契约），这里是兜底。 */
         clear();
-        gate('会话已过期，请重新输入。');
+        if (ownPage) gate('会话已过期，请重新输入。');
       }
       return response;
     });
@@ -189,6 +197,8 @@ export function authBootstrap(basePath: string): string {
    * dismiss 供宿主路由离开本插件页时收起模态——否则遮罩会跟着留在别人的插件页上。
    */
   const gate = (message) => {
+    /* 兜底：非本插件页一律不开门禁（含 401 路径与宿主直接调用）。 */
+    if (!ownPage) return;
     if (overlayOpen) return;
     if (!session()) {
       rawFetch(base + '/session', { credentials: 'same-origin' })
@@ -218,7 +228,14 @@ export function authBootstrap(basePath: string): string {
       .catch(() => undefined);
   };
 
-  window.__ptxAuth = { gate, dismiss: finish, hasSession: () => session() !== null };
+  window.__ptxAuth = {
+    gate,
+    dismiss: finish,
+    hasSession: () => session() !== null,
+    /* 本插件页判定：Console 组件按路由写入；门禁与 401 兜底都只看这一个标记。 */
+    setOwnPage: (value) => { ownPage = value === true; },
+    isOwnPage: () => ownPage,
+  };
 })();`;
 }
 

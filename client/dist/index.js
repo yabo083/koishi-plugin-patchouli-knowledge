@@ -215,7 +215,13 @@ function clip(text, limit) {
 
 /* 请求超时：没有它，一个挂死的连接会让 status 轮询链永久停摆（promise 永不 settle）。 */
 const REQUEST_TIMEOUT_MS = 15000;
+/* 非本插件页时请求被拦下的错误文案：调用方的 catch 会把它当普通失败展示。 */
+const NOT_OWN_PAGE = '非本插件页：已暂停取数';
 function requestJson(url, options) {
+  /* 数据面的唯一闸口：浮窗挂在**任何** /plugins/** 页上（宿主用随机实例 id 渲染插件页时，
+     不挂就等于用户看不到入口），但取数只属于本插件页 —— 别的插件页既不为其拉数据，
+     也就没有 401 去弹门禁（生成块里的 401 兜底同样按本页标记判定）。 */
+  if (!state.own) return Promise.reject(new Error(NOT_OWN_PAGE));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   return fetch(url, Object.assign({ credentials: 'same-origin' }, options, { signal: controller.signal }))
@@ -2952,8 +2958,11 @@ const state = {
   mounted: false,
   visible: false,
   collapsed: false,
-  /* 鉴权门只在**本插件页**上开一次：离开本插件页（同插件体系内换页）就收起。 */
-  gateShown: false,
+  /* 本插件页判定（唯一真源）：门禁、取数、401 兜底都只看它。
+     浮窗挂在**任何** /plugins/** 页上，但只有本插件页才展开、才弹门禁、才拉 /api。 */
+  own: false,
+  /* 数据面是否在跑：只有本插件页为真；mount() 只建壳，零请求。 */
+  dataFlow: false,
   maximized: false,
   sized: false,
   restoreStyle: '',
@@ -5096,10 +5105,12 @@ function loadStatus() {
 }
 
 /* 状态轮询：监控页 5 秒（跟随后端 5 秒采样），其余阶段 15 秒；
- * 自调度以便阶段切换即时换挡，收回胶囊期间暂停取数但不丢链。 */
+ * 自调度以便阶段切换即时换挡，收回胶囊期间暂停取数但不丢链。
+ * 只在数据面运行中（本插件页）排链：别的插件页上连计时器都不该有。 */
 function scheduleStatusPoll() {
   clearTimeout(state.refreshTimer);
   state.refreshTimer = null;
+  if (!state.dataFlow || !state.own) return;
   if (!state.visible) return;
   state.refreshTimer = setTimeout(() => {
     state.refreshTimer = null;
@@ -6105,8 +6116,10 @@ function enterStage(next) {
   if (next !== 'settings') state.clearArmed = false;
   scheduleStatusPoll();
   resetIdleTimer();
-  /* 先发起读请求再渲染：首次进设置页时 loading 已置真，不会先闪一句“无字段” */
-  if (next === 'settings') { loadPrompt(); loadRuntimeSettings(); loadCardSettings(); }
+  /* 先发起读请求再渲染：首次进设置页时 loading 已置真，不会先闪一句“无字段”。
+     非本插件页（数据面没跑）不拉服务端设置 —— 那些请求会被 requestJson 的闸口拦下，
+     不如干脆不发起，免得面板里多一行「非本插件页」的假错误。 */
+  if (next === 'settings' && state.own) { loadPrompt(); loadRuntimeSettings(); loadCardSettings(); }
   renderStage();
 }
 
@@ -6386,6 +6399,10 @@ function ensureSchemaTagTheme() {
 
   const rawFetch = window.fetch.bind(window);
   let overlayOpen = false;
+  /* 门禁只属于**本插件页**：Console 浮窗挂在任何 /plugins/** 页上，但全屏遮罩只许盖在
+     本插件自己的配置页 —— 否则别人的插件页会被登录 / 首次初始化对话框堵住。
+     Console 组件按路由写入（setOwnPage）；独立页面永远是本页，故默认 true。 */
+  let ownPage = true;
 
   const shell = (inner) => {
     const root = document.createElement('div');
@@ -6526,8 +6543,11 @@ function ensureSchemaTagTheme() {
     if (!isApi) return pending;
     return pending.then((response) => {
       if (response.status === 401) {
+        /* 票据确实过期 / 被吊销：一律清掉，但不一定重弹门禁 ——
+           别的插件页上这块全屏遮罩会盖住宿主的表单，而那不是用户此刻在操作的页面。
+           数据面本身也只在本插件页取数（Console 侧 requestJson 同一条契约），这里是兜底。 */
         clear();
-        gate('会话已过期，请重新输入。');
+        if (ownPage) gate('会话已过期，请重新输入。');
       }
       return response;
     });
@@ -6538,6 +6558,8 @@ function ensureSchemaTagTheme() {
    * dismiss 供宿主路由离开本插件页时收起模态——否则遮罩会跟着留在别人的插件页上。
    */
   const gate = (message) => {
+    /* 兜底：非本插件页一律不开门禁（含 401 路径与宿主直接调用）。 */
+    if (!ownPage) return;
     if (overlayOpen) return;
     if (!session()) {
       rawFetch(base + '/session', { credentials: 'same-origin' })
@@ -6567,10 +6589,21 @@ function ensureSchemaTagTheme() {
       .catch(() => undefined);
   };
 
-  window.__ptxAuth = { gate, dismiss: finish, hasSession: () => session() !== null };
+  window.__ptxAuth = {
+    gate,
+    dismiss: finish,
+    hasSession: () => session() !== null,
+    /* 本插件页判定：Console 组件按路由写入；门禁与 401 兜底都只看这一个标记。 */
+    setOwnPage: (value) => { ownPage = value === true; },
+    isOwnPage: () => ownPage,
+  };
 })();
 // END GENERATED AUTH GATE
 
+/* 壳层与会话门禁：mount() 只建壳 + 绑定事件，**一个 /api 请求都不发**。
+   浮窗挂在任何 /plugins/** 页上（宿主用随机实例 id 渲染插件页时，不挂就没入口），
+   但取数只属于本插件页：在别的插件页上首帧取数，401 就会把登录 / 初始化模态盖住宿主。
+   数据面由 syncAuthGate 在「本页」变真时启动（startDataFlow），变假时停掉（stopDataFlow）。 */
 function mount() {
   if (state.mounted) return;
   document.addEventListener('visibilitychange', resumeTraffic);
@@ -6599,7 +6632,6 @@ function mount() {
      再挂观察器；用户手动切换过（localStorage 有记录）时以记忆为准，宿主换肤不覆盖。 */
   syncHostTheme();
   watchHostTheme();
-  syncSettingsUI();
 
   bindDrag();
   bindResize();
@@ -6614,21 +6646,30 @@ function mount() {
     tierObserver.observe(frameEl);
   }
   startTicker();
+
+  state.mounted = true;
+  state.stage = 'entries';
+
+  /* 首帧只画本地记忆与空态：数据回来后由 startDataFlow 重绘 */
+  renderChannelMenu();
+  renderStage();
+  resetIdleTimer();
+  refreshPhase();
+}
+
+/* 数据面启动：只有本插件页（state.own）才有资格拉 /api。
+ * 首次取数与两条轮询链（状态 / 最新）都在这里落地，mount() 里一个都不留。 */
+function startDataFlow() {
+  if (!state.mounted || !state.own || state.dataFlow) return;
+  state.dataFlow = true;
+  /* 选项先于数据落地：面板此刻已经可见，下拉 / 轮播条数不该等一次往返。 */
+  syncSettingsUI();
+  scheduleStatusPoll();
   clearInterval(latestTimer);
   latestTimer = setInterval(() => {
     if (!state.visible) return;
     loadLatest().then(refreshTicker);
   }, LATEST_POLL_MS);
-
-  state.mounted = true;
-  state.stage = 'entries';
-
-  /* 首次绘制前先把选项落地（loadChannels 回来后覆盖一次），下拉不存在空面板帧 */
-  renderChannelMenu();
-  renderStage();
-  resetIdleTimer();
-  refreshPhase();
-
   Promise.all([loadChannels(), loadEntries(), loadStatus(), loadLatest()]).then(() => {
     refreshTicker();
     refreshPhase();
@@ -6637,6 +6678,17 @@ function mount() {
       if (state.stage !== 'entries') renderStage();
     });
   });
+}
+
+/* 数据面停止：清掉两条自调度链，断掉后不再为**看不见的页**取数。
+ * 已拿到的数据留在 state 里：回到本插件页立刻可读，不必重拉一遍（首屏不闪空态）。 */
+function stopDataFlow() {
+  if (!state.dataFlow) return;
+  state.dataFlow = false;
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = null;
+  clearInterval(latestTimer);
+  latestTimer = null;
 }
 
 function unmount() {
@@ -6685,7 +6737,10 @@ function unmount() {
   state.mounted = false;
   state.visible = false;
   state.collapsed = false;
-  state.gateShown = false;
+  state.own = false;
+  state.dataFlow = false;
+  /* 壳层都没了就不再是「本插件页」：生成块的 401 兜底不能还给幽灵面板弹门禁。 */
+  syncGateOwnPage(false);
   state.maximized = false;
   state.sized = false;
   state.restoreStyle = '';
@@ -6780,17 +6835,40 @@ function collapseQuietly() {
   if (pillEl) pillEl.classList.add('is-visible');
 }
 
-/* 鉴权门跟随「是不是本插件页」：开了才收起，收起后回到本插件页才重开。
-   别的插件页上 mount 只是留一个悬浮胶囊，绝不盖全屏遮罩（宿主页面要能正常操作）。 */
-function syncAuthGate(own) {
-  if (own === state.gateShown) return;
-  state.gateShown = own;
+/* 把「本插件页」标记写给生成块（幂等）：生成块里的 401 兜底与 gate() 都只看它。
+   每轮路由判定都写一次 —— 首帧 own 本来就是 false，没有「翻转」事件，
+   跳过就等于让生成块停在它自己的默认值上。 */
+function syncGateOwnPage(own) {
   try {
-    if (own) {
-      if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
-    } else if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') {
-      window.__ptxAuth.dismiss();
+    if (window.__ptxAuth && typeof window.__ptxAuth.setOwnPage === 'function') {
+      window.__ptxAuth.setOwnPage(own);
     }
+  } catch (err) {
+    /* 宿主没暴露门禁接口时无事可做 */
+  }
+}
+
+/* 本插件页判定只有一个真源（`state.own`）：它同时决定鉴权门与数据面。
+   本页变真 → 先把标记同步给生成块，再启动取数并开门禁；
+   本页变假 → 立刻停掉取数（别的插件页一个 /api 都不发），再收起门禁。
+   浮窗壳层留在页面上（悬浮胶囊是入口），但绝不盖全屏遮罩、绝不为不可见页拉数据。 */
+function syncAuthGate(own) {
+  /* 先同步标记再判翻转：快路径也要保证生成块知道当前页不是本插件页。 */
+  syncGateOwnPage(own);
+  if (own === state.own) return;
+  state.own = own;
+  if (own) {
+    startDataFlow();
+    try {
+      if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
+    } catch (err) {
+      /* 宿主没暴露门禁接口时无事可做 */
+    }
+    return;
+  }
+  stopDataFlow();
+  try {
+    if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
   } catch (err) {
     /* 宿主没暴露门禁接口时无事可做 */
   }
@@ -6798,16 +6876,12 @@ function syncAuthGate(own) {
 
 function checkRoute() {
   if (!isPluginPage()) {
-    /* 离开插件页：探针清零，回到插件页时重新做一次软校验 */
+    /* 离开插件页：探针清零，回到插件页时重新做一次软校验。
+       鉴权模态是挂在 body 上的独立节点，路由离开时必须一并收起，
+       否则切到别处后仍被这块全屏遮罩盖住；取数也同步停掉（「不遮住宿主」与
+       「不为看不见的页拉数据」是同一条契约，都归 syncAuthGate(false) 管）。 */
     resetRouteProbe('');
-    state.gateShown = false;
-    /* 鉴权模态是挂在 body 上的独立节点：路由离开时必须一并收起，
-       否则切到别处后仍被这块全屏遮罩盖住（与「不遮住宿主」同一契约）。 */
-    try {
-      if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
-    } catch (err) {
-      /* 宿主没暴露门禁接口时无事可做 */
-    }
+    syncAuthGate(false);
     if (state.visible) {
       if (rootEl) rootEl.classList.add('ptx-hidden');
       state.visible = false;
@@ -6852,7 +6926,9 @@ function checkRoute() {
     /* 收回态不随路由自动展开：悬浮球是收回态下的唯一入口，
        否则 × 收回的面板会在切走再回来时被弹开。 */
     resetIdleTimer();
-    if (!state.refreshTimer) scheduleStatusPoll();
+    /* 本插件页才排状态轮询（syncAuthGate 在 visible 置真之前就已启动数据面，
+       那里的首次排链会因「不可见」跳过，这里补上；别的插件页 dataFlow 为假，连计时器都不建）。 */
+    if (state.dataFlow) scheduleStatusPoll();
   }
 
   /* 软校验迟到命中（宿主先挂壳后画标题）：挂载时只留了胶囊，认出本插件页后自动展开一次。

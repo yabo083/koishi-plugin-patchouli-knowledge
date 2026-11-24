@@ -54,6 +54,14 @@ function createNode() {
  * `mount()` 被替换成记账桩：真壳层需要完整 DOM，而本文件只断言挂载 / 收回的判定。
  */
 function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '' }) {
+  /* 数据面的「零请求」断言靠这个记账桩：产物里的 `fetch` 与生成块抓到的
+     `window.fetch` 都指向它，任何一条 /api 请求都躲不过去。 */
+  const requests = [];
+  const fetchStub = (input) => {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    requests.push(String(url));
+    return Promise.reject(new Error('probe: no network'));
+  };
   const windowStub = {
     location: { pathname, hash, search },
     localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
@@ -68,7 +76,7 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
     requestAnimationFrame: () => 0,
     cancelAnimationFrame: noop,
     // 产物顶层的门禁 IIFE 会 `window.fetch.bind(window)`：桩上必须有它，否则载入即失败
-    fetch: () => Promise.reject(new Error('probe: no network')),
+    fetch: fetchStub,
     CustomEvent: function CustomEvent() {},
   };
   const documentStub = {
@@ -147,7 +155,7 @@ return {
   const api = factory(
     windowStub,
     documentStub,
-    () => Promise.reject(new Error('probe: no network')),
+    fetchStub,
     () => 0,
     noop,
     // setTimeout 桩：idle 自动收纳 / 折叠过渡都不在断言范围内，且不拖住事件循环
@@ -159,12 +167,15 @@ return {
 
   /* 产物自带真实门禁实现（会 `document.body.appendChild` 弹模态）；测试里换成记账桩：
      本文件断言的是「该不该开关门禁」，不是模态长什么样。 */
-  const auth = { gates: 0, dismissals: 0 };
+  const auth = { gates: 0, dismissals: 0, ownPage: null };
   auth.gate = () => { auth.gates += 1; };
   auth.dismiss = () => { auth.dismissals += 1; };
+  /* 生成块按这个标记决定 401 要不要重弹门禁：路由判定必须把它同步过去。 */
+  auth.setOwnPage = (value) => { auth.ownPage = value === true; };
+  auth.isOwnPage = () => auth.ownPage === true;
   windowStub.__ptxAuth = auth;
 
-  return { ...api, auth };
+  return { ...api, auth, requests: () => requests.slice() };
 }
 
 test('ROUTE-01: 随机实例 id + 页面身份文本命中时挂载并展开（真实部署形态）', () => {
@@ -196,6 +207,10 @@ test('ROUTE-02: 别的插件的插件页挂载但不展开、不弹鉴权门 —
   assert.equal(api.state.mounted, true);
   assert.equal(gates, 0, '陌生插件页绝不能弹全屏鉴权遮罩');
   assert.equal(dismissals, 0, '没开过门禁就无需收起');
+  assert.equal(api.auth.ownPage, false, '本页标记必须同步给生成块：401 兜底也只认它');
+  assert.equal(api.state.own, false);
+  assert.equal(api.state.dataFlow, false, '别的插件页不启动数据面');
+  assert.deepEqual(api.requests(), [], '别的插件页零请求：既不为不可见页取数，也就没有 401 去弹门禁');
   assert.equal(api.state.collapsed, true, '未认领的插件页只留悬浮胶囊');
   assert.equal(api.classes('pill').includes('is-visible'), true, '胶囊是未认领页面上的唯一入口');
 });
@@ -305,4 +320,41 @@ test('ROUTE-09: 随机实例 id + 首帧读不到任何身份文本 → 仍挂�
   assert.equal(api.state.collapsed, true, '身份没认出时只留胶囊，整窗不盖住宿主表单');
   assert.equal(api.auth.gates, 0, '认不出身份不得弹全屏鉴权门');
   assert.equal(api.auth.dismissals, 0, '没开过门禁就无需收起');
+  assert.equal(api.auth.ownPage, false, '身份没认出就不是本插件页：401 兜底也只认这个标记');
+  assert.deepEqual(api.requests(), [], '认不出身份时一个 /api 请求都不发（首帧零请求）');
+});
+
+test('ROUTE-10: 本插件页 own 变真才启动数据面；离开本插件页立刻停掉，不再为不可见页取数', () => {
+  const api = loadClient({ pathname: '/plugins/adapter-onebot', title: '适配器 · Koishi' });
+  api.checkRoute();
+  assert.deepEqual(api.requests(), [], '别的插件页挂载壳层但零请求');
+  assert.equal(api.state.dataFlow, false);
+
+  // 换到本插件页：同一个壳层复用，own 变真 → 数据面启动
+  api.doc.title = '知识库 · Koishi';
+  api.win.location.pathname = '/plugins/0848oh';
+  api.checkRoute();
+  assert.equal(api.state.collapsed, false);
+  assert.equal(api.state.own, true);
+  assert.equal(api.auth.ownPage, true, '本插件页必须把标记同步给生成块');
+  assert.equal(api.state.dataFlow, true, 'own 变真即启动数据面');
+  const started = api.requests();
+  assert.ok(started.length > 0, '本插件页 own 后开始取数');
+  assert.equal(
+    started.every((url) => url.startsWith('/patchouli/api/')),
+    true,
+    '首次取数只打 /api（没有别的请求被顺手发出去）',
+  );
+
+  // 回到别的插件页：own 变假 → 数据面停止，之后不再多发一个请求
+  api.doc.title = '适配器 · Koishi';
+  api.win.location.pathname = '/plugins/adapter-onebot';
+  api.checkRoute();
+  assert.equal(api.state.own, false);
+  assert.equal(api.auth.ownPage, false);
+  assert.equal(api.state.dataFlow, false, '离开本插件页立刻停掉数据面');
+  const settled = api.requests().length;
+  api.checkRoute();
+  api.checkRoute();
+  assert.equal(api.requests().length, settled, '数据面停掉后轮询链不再续，请求数不增长');
 });
