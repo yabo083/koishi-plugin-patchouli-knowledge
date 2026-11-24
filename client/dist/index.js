@@ -6506,6 +6506,9 @@ const TAG_POLICY_COUNT_ATTR = 'data-ptx-policy-count';
 const TAG_POLICY_PLUS_TEXT = /^\+\s*\d+$/;
 const TAG_POLICY_PICKER_CLASS = 'ptx-policy-picker';
 const TAG_POLICY_TARGET_CLASS = 'ptx-policy-target';
+/* 认不出来源时的两条提示：同名目标挂在多行 → 不确定；行内与缓存都读不到 → 还没读到。 */
+const TAG_POLICY_NOTICE_AMBIGUOUS = '无法确定所属监听群，请点开下拉后重试';
+const TAG_POLICY_NOTICE_UNKNOWN = '读不到所属监听群，请点开投递群下拉后重试';
 /* 一行最多 16 个目标、同一监听群可以有多行，目标总数因此没有单独上限（≤ 行数 × 16）。
    列表一次只铺一页按钮把单屏 DOM 压住，剩下的用「继续显示」翻页——每个目标都必须点得到。 */
 const TAG_POLICY_PICKER_PAGE = 32;
@@ -6923,6 +6926,70 @@ function ensureTagPolicyStyles(doc) {
   doc.head.appendChild(style);
 }
 
+/* ---------------- 订阅表回执缓存（按目标名反查监听群） ----------------
+ * 宿主把「监听群」渲染成输入框，且部分版本连 `input.value` 都不落在我们读得到的地方，
+ * 行内解析因此可能整行读空。此时唯一还能回答「这个标签属于哪个监听群」的是订阅表接口：
+ * `refresh()` 预取一次、`openTargetPicker` 取过一次都写进这里。
+ *
+ * 物理边界：整页只留一条（`{ rows, at }`，≤1 项），60s 过期；行数与每行目标数都封顶，
+ * 超出的部分直接丢弃——兜底路径读不全就返回「认不出」，不把整张表常驻进内存。
+ * 缓存里只存 `{ source, targets }`：策略真源在 `/api/policies`，行内其它字段一概不留。 */
+const SUBSCRIPTION_CACHE_TTL = 60000;
+const SUBSCRIPTION_CACHE_MAX_ROWS = 512;
+const SUBSCRIPTION_CACHE_MAX_TARGETS = 32;
+let subscriptionCache = { rows: [], at: 0 };
+
+function cacheSubscriptionRows(payload) {
+  const source = payload && Array.isArray(payload.rows) ? payload.rows : (Array.isArray(payload) ? payload : []);
+  const rows = [];
+  for (const row of source) {
+    if (rows.length >= SUBSCRIPTION_CACHE_MAX_ROWS) break;
+    if (!row || typeof row !== 'object') continue;
+    const group = String(row.source == null ? '' : row.source).trim();
+    if (!group) continue;
+    const list = Array.isArray(row.targets) ? row.targets : [];
+    const targets = [];
+    for (const raw of list) {
+      if (targets.length >= SUBSCRIPTION_CACHE_MAX_TARGETS) break;
+      const target = typeof raw === 'string' ? raw.trim() : '';
+      if (target && targets.indexOf(target) < 0) targets.push(target);
+    }
+    if (targets.length) rows.push({ source: group, targets });
+  }
+  subscriptionCache = { rows, at: Date.now() };
+  return subscriptionCache;
+}
+
+function liveSubscriptionRows() {
+  if (!subscriptionCache.at) return null;
+  if (Date.now() - subscriptionCache.at > SUBSCRIPTION_CACHE_TTL) {
+    subscriptionCache = { rows: [], at: 0 };
+    return null;
+  }
+  return subscriptionCache.rows.length ? subscriptionCache.rows : null;
+}
+
+/**
+ * 按标签文本反查监听群。
+ * 恰好命中一行 → `{ source }`；命中多行 → `{ ambiguous: true }`（同名目标可以同时挂在
+ * 多个监听群下，猜一个等于替用户改错群，交给调用方提示重试）；无缓存 / 无匹配 → null。
+ */
+function resolveSourceByTarget(target) {
+  const name = String(target == null ? '' : target).trim();
+  if (!name) return null;
+  const rows = liveSubscriptionRows();
+  if (!rows) return null;
+  let matches = 0;
+  let group = '';
+  for (const row of rows) {
+    if (row.targets.indexOf(name) < 0) continue;
+    matches += 1;
+    group = row.source;
+    if (matches > 1) return { ambiguous: true };
+  }
+  return matches === 1 ? { source: group } : null;
+}
+
 /**
  * 投递群标签右键菜单。
  * 依赖全部注入（document / isOwnPage / identify / claim / read / write / readTargets），本段因此可被测试单独载入。
@@ -6931,7 +6998,8 @@ function ensureTagPolicyStyles(doc) {
  * `read` 返回 `GET /api/policies` 的载荷（数组或 `{ policies }`），`write` 抛错时
  * 的 `message` 会原样显示在菜单里（服务端 400 的 body.error 已在 writeJson 里抬出来）。
  * `readTargets` 返回 `GET /api/subscriptions` 的载荷（`{ rows: [{ source, targets }] }`）：
- * 只有 `+ N` 折叠标签需要它——被折叠的目标不在 DOM 里，只能从订阅表取回。
+ * 只有 `+ N` 折叠标签需要它列目标；标签行内读不到监听群时（宿主把群号藏进组件状态）
+ * 也靠它按目标名反查所属行。回执会缓存成整页一条、60s 过期，给右键时的兜底用。
  */
 function createTagPolicyMenu(options) {
   const opts = options || {};
@@ -7003,20 +7071,33 @@ function createTagPolicyMenu(options) {
     return source;
   }
 
+  /* 标签文本 = 目标名。老版本 Element Plus 没有 `.el-tag__content`：去掉关闭按钮的文字后取剩余。 */
+  function readTagTarget(tag) {
+    if (!tag || typeof tag.querySelector !== 'function') return '';
+    const labelNode = tag.querySelector('.el-tag__content');
+    let target = String((labelNode && labelNode.textContent) || '').trim();
+    if (!target) {
+      const closeBtn = tag.querySelector('.el-tag__close');
+      const raw = String(tag.textContent == null ? '' : tag.textContent);
+      target = (closeBtn && closeBtn.textContent ? raw.split(closeBtn.textContent).join('') : raw).trim();
+    }
+    return target;
+  }
+
   function readTagInfo(tag) {
     if (!tag || typeof tag.closest !== 'function') return null;
     const row = tag.closest('tr') || tag.closest('[role="row"]');
     if (!row) return null;
-    const source = readRowSource(row);
-    const labelNode = tag.querySelector ? tag.querySelector('.el-tag__content') : null;
-    let target = String((labelNode && labelNode.textContent) || '').trim();
-    if (!target) {
-      /* 老版本 Element Plus 没有 `.el-tag__content`：去掉关闭按钮的文字后取剩余。 */
-      const closeBtn = tag.querySelector ? tag.querySelector('.el-tag__close') : null;
-      const raw = String(tag.textContent == null ? '' : tag.textContent);
-      target = (closeBtn && closeBtn.textContent ? raw.split(closeBtn.textContent).join('') : raw).trim();
+    const target = readTagTarget(tag);
+    if (!target) return null;
+    let source = readRowSource(row);
+    if (!source) {
+      /* 行内读不到监听群（宿主把它藏在组件状态里）：按目标名回查订阅表缓存。
+         命中多行 / 无缓存时不猜，返回 null 由调用方提示——绝不拿别的群号改写策略。 */
+      const hit = resolveSourceByTarget(target);
+      if (!hit || hit.ambiguous) return null;
+      source = hit.source;
     }
-    if (!source || !target) return null;
     return { row, source, target, key: tagPolicyKey(source, target) };
   }
 
@@ -7106,17 +7187,82 @@ function createTagPolicyMenu(options) {
     paintCollapsed(host);
   }
 
+  /* 认不出来源时的轻提示：一行说明 + 关闭。静默什么都不发生是最坏的结果——
+     用户以为右键坏了，实际上只要点开下拉让行内出现群号就能配置。 */
+  function openNotice(tag, text, x, y) {
+    ensureTagPolicyStyles(doc);
+    closeMenu();
+    if (!doc.body || typeof doc.body.appendChild !== 'function') return;
+    const root = doc.createElement('div');
+    root.className = TAG_POLICY_MENU_CLASS + ' ptx-policy-notice' + menuThemeClass();
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-label', '投递策略');
+
+    const head = doc.createElement('div');
+    head.className = 'ptx-policy-head';
+    const eyebrow = doc.createElement('span');
+    eyebrow.className = 'ptx-policy-eyebrow';
+    eyebrow.textContent = '投递策略';
+    const who = doc.createElement('span');
+    who.className = 'ptx-policy-who';
+    who.textContent = readTagTarget(tag) || '未识别目标';
+    head.appendChild(eyebrow);
+    head.appendChild(who);
+    root.appendChild(head);
+
+    const blocked = doc.createElement('p');
+    blocked.className = 'ptx-policy-hint ptx-policy-blocked';
+    blocked.textContent = text;
+    root.appendChild(blocked);
+
+    const actions = doc.createElement('div');
+    actions.className = 'ptx-policy-actions';
+    const dismiss = doc.createElement('button');
+    dismiss.setAttribute('type', 'button');
+    dismiss.className = 'ptx-policy-cancel';
+    dismiss.textContent = '关闭';
+    dismiss.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      closeMenu();
+    });
+    actions.appendChild(dismiss);
+    root.appendChild(actions);
+
+    doc.body.appendChild(root);
+    menuEl = root;
+    menuTag = tag;
+    placeMenu(root, x, y);
+  }
+
+  /* 提示文案按成因分：多行同名目标 = 无法确定；缓存没赶上 / 行内彻底读空 = 还没读到。 */
+  function noticeTextFor(tag) {
+    const hit = resolveSourceByTarget(readTagTarget(tag));
+    return hit && hit.ambiguous ? TAG_POLICY_NOTICE_AMBIGUOUS : TAG_POLICY_NOTICE_UNKNOWN;
+  }
+
   function bindTag(tag) {
     if (!tag || typeof tag.addEventListener !== 'function') return;
-    const info = readTagInfo(tag);
-    if (!info) return;
+    /* 不在表格行里的可关闭标签（宿主别处的输入框）不归本段管：连右键都不接管。 */
+    const row = typeof tag.closest === 'function' ? (tag.closest('tr') || tag.closest('[role="row"]')) : null;
+    if (!row) return;
     /* 少数版本的 `+ N` 折叠标签也带 `is-closable`：它是「选择目标」入口，不是投递目标本身。 */
-    if (TAG_POLICY_PLUS_TEXT.test(info.target)) return;
+    if (TAG_POLICY_PLUS_TEXT.test(readTagTarget(tag))) return;
+    /* 此刻读不到监听群**不再放弃绑定**：右键时缓存可能已经回来，再试一次；仍读不到就弹提示。 */
+    const info = readTagInfo(tag);
     tag.setAttribute(TAG_POLICY_BOUND_ATTR, '1');
     const handler = (event) => {
-      const fresh = readTagInfo(tag);
-      if (!fresh) return;
+      /* 认不出本插件页：既不认领也不吞宿主菜单，连提示都不给（这页不归我们管）。 */
       if (!claimAllowed()) return;
+      const fresh = readTagInfo(tag);
+      if (!fresh) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+        /* 本页已 own 时右键同样是一次认领（幂等），与能识别来源时保持一致。 */
+        if (claimPage) claimPage();
+        if (!isOwnPage()) return;
+        openNotice(tag, noticeTextFor(tag), Number(event && event.clientX) || 0, Number(event && event.clientY) || 0);
+        return;
+      }
       if (event && typeof event.preventDefault === 'function') event.preventDefault();
       if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
       /* 右键 = 「我要在这页配置」。认得出本插件页时**无条件**走认领（幂等）：已 own 时
@@ -7128,7 +7274,7 @@ function createTagPolicyMenu(options) {
     };
     tag.addEventListener('contextmenu', handler);
     bound.set(tag, handler);
-    applyTagPolicySuffix(doc, tag, cache.get(info.key));
+    if (info) applyTagPolicySuffix(doc, tag, cache.get(info.key));
   }
 
   /* ---------------- 策略读取 ---------------- */
@@ -7150,6 +7296,9 @@ function createTagPolicyMenu(options) {
           cache.set(tagPolicyKey(source, target), normalizeTagPolicy(raw));
         }
         loaded = true;
+        /* 首屏就预取一次订阅表：行内读不到监听群时，右键不必等一个来回才认出来源。
+           不并进 refresh 的返回链——后缀回显是热路径，不能为兜底多等一个慢 I/O。 */
+        prefetchSubscriptions();
         scan();
         return true;
       }, () => false)
@@ -7158,6 +7307,16 @@ function createTagPolicyMenu(options) {
         return ok;
       });
     return inflight;
+  }
+
+  /* 订阅表预取：只填缓存给兜底用，失败静默（右键时还会再试一次读，读不到就提示）。 */
+  function prefetchSubscriptions() {
+    if (!readTargets) return;
+    Promise.resolve()
+      .then(() => readTargets())
+      .then((payload) => {
+        cacheSubscriptionRows(payload);
+      }, () => {});
   }
 
   /* 本插件页归属变化：变真 → 本次进入只读一次策略；变假 → 收起菜单（请求零发出）。 */
@@ -7320,6 +7479,8 @@ function createTagPolicyMenu(options) {
     Promise.resolve()
       .then(() => readTargets())
       .then((payload) => {
+        /* 订阅表回执顺带填缓存：行内读不到监听群的标签靠它反查所属行。 */
+        cacheSubscriptionRows(payload);
         /* 回执可能迟到：菜单已被收起 / 换成了别的菜单时不能再往里写。 */
         if (menuEl !== root) return;
         const targets = resolveRowTargets(payload, source);
@@ -7756,6 +7917,8 @@ function createTagPolicyMenu(options) {
       }
     }
     cache.clear();
+    /* 订阅表缓存是模块级的（整页一条）：本实例拆除后不再持有整张表。 */
+    subscriptionCache = { rows: [], at: 0 };
     attempted = false;
     loaded = false;
     inflight = null;
@@ -7764,6 +7927,1358 @@ function createTagPolicyMenu(options) {
   return { attach, destroy, scan, refresh, syncOwn, openMenu, closeMenu, readTagInfo, formatSuffix: formatTagPolicy };
 }
 // END TAG POLICY MENU
+
+/* ------------------------------------------------------------------ *
+ * 12.6 订阅表 · 自定义 role 组件（`ptx-subscriptions`）
+ * ------------------------------------------------------------------ *
+ * 服务端的 `subscriptions` 不再声明 `role('table')`，改成 `role('ptx-subscriptions')`；
+ * 宿主 Console 的 setting 服务把 `ctx.schema` 混入每个插件上下文（`extendSchema`），
+ * schemastery-vue 渲染期按 `type + meta.role` 择优，于是这张表由本段接管。
+ *
+ * 与 `role('table')` 的差别只在「投递群」这一列：原生表格单元格放不下「每行一策略」，
+ * 所以 chip 本体是可点的策略入口，点了在**本行下方**就地铺开面板（不做浮层坐标定位：
+ * 浮层要跟滚动 / 宿主重渲染对账，内联面板没有这条账）。
+ *
+ * 硬约束：
+ *   1. 纯函数式：任何编辑都 `emit('update:modelValue', next)`，绝不就地改 `modelValue`
+ *      的数组或行对象 —— 宿主按引用判断「已改动」，就地改它看不见；
+ *   2. 本段自成一体（只依赖注入的 vue 与浏览器 fetch / AbortController），测试按标记载入；
+ *   3. 策略只发**改动字段**（`POST /api/policies` 是逐项局部更新，全量发会覆盖并发写的那几项）。
+ *
+ * 为什么不在产物顶层写 `import { h } from 'vue'`：
+ *   - 宿主**生产模式**才把裸模块名重写成 `../vue.js`（plugin-console 的 `transformImport`），
+ *     `devMode` 下原样下发文件，裸名解析不了 → 整份产物连带浮窗一起挂掉；
+ *   - 本仓库的产物测试把整份文件当**函数体**载入（顶层 import 就是语法错误）。
+ * 入口固定在 `<uiPath>/@plugin-<id>/index.js`，因此 `../vue.js` 恰好是宿主自己那份运行时，
+ * 两种模式都命中；动态 import 解析成功后才注册 role，失败就退回宿主的数组卡片（不静默爆炸）。
+ */
+// BEGIN SUBSCRIPTIONS ROLE
+const SUBSCRIPTIONS_ROLE = 'ptx-subscriptions';
+const SUBSCRIPTIONS_STYLE_ID = 'patchouli-subscriptions-role-style';
+const SUBSCRIPTIONS_STYLE_MARK = 'subscriptions-role';
+/* 策略四字段：两条 cron 的空串 = 立即投（服务端口径），两个计数 0 = 不限。 */
+const SUBSCRIPTIONS_POLICY_FIELDS = ['entryCron', 'weeklyCron', 'perDay', 'perWeek'];
+/* 定时预设只把 cron 填进**本面板**的输入框，保存仍要用户点「保存」（不发请求）。 */
+const SUBSCRIPTIONS_ENTRY_CRON_PRESETS = [
+  { label: '每天 22:00', cron: '0 22 * * *' },
+  { label: '每天 09:00', cron: '0 9 * * *' },
+];
+const SUBSCRIPTIONS_WEEKLY_CRON_PRESETS = [
+  { label: '每周一 09:00', cron: '0 9 * * 1' },
+  { label: '每周五 20:00', cron: '0 20 * * 5' },
+];
+/* 值域与服务端同口径：词条/日上限即 `MAX_PERIOD_QUOTA`（999），周报更窄，面板先挡一道。 */
+const SUBSCRIPTIONS_PER_DAY_MAX = 999;
+const SUBSCRIPTIONS_PER_WEEK_MAX = 100;
+const SUBSCRIPTIONS_WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+
+/* ---------------- 策略数据（与右键菜单段各自独立：那一段要能被单独删掉） ---------------- */
+
+/* 来源去平台前缀：`onebot:444444` 与 `444444` 是同一个监听群（服务端也这么归一）。 */
+function subscriptionsPolicySource(source) {
+  const raw = String(source == null ? '' : source).trim();
+  const prefixed = /^[a-zA-Z][\w-]*:(\d+)$/.exec(raw);
+  return prefixed ? prefixed[1] : raw;
+}
+
+/* 策略键：同一个投递群在不同监听群下各有一份独立策略（`\u0000` 不会出现在群号 / 群名里）。 */
+function subscriptionsPolicyKey(source, target) {
+  return subscriptionsPolicySource(source) + '\u0000' + String(target == null ? '' : target).trim();
+}
+
+/* 单条策略归一化：两条 cron 存原文（语法权威在服务端），两个计数取非负整数。 */
+function subscriptionsNormalizePolicy(raw) {
+  const record = raw && typeof raw === 'object' ? raw : {};
+  const perDay = Math.max(0, Math.trunc(Number(record.perDay) || 0));
+  const perWeek = Math.max(0, Math.trunc(Number(record.perWeek) || 0));
+  return {
+    entryCron: String(record.entryCron == null ? '' : record.entryCron).trim(),
+    weeklyCron: String(record.weeklyCron == null ? '' : record.weeklyCron).trim(),
+    perDay,
+    perWeek,
+  };
+}
+
+/* `/api/policies` 载荷归一：GET / POST 回执都是 `{ policies: [...] }`，异常时可能是裸数组。
+   `source` 与 `target` 都非空的项才留（键不全的项对不上任何 chip）。 */
+function subscriptionsNormalizePolicies(payload) {
+  const list = payload && Array.isArray(payload.policies)
+    ? payload.policies
+    : (Array.isArray(payload) ? payload : []);
+  const out = [];
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object') continue;
+    const source = subscriptionsPolicySource(raw.source);
+    const target = String(raw.target == null ? '' : raw.target).trim();
+    if (!source || !target) continue;
+    out.push(Object.assign({ source, target }, subscriptionsNormalizePolicy(raw)));
+  }
+  return out;
+}
+
+/* 行 → 目标列表：`targets` 是权威形态，历史单值 / 字符串数组 `target` 也要能读。 */
+function subscriptionsRowTargets(row) {
+  if (!row || typeof row !== 'object') return [];
+  const out = [];
+  const push = (value) => {
+    const name = typeof value === 'string' ? value.trim() : '';
+    if (name && out.indexOf(name) < 0) out.push(name);
+  };
+  if (Array.isArray(row.targets)) {
+    for (const value of row.targets) push(value);
+  }
+  if (typeof row.target === 'string') push(row.target);
+  else if (Array.isArray(row.target)) for (const value of row.target) push(value);
+  return out;
+}
+
+/* cron → 人读摘要：只认「分 时 每天 / 每周某天」这两种常见形状
+   （`0 22 * * *` → `22:00`；`0 9 * * 1` → `周一 09:00`），其余**原样回显 cron**，
+   绝不猜范围值——面板里的输入框才是权威。 */
+function subscriptionsCronLabel(cron) {
+  const text = String(cron == null ? '' : cron).trim();
+  if (!text) return '';
+  const parts = text.split(/\s+/);
+  if (parts.length !== 5) return text;
+  const [minute, hour, day, month, weekday] = parts;
+  if (!/^\d{1,2}$/.test(minute) || !/^\d{1,2}$/.test(hour)) return text;
+  const time = String(Number(hour)).padStart(2, '0') + ':' + String(Number(minute)).padStart(2, '0');
+  if (day !== '*' || month !== '*') return text;
+  if (weekday === '*') return time;
+  if (!/^\d$/.test(weekday)) return text;
+  return '周' + SUBSCRIPTIONS_WEEKDAYS[Number(weekday) % 7] + ' ' + time;
+}
+
+/* chip 上的策略摘要：`22:00·周一 09:00·3/1`，任一段为空就省略，全空 → 空串（不显示）。 */
+function subscriptionsPolicySummary(policy) {
+  if (!policy) return '';
+  const normalized = subscriptionsNormalizePolicy(policy);
+  const parts = [];
+  if (normalized.entryCron) parts.push(subscriptionsCronLabel(normalized.entryCron));
+  if (normalized.weeklyCron) parts.push(subscriptionsCronLabel(normalized.weeklyCron));
+  if (normalized.perDay || normalized.perWeek) parts.push(normalized.perDay + '/' + normalized.perWeek);
+  return parts.join('·');
+}
+
+/* 面板层的粗校验：只挡「明显不是 5 字段」的输入；日期是否真实存在由服务端裁决
+   （400 的 body.error 会原样显示在面板底部）。空 = 立即投，合法。 */
+function subscriptionsCronError(cron) {
+  const text = String(cron == null ? '' : cron).trim();
+  if (!text) return '';
+  return text.split(/\s+/).length === 5
+    ? ''
+    : '投递时间要写 5 字段 cron（如 0 22 * * *），留空 = 立即投';
+}
+
+/* 计数输入框 → 非负整数，超上限按上限（服务端也会拒，这里少一趟 400）。 */
+function subscriptionsQuota(value, max) {
+  const number = Math.trunc(Number(value));
+  if (!Number.isFinite(number) || number < 0) return 0;
+  return Math.min(number, max);
+}
+
+/* ---------------- 网络：组件自带的 fetch（不走浮窗的本页闸口） ---------------- */
+
+/* 这一段自己发请求，不经浮窗的 `guardedFetch`：那道闸拿 `state.own` 做门禁，而 Console
+   插件页在「点胶囊 / 被元数据认领」之前 `state.own === false` —— 弄错一步就把整张表报成
+   「策略读取失败：非本插件页」。本组件只会挂在本插件的 schema 上，它出现在页面上本身就是
+   本插件页的证据，闸口在这里没有信息量。 */
+const SUBSCRIPTIONS_POLICY_API = '/patchouli/api/policies';
+/* 与浮窗同一条超时：没有它，一个挂死的连接会让 `policiesRequested` 永久为真，面板就停在
+   「正在读取投递策略…」再也退不回来。 */
+const SUBSCRIPTIONS_REQUEST_TIMEOUT_MS = 15000;
+
+/* 同源 + JSON 头；失败原因优先取服务端 body 里的 `error`（HTTP 400 的原因只有 body 里有）。 */
+async function subscriptionsApiFetch(path, init) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUBSCRIPTIONS_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(path, Object.assign({
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    }, init));
+    /* 先取文本再解析：body 中途被 reset 时抛的是连接层错误，只有真拿到响应体却解析不出
+       JSON 才算「没有这套接口」——读 `res.json()` 会把两种失败混成一种。 */
+    const text = typeof res.text === 'function' ? await res.text() : '';
+    const header = res.headers && typeof res.headers.get === 'function' ? res.headers.get('content-type') : '';
+    const type = String(header == null ? '' : header).toLowerCase();
+    const raw = text ? String(text).trim() : '';
+    let body = null;
+    let parsed = !raw;
+    if (raw) {
+      try { body = JSON.parse(raw); parsed = true; } catch (err) { parsed = false; }
+    }
+    /* 200 + HTML（路径写错 / 反代兜底页）绝不能当成「没有策略」：那会铺一张空表，保存时把
+       服务端已有的 cron / 额度当成用户改成的空值提交。非 JSON 一律当错误，面板据此禁保存。 */
+    if (!parsed || (type && type.indexOf('json') < 0)) {
+      throw new Error('策略接口返回非 JSON（HTTP ' + res.status + '）');
+    }
+    if (!res.ok || (body && body.ok === false)) {
+      throw new Error((body && body.error) || 'HTTP ' + res.status);
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* ---------------- 材质：与 `.k-schema-table` 同排，颜色一律取宿主变量 ---------------- */
+
+const SUBSCRIPTIONS_ROLE_STYLES = `.ptx-subrole .ptx-subrole-body { margin: .5rem 0 .25rem; }
+/* 固定表格布局 + 百分比列宽：目标名再长也只在自己的格里折行，不会把整表挤变形。 */
+.ptx-subrole .ptx-subrole-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.ptx-subrole .ptx-subrole-table th:nth-child(1) { width: 24%; }
+.ptx-subrole .ptx-subrole-table th:nth-child(2) { width: 46%; }
+.ptx-subrole .ptx-subrole-table th:nth-child(3),
+.ptx-subrole .ptx-subrole-table th:nth-child(4) { width: 10%; }
+.ptx-subrole .ptx-subrole-table th:nth-child(5) { width: 10%; }
+.ptx-subrole .ptx-subrole-table th {
+  padding: 6px 8px; text-align: left; font-size: 12px; font-weight: 500; white-space: nowrap;
+  color: var(--k-color-font-secondary, #9b9691);
+  border-bottom: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+}
+.ptx-subrole .ptx-subrole-table td { padding: 4px 6px; vertical-align: middle; }
+.ptx-subrole .ptx-subrole-table tbody tr + tr > td {
+  border-top: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+}
+.ptx-subrole .ptx-subrole-empty { padding: 8px 6px; opacity: .65; }
+.ptx-subrole .ptx-subrole-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+/* 输入框 / 下拉 / stepper 同一套材质：28px 高、6px 圆角、同一条边框与 focus 环。 */
+.ptx-subrole .ptx-subrole-input {
+  width: 100%; box-sizing: border-box; height: 28px; padding: 0 8px; font: inherit; font-size: 12px;
+  color: var(--k-color-font, #e6e2dc);
+  background: var(--k-color-bg2, #2f3033);
+  border: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-radius: 6px; outline: none;
+}
+.ptx-subrole .ptx-subrole-input::placeholder { color: var(--k-color-font, #e6e2dc); opacity: .45; }
+.ptx-subrole .ptx-subrole-input:focus {
+  border-color: var(--k-color-primary, #7b6fd8);
+  box-shadow: 0 0 0 2px rgba(123, 111, 216, .24);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-color-primary, #7b6fd8) 24%, transparent);
+}
+.ptx-subrole .ptx-subrole-input:disabled { opacity: .5; cursor: default; }
+/* 原生 select：color-scheme: dark 让浏览器自带的 option 列表跟着深色，
+   系统箭头换成右侧自绘 caret（内联 SVG data URI，零外部资源）。 */
+.ptx-subrole select.ptx-subrole-input {
+  padding: 0 26px 0 8px; color-scheme: dark; cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+  background: var(--k-color-bg2, #2f3033)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%239b9691' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E")
+    no-repeat right 8px center;
+  background-size: 12px 12px;
+}
+/* option 只能尽力而为：支持的系统跟随这两条，不支持的仍是宿主默认列表。 */
+.ptx-subrole select.ptx-subrole-input option {
+  background: var(--k-color-bg2, #2f3033); color: var(--k-color-font, #e6e2dc);
+}
+.ptx-subrole .ptx-subrole-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; }
+/* chip：22px 高、6px 圆角，和同行 28px 的输入框在基线上对齐。 */
+.ptx-subrole .ptx-subrole-chip {
+  display: inline-flex; align-items: center; gap: 4px; box-sizing: border-box;
+  height: 22px; max-width: 100%; padding: 0 6px;
+  font-size: 12px; line-height: 20px; vertical-align: middle;
+  color: var(--k-color-font, #e6e2dc); cursor: pointer; user-select: none;
+  background: var(--bg1, transparent);
+  border: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-radius: 6px;
+}
+/* 目标名再长也不撑宽整表：单行截断，省略号。 */
+.ptx-subrole .ptx-subrole-chip-name {
+  min-width: 0; max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 主色跟宿主走；color-mix 不支持的老宿主吃到前一行同色系的 rgba 兜底。 */
+.ptx-subrole .ptx-subrole-chip:hover,
+.ptx-subrole .ptx-subrole-chip.is-open {
+  border-color: var(--k-color-primary, #7b6fd8); color: var(--k-color-primary, #7b6fd8);
+  background: rgba(123, 111, 216, .18);
+  background: color-mix(in srgb, var(--k-color-primary, #7b6fd8) 18%, transparent);
+}
+.ptx-subrole .ptx-subrole-chip-policy {
+  flex: none; font-size: 11px; opacity: .72; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ptx-subrole .ptx-subrole-chip-x {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; padding: 0;
+  color: inherit; background: transparent; border: 0; border-radius: 4px; opacity: .55; cursor: pointer;
+}
+.ptx-subrole .ptx-subrole-chip-x:hover { opacity: 1; background: rgba(127, 127, 127, .18); }
+/* 按钮与输入框同高同圆角：28px / 6px；次要按钮描边，主按钮实心。 */
+.ptx-subrole .ptx-subrole-add-target,
+.ptx-subrole .ptx-subrole-btn,
+.ptx-subrole .ptx-subrole-preset {
+  box-sizing: border-box; height: 28px; padding: 0 10px;
+  font: inherit; font-size: 12px; color: var(--k-color-font, #e6e2dc); cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-radius: 6px;
+}
+.ptx-subrole .ptx-subrole-add-target { border-style: dashed; opacity: .8; }
+.ptx-subrole .ptx-subrole-add-target:hover,
+.ptx-subrole .ptx-subrole-btn:hover,
+.ptx-subrole .ptx-subrole-preset:hover {
+  border-color: var(--k-color-primary, #7b6fd8); color: var(--k-color-primary, #7b6fd8); opacity: 1;
+  background: rgba(123, 111, 216, .18);
+  background: color-mix(in srgb, var(--k-color-primary, #7b6fd8) 18%, transparent);
+  filter: brightness(1.1);
+}
+.ptx-subrole .ptx-subrole-btn.is-primary {
+  background: var(--k-color-primary, #7b6fd8); border-color: var(--k-color-primary, #7b6fd8); color: #fff;
+}
+.ptx-subrole .ptx-subrole-btn.is-primary:hover {
+  background: var(--k-color-primary, #7b6fd8); border-color: var(--k-color-primary, #7b6fd8); color: #fff;
+  filter: brightness(1.1);
+}
+.ptx-subrole .ptx-subrole-btn:disabled,
+.ptx-subrole .ptx-subrole-preset:disabled,
+.ptx-subrole .ptx-subrole-add-target:disabled,
+.ptx-subrole .ptx-subrole-chip-x:disabled { opacity: .5; cursor: default; filter: none; }
+.ptx-subrole .ptx-subrole-new-target {
+  display: inline-flex; flex: 1 1 100%; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 0; max-width: 100%;
+}
+.ptx-subrole .ptx-subrole-new-input { flex: 1 1 9rem; width: auto; min-width: 0; max-width: 14rem; }
+.ptx-subrole .ptx-subrole-ops { display: flex; gap: 4px; justify-content: flex-end; }
+.ptx-subrole .ptx-subrole-ops .ptx-subrole-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 28px; padding: 0;
+}
+.ptx-subrole .ptx-subrole-flag { display: inline-flex; align-items: center; }
+/* color-scheme 也管原生复选框：深色底上未勾选的框不会亮成一块白。 */
+.ptx-subrole .ptx-subrole-check {
+  flex: none; width: 15px; height: 15px; margin: 0; vertical-align: middle;
+  color-scheme: dark; accent-color: var(--k-color-primary, #7b6fd8); cursor: pointer;
+}
+.ptx-subrole .ptx-subrole-status { margin-top: 6px; font-size: 12px; opacity: .72; }
+.ptx-subrole .ptx-subrole-status.is-error { color: var(--el-color-danger, #d9534f); opacity: 1; }
+.ptx-subrole .ptx-subrole-panel {
+  margin: 2px 0 8px; padding: 12px;
+  background: var(--bg1, transparent);
+  border: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-radius: 8px;
+}
+.ptx-subrole .ptx-subrole-panel-head {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0 0 10px;
+}
+.ptx-subrole .ptx-subrole-panel-title { flex: none; font-size: 12px; font-weight: 600; }
+/* 监听群 → 投递群：长了就截断，别把「当前 …」和面板一起顶出去。 */
+.ptx-subrole .ptx-subrole-panel-who {
+  min-width: 0; max-width: 26rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; opacity: .72;
+}
+.ptx-subrole .ptx-subrole-panel-now {
+  flex: none; font-size: 12px; opacity: .72; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.ptx-subrole .ptx-subrole-sec { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0; }
+.ptx-subrole .ptx-subrole-sec + .ptx-subrole-sec {
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+}
+.ptx-subrole .ptx-subrole-sec-title { flex: none; min-width: 7rem; font-size: 12px; opacity: .8; }
+.ptx-subrole .ptx-subrole-cron-input { width: 11rem; }
+.ptx-subrole .ptx-subrole-quota { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+/* − [ n ] +：外壳一条边框，中间只留一条竖分割线；focus 时整壳变主色。 */
+.ptx-subrole .ptx-subrole-stepper {
+  display: inline-flex; align-items: center; height: 28px; box-sizing: border-box; overflow: hidden;
+  background: var(--k-color-bg2, #2f3033);
+  border: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-radius: 6px;
+}
+.ptx-subrole .ptx-subrole-stepper:focus-within {
+  border-color: var(--k-color-primary, #7b6fd8);
+  box-shadow: 0 0 0 2px rgba(123, 111, 216, .24);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--k-color-primary, #7b6fd8) 24%, transparent);
+}
+.ptx-subrole .ptx-subrole-step {
+  flex: 0 0 24px; width: 24px; height: 100%; padding: 0;
+  font: inherit; font-size: 13px; line-height: 1; color: var(--k-color-font, #e6e2dc);
+  background: transparent; border: 0; cursor: pointer;
+}
+.ptx-subrole .ptx-subrole-step:hover {
+  color: var(--k-color-primary, #7b6fd8);
+  background: rgba(123, 111, 216, .18);
+  background: color-mix(in srgb, var(--k-color-primary, #7b6fd8) 18%, transparent);
+}
+.ptx-subrole .ptx-subrole-step:disabled { opacity: .5; cursor: default; }
+.ptx-subrole .ptx-subrole-count {
+  flex: 1 1 auto; width: 3.25rem; min-width: 0; height: 100%; padding: 0;
+  font: inherit; font-size: 12px; color: var(--k-color-font, #e6e2dc); text-align: center;
+  background: transparent; outline: none;
+  border: 0; border-left: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  border-right: 1px solid var(--k-color-border, rgba(255, 255, 255, .12));
+  /* 原生 spinner 关掉：这套 − / + 才是唯一入口。 */
+  appearance: textfield; -moz-appearance: textfield;
+}
+.ptx-subrole .ptx-subrole-count::-webkit-outer-spin-button,
+.ptx-subrole .ptx-subrole-count::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.ptx-subrole .ptx-subrole-count:disabled { opacity: .5; cursor: default; }
+.ptx-subrole .ptx-subrole-panel-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.ptx-subrole .ptx-subrole-panel-msg { flex: 1; min-width: 0; font-size: 11px; opacity: .6; }
+.ptx-subrole .ptx-subrole-panel-msg.is-error { color: var(--el-color-danger, #d9534f); opacity: 1; }
+/* 可滚动的容器（面板 / 表格外壳）跟宿主走同一条 6px 细滚动条。 */
+.ptx-subrole,
+.ptx-subrole .ptx-subrole-body,
+.ptx-subrole .ptx-subrole-panel {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--k-color-border, rgba(255, 255, 255, .18)) 70%, transparent) transparent;
+}
+.ptx-subrole ::-webkit-scrollbar { width: 6px; height: 6px; }
+.ptx-subrole ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--k-color-border, rgba(255, 255, 255, .18)) 70%, transparent);
+  border-radius: 3px;
+}
+.ptx-subrole ::-webkit-scrollbar-thumb:hover { background: var(--k-color-primary, #7b6fd8); }
+.ptx-subrole ::-webkit-scrollbar-track { background: transparent; }
+`;
+
+/* 幂等：同一页面无论注册多少次，只落一个 <style>（与 `ensureSchemaTagTheme` 同一写法）。 */
+function ensureSubscriptionsRoleStyles() {
+  if (typeof document === 'undefined' || !document.head) return;
+  if (typeof document.getElementById === 'function' && document.getElementById(SUBSCRIPTIONS_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = SUBSCRIPTIONS_STYLE_ID;
+  style.setAttribute('data-patchouli', SUBSCRIPTIONS_STYLE_MARK);
+  style.textContent = SUBSCRIPTIONS_ROLE_STYLES;
+  document.head.appendChild(style);
+}
+
+/* ---------------- 组件 ---------------- */
+
+/* 内联 SVG（产物红线：零 Emoji、100% 内联 SVG）。stroke 走 currentColor，跟着宿主主题变。 */
+function subscriptionsIcon(h, paths, size) {
+  return h('svg', {
+    width: size,
+    height: size,
+    viewBox: '0 0 12 12',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': 1.6,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+    'aria-hidden': 'true',
+  }, paths.map((d) => h('path', { d })));
+}
+
+const SUBSCRIPTIONS_ICON_UP = ['M6 10V2', 'M2.5 5.5L6 2l3.5 3.5'];
+const SUBSCRIPTIONS_ICON_DOWN = ['M6 2v8', 'M2.5 6.5L6 10l3.5-3.5'];
+const SUBSCRIPTIONS_ICON_REMOVE = ['M2 2l8 8', 'M10 2l-8 8'];
+
+/**
+ * 订阅表 role 组件工厂。
+ *
+ * 注入 `vue`（只用到 `h` / `reactive` / `onMounted`）。策略的 `GET` / `POST /api/policies`
+ * 由本段自带的 `subscriptionsApiFetch` 发（**不经**浮窗那套 `state.own` 闸口：组件只在本插件的
+ * schema 上渲染），`deps.read` / `deps.write` 只是测试与复用者的覆盖口。
+ * 返回 `{ component, createModel, ... }`：
+ * `component` 交给 `ctx.schema`，`createModel` 让测试不经 Vue 也能拿到同一棵 vnode 树
+ * 与同一批动作（动作挂在 vnode 的 `onClick` / `onInput` 上，走真实事件路径）。
+ */
+function createSubscriptionsRole(vue, deps) {
+  const runtime = vue && typeof vue === 'object' ? vue : {};
+  if (typeof runtime.h !== 'function') throw new Error('createSubscriptionsRole 需要 vue.h');
+  const h = runtime.h;
+  /* 测试桩不做响应式：动作后由测试自己再取一次树，语义与 Vue 里一致。 */
+  const reactive = typeof runtime.reactive === 'function' ? runtime.reactive : (value) => value;
+  const onMounted = typeof runtime.onMounted === 'function' ? runtime.onMounted : null;
+  const opts = deps && typeof deps === 'object' ? deps : {};
+  /* 默认走组件自己的 fetch（`subscriptionsApiFetch`）；`deps.read` / `deps.write` 只是
+     测试与复用者的覆盖口——生产路径不再碰浮窗的闸口。 */
+  const readPolicies = typeof opts.read === 'function'
+    ? opts.read
+    : () => subscriptionsApiFetch(SUBSCRIPTIONS_POLICY_API);
+  const writePolicy = typeof opts.write === 'function'
+    ? opts.write
+    : (payload) => subscriptionsApiFetch(SUBSCRIPTIONS_POLICY_API, { method: 'POST', body: JSON.stringify(payload) });
+
+  function createModel(props, emit, slotMap) {
+    /* 直接用 `props`（Vue 的 shallowReactive 代理），**不要**展开成普通对象：
+       快照会切断依赖收集，宿主改了 `modelValue` 组件也不重画。 */
+    const view = props && typeof props === 'object' ? props : {};
+    const slots = slotMap && typeof slotMap === 'object' ? slotMap : {};
+
+    const state = reactive({
+      /* 策略表：进入组件时读一次，保存回执直接替换，不再补 GET。 */
+      policies: [],
+      policiesLoaded: false,
+      policiesLoading: false,
+      policiesRequested: false,
+      policiesError: '',
+      /* 展开中的 chip：`{ row, target }`；面板草稿是**字符串**形态（输入框才是真值）。
+         `draftStale` = 草稿是「策略还没读回来时按默认值铺的」，读回后自动换成真值
+         （用户只要动过草稿就不再覆盖）。 */
+      open: null,
+      draft: null,
+      draftStale: false,
+      draftError: '',
+      saving: false,
+      /* 迟到回执落空（面板已被换掉）时的失败原因：留在组件底部，不写进别人的草稿。 */
+      saveError: '',
+      /* 「＋ 添加目标」的临时输入：`{ row, value }`。 */
+      newTarget: null,
+    });
+    /* 面板实例号：每次打开 +1，保存回执只认自己那一次（见 `savePanel`）。 */
+    let panelSeq = 0;
+
+    const disabled = () => view.disabled === true;
+    const saving = () => state.saving === true;
+    /* 行内控件（群号 / 复选框 / 上移下移 / 删行 / 加行 / 加目标 / 删目标）：保存期间整行上锁，
+       否则写请求在途时改行，回执回到的已经是另一份表。 */
+    const rowLocked = () => disabled() || saving();
+    /* 策略面板控件：没读到现有策略（读取中 / 读取失败）时一律禁用——空草稿保存会把服务端
+       已有的 cron / 额度清成「立即投 / 不限」。 */
+    const panelLocked = () => rowLocked() || state.policiesLoaded !== true;
+    const rows = () => (Array.isArray(view.modelValue) ? view.modelValue : []);
+    const readValue = (event) => (event && event.target && event.target.value != null ? String(event.target.value) : '');
+
+    /* 候选来自 schema 自己（`targets` = `array(const union)`，与宿主表格列同源）。
+       宿主的保存校验是严格 union：手填一个候选外的名字会让整份配置过不了校验，
+       所以**有候选时只给下拉选**；读不到候选（历史宿主 / schema 变形）才退回手填。 */
+    function targetCandidates() {
+      const schema = view.schema;
+      const dict = schema && schema.inner && schema.inner.dict ? schema.inner.dict : null;
+      const field = dict && dict.targets ? dict.targets : null;
+      const inner = field && field.inner ? field.inner : null;
+      const list = inner && Array.isArray(inner.list) ? inner.list : [];
+      const out = [];
+      for (const item of list) {
+        if (!item || typeof item.value !== 'string') continue;
+        /* `Schema.disabled()` 的分组标题（`#group:<群号>`）不可选。 */
+        if (item.meta && item.meta.disabled === true) continue;
+        const name = item.value.trim();
+        if (name && out.indexOf(name) < 0) out.push(name);
+      }
+      return out;
+    }
+
+    /* ---------------- 行编辑：一律换新数组 / 新行对象 ---------------- */
+
+    function emitRows(next) {
+      if (typeof emit === 'function') emit('update:modelValue', next);
+    }
+
+    /* `patch` 覆盖字段，`drop` 删掉历史键（写回只留 `targets`，旧 `target` 不再复活）。 */
+    function patchRow(index, patch, drop) {
+      const list = rows();
+      if (index < 0 || index >= list.length) return;
+      const current = list[index];
+      const base = current && typeof current === 'object' ? current : {};
+      const nextRow = Object.assign({}, base, patch || {});
+      if (drop) for (const key of drop) delete nextRow[key];
+      const next = list.slice();
+      next[index] = nextRow;
+      emitRows(next);
+    }
+
+    function setSource(index, event) {
+      if (rowLocked()) return;
+      patchRow(index, { source: readValue(event).trim() });
+    }
+
+    function toggleField(index, field) {
+      if (rowLocked()) return;
+      const list = rows();
+      const row = list[index] && typeof list[index] === 'object' ? list[index] : {};
+      const next = field === 'weekly' ? row.weekly !== true : row.entry === false;
+      patchRow(index, { [field]: next });
+    }
+
+    function addRow() {
+      if (rowLocked()) return;
+      emitRows(rows().concat([{ source: '', targets: [], entry: true, weekly: false }]));
+    }
+
+    function removeRow(index) {
+      if (rowLocked()) return;
+      const list = rows();
+      if (index < 0 || index >= list.length) return;
+      closePanel(false);
+      const next = list.slice();
+      next.splice(index, 1);
+      emitRows(next);
+    }
+
+    function moveRow(index, delta) {
+      if (rowLocked()) return;
+      const list = rows();
+      const to = index + delta;
+      if (index < 0 || index >= list.length || to < 0 || to >= list.length) return;
+      closePanel(false);
+      const next = list.slice();
+      const moved = next[index];
+      next[index] = next[to];
+      next[to] = moved;
+      emitRows(next);
+    }
+
+    /* ---------------- 投递目标（chip） ---------------- */
+
+    function startNewTarget(index) {
+      if (rowLocked()) return;
+      state.newTarget = { row: index, value: '' };
+    }
+
+    function cancelNewTarget() {
+      state.newTarget = null;
+    }
+
+    function setNewTarget(event) {
+      if (rowLocked() || !state.newTarget) return;
+      state.newTarget.value = readValue(event);
+    }
+
+    function commitNewTarget(index) {
+      if (rowLocked()) return;
+      const draft = state.newTarget;
+      state.newTarget = null;
+      if (!draft || draft.row !== index) return;
+      addTarget(index, draft.value);
+    }
+
+    function addTarget(index, value) {
+      if (rowLocked()) return;
+      const name = String(value == null ? '' : value).trim();
+      if (!name) return;
+      const list = rows();
+      if (index < 0 || index >= list.length) return;
+      const targets = subscriptionsRowTargets(list[index]);
+      if (targets.indexOf(name) >= 0) return;
+      patchRow(index, { targets: targets.concat([name]) }, ['target']);
+    }
+
+    function removeTarget(index, target) {
+      if (rowLocked()) return;
+      const list = rows();
+      if (index < 0 || index >= list.length) return;
+      const name = String(target == null ? '' : target).trim();
+      const targets = subscriptionsRowTargets(list[index]).filter((entry) => entry !== name);
+      if (state.open && state.open.row === index && state.open.target === name) closePanel(false);
+      patchRow(index, { targets }, ['target']);
+    }
+
+    /* ---------------- 策略：读一次 / 存改动字段 ---------------- */
+
+    function currentPolicy(source, target) {
+      const key = subscriptionsPolicyKey(source, target);
+      for (const item of state.policies) {
+        if (subscriptionsPolicyKey(item.source, item.target) === key) return subscriptionsNormalizePolicy(item);
+      }
+      return subscriptionsNormalizePolicy(null);
+    }
+
+    /* 进入组件读一次；失败置回未请求（下次开面板再试一次），已读回的列表不动。
+       并发的第二次调用直接被 `policiesRequested` 挡掉，一条链只有一个请求。 */
+    function loadPolicies() {
+      if (disabled() || state.policiesRequested) return;
+      if (!readPolicies) {
+        state.policiesError = '策略接口不可用';
+        return;
+      }
+      state.policiesRequested = true;
+      state.policiesLoading = true;
+      state.policiesError = '';
+      Promise.resolve()
+        .then(() => readPolicies())
+        .then((payload) => {
+          state.policies = subscriptionsNormalizePolicies(payload);
+          state.policiesLoaded = true;
+          state.policiesLoading = false;
+          /* 面板是在策略读回来之前打开的：草稿是默认值，用户还没动过就换成真值
+             ——否则保存会把服务端已有的 cron / 限量当成「用户改成了空」。 */
+          if (state.open && state.draft && state.draftStale) {
+            const list = rows();
+            const row = list[state.open.row];
+            state.draft = draftFromPolicy(currentPolicy(row && row.source, state.open.target));
+            state.draftStale = false;
+          }
+        }, (err) => {
+          state.policiesRequested = false;
+          state.policiesLoading = false;
+          state.policiesError = err && err.message ? String(err.message) : '策略读取失败';
+        });
+    }
+
+    /* 草稿是输入框的**字符串**形态：数字项不在这里转，保存时才归一（否则输入过程中
+       `''` → 0 会把光标和值一起吃掉）。 */
+    function draftFromPolicy(policy) {
+      return {
+        entryCron: policy.entryCron,
+        weeklyCron: policy.weeklyCron,
+        perDay: String(policy.perDay),
+        perWeek: String(policy.perWeek),
+      };
+    }
+
+    /* 打开面板的触发节点（chip）：关闭时把焦点还回去，键盘用户不会丢位置。 */
+    function focusOrigin(event) {
+      if (!event || typeof event !== 'object') return null;
+      const node = event.currentTarget || event.target;
+      return node && typeof node.focus === 'function' ? node : null;
+    }
+
+    function openPanel(index, target, event) {
+      if (disabled()) return;
+      const name = String(target == null ? '' : target).trim();
+      if (!name) return;
+      const list = rows();
+      if (index < 0 || index >= list.length) return;
+      /* 点同一个 chip = 收起（面板就在本行下方，再点一次是「关掉」而不是「重填」）。 */
+      if (state.open && state.open.row === index && state.open.target === name) {
+        closePanel(true);
+        return;
+      }
+      const policy = currentPolicy(list[index] && list[index].source, name);
+      panelSeq += 1;
+      /* `token` 记下这一次打开：保存回执回来时只认这个号，换了 chip 就不许它关面板。
+         保存中允许换面板（chip 不是行操作）：写锁仍在，新面板照样是禁用态。 */
+      state.open = { row: index, target: name, token: panelSeq, trigger: focusOrigin(event) };
+      state.draft = draftFromPolicy(policy);
+      /* 策略还没读回来：草稿是默认值，读回后（用户没动过就）自动换成真值。 */
+      state.draftStale = !state.policiesLoaded;
+      state.draftError = '';
+      state.newTarget = null;
+      /* 读失败过就先不自动重发：面板底部留着失败原因 + 「重试」，重试由用户点头。 */
+      if (!state.policiesLoaded && !state.policiesError) loadPolicies();
+    }
+
+    /* `focusBack === false` 用于「面板跟着行一起没了」的关闭（删行 / 移行 / 删目标）：
+       这时回焦的节点已经不在文档里，focus 只是白跑一趟。`saving` 不在这里解锁：写请求
+       还在途，提前解锁就等于允许第二次写、让迟到回执收错面板。 */
+    function closePanel(focusBack) {
+      const open = state.open;
+      state.open = null;
+      state.draft = null;
+      state.draftStale = false;
+      state.draftError = '';
+      if (focusBack !== false && open && open.trigger && typeof open.trigger.focus === 'function') {
+        try { open.trigger.focus(); } catch (err) { /* 触发节点已被宿主移除：没有可回焦的目标 */ }
+      }
+    }
+
+    /* 面板内的可聚焦控件（Tab 循环用）。`[tabindex="-1"]` 是程序化焦点位，不参与循环。 */
+    const SUBSCRIPTIONS_PANEL_FOCUSABLE =
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+    function panelFocusables(host) {
+      if (!host || typeof host.querySelectorAll !== 'function') return [];
+      const found = host.querySelectorAll(SUBSCRIPTIONS_PANEL_FOCUSABLE);
+      const out = [];
+      for (let index = 0; index < found.length; index += 1) {
+        const node = found[index];
+        if (node && node.disabled !== true) out.push(node);
+      }
+      return out;
+    }
+
+    /* Esc 关面板；Tab 在面板内首尾回绕（模态面板：焦点不许从末端溜到页面别处）。 */
+    function onPanelKeydown(event) {
+      if (!event) return;
+      const key = event.key;
+      if (key === 'Escape' || key === 'Esc') {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+        closePanel(true);
+        return;
+      }
+      if (key !== 'Tab') return;
+      const host = event.currentTarget;
+      const list = panelFocusables(host);
+      if (!list.length) return;
+      const first = list[0];
+      const last = list[list.length - 1];
+      const active = event.target && typeof event.target.focus === 'function' ? event.target : null;
+      const inside = active
+        ? (host && typeof host.contains === 'function' ? host.contains(active) : list.indexOf(active) >= 0)
+        : false;
+      if (!inside) {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (first && typeof first.focus === 'function') first.focus();
+        return;
+      }
+      if (event.shiftKey === true) {
+        if (active === first) {
+          if (typeof event.preventDefault === 'function') event.preventDefault();
+          if (typeof last.focus === 'function') last.focus();
+        }
+        return;
+      }
+      if (active === last) {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof first.focus === 'function') first.focus();
+      }
+    }
+
+    function setDraft(field, value) {
+      if (panelLocked() || !state.draft) return;
+      if (SUBSCRIPTIONS_POLICY_FIELDS.indexOf(field) < 0) return;
+      state.draft[field] = String(value == null ? '' : value);
+      state.draftStale = false;
+    }
+
+    /* 计数的 `−` / `+`：从输入框里当前的值走一步，0 与上限处钳制
+       （值域与保存时 `subscriptionsQuota` 同一条，不会走出服务端会拒的值）。 */
+    function stepCount(field, max, delta) {
+      if (panelLocked() || !state.draft) return;
+      const current = subscriptionsQuota(state.draft[field], max);
+      setDraft(field, String(subscriptionsQuota(current + delta, max)));
+    }
+
+    function savePanel() {
+      if (disabled() || saving()) return;
+      const open = state.open;
+      const draft = state.draft;
+      if (!open || !draft) return;
+      const list = rows();
+      const row = list[open.row];
+      if (!row) {
+        closePanel(false);
+        return;
+      }
+      /* 策略挂在「监听群 + 投递群」上：行里还没填群号时服务端必然 400，先在面板里说清楚。 */
+      const source = subscriptionsPolicySource(row.source);
+      if (!source) {
+        state.draftError = '先填这一行的监听群号，策略要挂在「监听群 + 投递群」上';
+        return;
+      }
+      /* 策略还没读回来就保存 = 把未知的现有值当成默认值发出去（可能清掉别人的 cron）：
+         读到之前一律拦在这里；读失败时不自动重发，交给面板底部的「重试」。 */
+      if (!state.policiesLoaded) {
+        state.draftError = state.policiesError
+          ? '策略还没读到：' + state.policiesError
+          : '策略还没读回来，正在重试…';
+        if (!state.policiesError) loadPolicies();
+        return;
+      }
+      const entryCron = String(draft.entryCron == null ? '' : draft.entryCron).trim();
+      const weeklyCron = String(draft.weeklyCron == null ? '' : draft.weeklyCron).trim();
+      const invalid = subscriptionsCronError(entryCron) || subscriptionsCronError(weeklyCron);
+      if (invalid) {
+        state.draftError = invalid;
+        return;
+      }
+      const next = {
+        entryCron,
+        weeklyCron,
+        perDay: subscriptionsQuota(draft.perDay, SUBSCRIPTIONS_PER_DAY_MAX),
+        perWeek: subscriptionsQuota(draft.perWeek, SUBSCRIPTIONS_PER_WEEK_MAX),
+      };
+      const base = currentPolicy(source, open.target);
+      const patch = {};
+      for (const field of SUBSCRIPTIONS_POLICY_FIELDS) {
+        if (next[field] !== base[field]) patch[field] = next[field];
+      }
+      /* 没有任何改动就不发请求：一次点击最多一次 POST，空 POST 只是白跑一趟。 */
+      if (!Object.keys(patch).length) {
+        closePanel(true);
+        return;
+      }
+      if (!writePolicy) {
+        state.draftError = '策略接口不可用';
+        return;
+      }
+      state.saving = true;
+      state.draftError = '';
+      state.saveError = '';
+      const token = open.token;
+      const payload = Object.assign({ source, target: open.target }, patch);
+      Promise.resolve()
+        .then(() => writePolicy(payload))
+        .then((result) => {
+          state.saving = false;
+          /* 回执自带整张策略表：直接替换本地列表，不再补一次 GET。 */
+          if (result && (Array.isArray(result.policies) || Array.isArray(result))) {
+            state.policies = subscriptionsNormalizePolicies(result);
+          }
+          /* 只收自己那一次打开的面板：请求在途时换了 chip，新面板不许被旧回执关掉。 */
+          if (state.open && state.open.token === token) closePanel(true);
+        }, (err) => {
+          state.saving = false;
+          const message = err && err.message ? String(err.message) : '保存失败';
+          if (state.open && state.open.token === token) {
+            /* 草稿留着：用户改完就能再点保存，不必重新填一遍。 */
+            state.draftError = message;
+          } else {
+            /* 面板已经换人 / 收起：失败原因放到组件底部，不写进别人的草稿。 */
+            state.saveError = message;
+          }
+        });
+    }
+
+    /* ---------------- 视图 ---------------- */
+
+    function renderInput(attrs) {
+      return h('input', Object.assign({ class: 'ptx-subrole-input', type: 'text' }, attrs));
+    }
+
+    function renderChip(row, index, target) {
+      const open = state.open && state.open.row === index && state.open.target === target;
+      const summary = subscriptionsPolicySummary(currentPolicy(row && row.source, target));
+      return h('span', {
+        class: 'ptx-subrole-chip' + (open ? ' is-open' : ''),
+        'data-ptx-chip': target,
+        role: 'button',
+        tabindex: disabled() ? -1 : 0,
+        'aria-pressed': open ? 'true' : 'false',
+        'aria-expanded': open ? 'true' : 'false',
+        title: summary ? '投递策略：' + summary + '（点击编辑）' : '点击设置投递策略',
+        onClick: (event) => openPanel(index, target, event),
+        onKeydown: (event) => {
+          if (!event) return;
+          if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+          if (typeof event.preventDefault === 'function') event.preventDefault();
+          openPanel(index, target, event);
+        },
+      }, [
+        h('span', { class: 'ptx-subrole-chip-name' }, target),
+        summary ? h('span', { class: 'ptx-subrole-chip-policy' }, summary) : null,
+        h('button', {
+          type: 'button',
+          class: 'ptx-subrole-chip-x',
+          'data-ptx-act': 'remove-target',
+          'data-ptx-target': target,
+          title: '删除目标',
+          disabled: rowLocked(),
+          onClick: (event) => {
+            if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+            removeTarget(index, target);
+          },
+          /* 键盘：删除键自己吃掉 Enter / Space。浏览器在 keydown 之后还会补一个 click，
+             `preventDefault()` 把它挡掉，`stopPropagation()` 防止冒到 chip 上把面板打开。 */
+          onKeydown: (event) => {
+            if (!event) return;
+            if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+            if (typeof event.preventDefault === 'function') event.preventDefault();
+            if (typeof event.stopPropagation === 'function') event.stopPropagation();
+            removeTarget(index, target);
+          },
+        }, [subscriptionsIcon(h, SUBSCRIPTIONS_ICON_REMOVE, 10)]),
+      ]);
+    }
+
+    function renderNewTarget(index) {
+      const draft = state.newTarget || { row: index, value: '' };
+      const candidates = targetCandidates();
+      const locked = rowLocked();
+      const picker = candidates.length
+        ? h('select', {
+          class: 'ptx-subrole-input ptx-subrole-new-input',
+          value: draft.value,
+          disabled: locked,
+          'data-ptx-act': 'new-target',
+          onChange: (event) => setNewTarget(event),
+        }, [h('option', { value: '' }, '选择投递目标')].concat(candidates.map((name) => h('option', { value: name }, name))))
+        : renderInput({
+          class: 'ptx-subrole-input ptx-subrole-new-input',
+          value: draft.value,
+          placeholder: '相册名 / @chat',
+          disabled: locked,
+          'data-ptx-act': 'new-target',
+          onInput: (event) => setNewTarget(event),
+          onKeydown: (event) => {
+            if (!event) return;
+            if (event.key === 'Enter') {
+              if (typeof event.preventDefault === 'function') event.preventDefault();
+              commitNewTarget(index);
+            } else if (event.key === 'Escape') {
+              cancelNewTarget();
+            }
+          },
+        });
+      return h('span', { class: 'ptx-subrole-new-target' }, [
+        picker,
+        h('button', {
+          type: 'button',
+          class: 'ptx-subrole-btn',
+          'data-ptx-act': 'new-target-ok',
+          disabled: locked,
+          onClick: () => commitNewTarget(index),
+        }, '确定'),
+        h('button', {
+          type: 'button',
+          class: 'ptx-subrole-btn',
+          'data-ptx-act': 'new-target-cancel',
+          disabled: locked,
+          onClick: () => cancelNewTarget(),
+        }, '取消'),
+      ]);
+    }
+
+    function renderOps(index, total) {
+      const op = (act, title, paths, onPick, locked) => h('button', {
+        type: 'button',
+        class: 'ptx-subrole-btn',
+        'data-ptx-act': act,
+        title,
+        disabled: locked === true,
+        onClick: () => onPick(),
+      }, [subscriptionsIcon(h, paths, 12)]);
+      return h('div', { class: 'ptx-subrole-ops' }, [
+        op('up', '上移', SUBSCRIPTIONS_ICON_UP, () => moveRow(index, -1), rowLocked() || index === 0),
+        op('down', '下移', SUBSCRIPTIONS_ICON_DOWN, () => moveRow(index, 1), rowLocked() || index >= total - 1),
+        op('remove', '删除这一行', SUBSCRIPTIONS_ICON_REMOVE, () => removeRow(index), rowLocked()),
+      ]);
+    }
+
+    function renderRow(row, index, total) {
+      const targets = subscriptionsRowTargets(row);
+      const locked = rowLocked();
+      const chips = targets.map((target) => renderChip(row, index, target));
+      if (state.newTarget && state.newTarget.row === index) chips.push(renderNewTarget(index));
+      else {
+        chips.push(h('button', {
+          type: 'button',
+          class: 'ptx-subrole-add-target',
+          'data-ptx-act': 'add-target',
+          disabled: locked,
+          onClick: () => startNewTarget(index),
+        }, '＋ 添加目标'));
+      }
+      return h('tr', { class: 'ptx-subrole-row', 'data-ptx-row': String(index) }, [
+        h('td', { class: 'ptx-subrole-cell-source' }, [
+          renderInput({
+            value: row && row.source != null ? String(row.source) : '',
+            placeholder: '群号',
+            disabled: locked,
+            'data-ptx-act': 'source',
+            onInput: (event) => setSource(index, event),
+          }),
+        ]),
+        h('td', { class: 'ptx-subrole-cell-targets' }, [
+          h('div', { class: 'ptx-subrole-chips' }, chips),
+        ]),
+        h('td', { class: 'ptx-subrole-cell-flag' }, [
+          h('label', { class: 'ptx-subrole-flag', title: '词条' }, [
+            h('input', {
+              type: 'checkbox',
+              class: 'ptx-subrole-check',
+              'data-ptx-act': 'entry',
+              checked: !(row && row.entry === false),
+              disabled: locked,
+              onChange: () => toggleField(index, 'entry'),
+            }),
+          ]),
+        ]),
+        h('td', { class: 'ptx-subrole-cell-flag' }, [
+          h('label', { class: 'ptx-subrole-flag', title: '周报' }, [
+            h('input', {
+              type: 'checkbox',
+              class: 'ptx-subrole-check',
+              'data-ptx-act': 'weekly',
+              checked: !!(row && row.weekly === true),
+              disabled: locked,
+              onChange: () => toggleField(index, 'weekly'),
+            }),
+          ]),
+        ]),
+        h('td', { class: 'ptx-subrole-cell-ops' }, [renderOps(index, total)]),
+      ]);
+    }
+
+    function renderCronSection(title, field, presets, locked) {
+      const nodes = [
+        h('div', { class: 'ptx-subrole-sec-title' }, title),
+        renderInput({
+          class: 'ptx-subrole-input ptx-subrole-cron-input',
+          value: state.draft && state.draft[field] != null ? String(state.draft[field]) : '',
+          placeholder: '5 字段 cron，留空 = 立即投',
+          disabled: locked,
+          'data-ptx-cron': field,
+          onInput: (event) => setDraft(field, readValue(event)),
+        }),
+      ];
+      for (const preset of presets) {
+        nodes.push(h('button', {
+          type: 'button',
+          class: 'ptx-subrole-preset',
+          'data-ptx-preset': preset.cron,
+          disabled: locked,
+          onClick: () => setDraft(field, preset.cron),
+        }, preset.label));
+      }
+      nodes.push(h('button', {
+        type: 'button',
+        class: 'ptx-subrole-preset',
+        'data-ptx-act': 'now',
+        'data-ptx-field': field,
+        title: '清空这一项 = 立即投',
+        disabled: locked,
+        onClick: () => setDraft(field, ''),
+      }, '立即投'));
+      return h('div', { class: 'ptx-subrole-sec', 'data-ptx-sec': field }, nodes);
+    }
+
+    function renderQuotaSection(locked) {
+      /* 数字控件：`− [ n ] +` 三段（0 展示成 0 = 不限，加号在 `+` 处按上限钳制）。
+         原生 spinner 由 `appearance: textfield` 关掉——这套按钮才是唯一入口。 */
+      const field = (key, label, max) => h('label', { class: 'ptx-subrole-quota' }, [
+        h('span', null, label),
+        h('span', { class: 'ptx-subrole-stepper' }, [
+          h('button', {
+            type: 'button',
+            class: 'ptx-subrole-step',
+            'data-ptx-step': key,
+            'data-ptx-delta': '-1',
+            title: '减 1',
+            disabled: locked,
+            onClick: () => stepCount(key, max, -1),
+          }, '−'),
+          h('input', {
+            class: 'ptx-subrole-count',
+            type: 'number',
+            min: 0,
+            max,
+            value: state.draft && state.draft[key] != null ? String(state.draft[key]) : '0',
+            disabled: locked,
+            'data-ptx-count': key,
+            onInput: (event) => setDraft(key, readValue(event)),
+          }),
+          h('button', {
+            type: 'button',
+            class: 'ptx-subrole-step',
+            'data-ptx-step': key,
+            'data-ptx-delta': '1',
+            title: '加 1',
+            disabled: locked,
+            onClick: () => stepCount(key, max, 1),
+          }, '+'),
+        ]),
+      ]);
+      return h('div', { class: 'ptx-subrole-sec', 'data-ptx-sec': 'quota' }, [
+        h('div', { class: 'ptx-subrole-sec-title' }, '限量'),
+        field('perDay', '词条 / 日', SUBSCRIPTIONS_PER_DAY_MAX),
+        field('perWeek', '周报 / 周', SUBSCRIPTIONS_PER_WEEK_MAX),
+      ]);
+    }
+
+    function renderPanelRow(index) {
+      const open = state.open;
+      const list = rows();
+      const row = list[index];
+      const source = subscriptionsPolicySource(row && row.source);
+      const current = subscriptionsPolicySummary(currentPolicy(row && row.source, open.target));
+      const locked = panelLocked();
+      /* 策略没读回来之前面板整块禁用：草稿只是默认值，任何保存都等于把服务端已有策略清成空。 */
+      const pending = state.policiesLoaded !== true;
+      let message;
+      if (pending) {
+        message = state.policiesLoading
+          ? h('span', { class: 'ptx-subrole-panel-msg', 'data-ptx-panel-pending': '1' }, '正在读取投递策略…')
+          : h('span', { class: 'ptx-subrole-panel-msg is-error', 'data-ptx-panel-error': '1' },
+            '策略读取失败：' + (state.policiesError || '未知原因'));
+      } else if (state.draftError) {
+        message = h('span', { class: 'ptx-subrole-panel-msg is-error', 'data-ptx-panel-error': '1' }, state.draftError);
+      } else {
+        message = h('span', { class: 'ptx-subrole-panel-msg' }, '留空 = 立即投 · 0 = 不限');
+      }
+      const foot = [message];
+      /* 读失败：给一个真正重发的「重试」（`loadPolicies` 每次都是新请求，不复用失败的那条链）。 */
+      if (pending && !state.policiesLoading) {
+        foot.push(h('button', {
+          type: 'button',
+          class: 'ptx-subrole-btn',
+          'data-ptx-act': 'retry',
+          disabled: disabled(),
+          onClick: () => loadPolicies(),
+        }, '重试'));
+      }
+      foot.push(h('button', {
+        type: 'button',
+        class: 'ptx-subrole-btn',
+        'data-ptx-act': 'cancel',
+        disabled: saving(),
+        onClick: () => closePanel(true),
+      }, '取消'));
+      foot.push(h('button', {
+        type: 'button',
+        class: 'ptx-subrole-btn is-primary',
+        'data-ptx-act': 'save',
+        disabled: locked,
+        onClick: () => savePanel(),
+      }, saving() ? '保存中…' : '保存'));
+      return h('tr', { class: 'ptx-subrole-panel-row', 'data-ptx-panel-for': String(index) }, [
+        h('td', { colspan: 5 }, [
+          h('div', {
+            class: 'ptx-subrole-panel',
+            'data-ptx-panel': '1',
+            role: 'dialog',
+            'aria-label': '投递策略',
+            onKeydown: (event) => onPanelKeydown(event),
+          }, [
+            h('div', { class: 'ptx-subrole-panel-head' }, [
+              h('span', { class: 'ptx-subrole-panel-title' }, '投递策略'),
+              h('span', { class: 'ptx-subrole-panel-who' }, (source || '未填监听群') + ' → ' + open.target),
+              current ? h('span', { class: 'ptx-subrole-panel-now' }, '当前 ' + current) : null,
+            ]),
+            renderCronSection('日词条投递时间', 'entryCron', SUBSCRIPTIONS_ENTRY_CRON_PRESETS, locked),
+            renderCronSection('周主题投递时间', 'weeklyCron', SUBSCRIPTIONS_WEEKLY_CRON_PRESETS, locked),
+            renderQuotaSection(locked),
+            h('div', { class: 'ptx-subrole-panel-foot' }, foot),
+          ]),
+        ]),
+      ]);
+    }
+
+    function renderStatus() {
+      if (state.saveError) {
+        return h('div', { class: 'ptx-subrole-status is-error', 'data-ptx-status': 'save-error' },
+          '保存失败：' + state.saveError);
+      }
+      if (state.policiesError) {
+        return h('div', { class: 'ptx-subrole-status is-error', 'data-ptx-status': 'error' },
+          '策略读取失败：' + state.policiesError + '（点任意投递群重试）');
+      }
+      if (state.policiesLoading) {
+        return h('div', { class: 'ptx-subrole-status', 'data-ptx-status': 'loading' }, '正在读取投递策略…');
+      }
+      return null;
+    }
+
+    function render() {
+      const list = rows();
+      const body = [];
+      if (!list.length) {
+        body.push(h('tr', { class: 'ptx-subrole-empty-row' }, [
+          h('td', { colspan: 5, class: 'ptx-subrole-empty' }, '还没有订阅行：点下方「添加行」新建一行'),
+        ]));
+      }
+      for (let index = 0; index < list.length; index += 1) {
+        body.push(renderRow(list[index], index, list.length));
+        if (state.open && state.open.row === index) body.push(renderPanelRow(index));
+      }
+      /* 保存进行中给整块打标：CSS / 外部观察者与内部闸门读同一条 `saving`。 */
+      const rootProps = { class: 'k-schema-item ptx-subrole' };
+      if (saving()) rootProps['data-ptx-saving'] = '1';
+      return h('div', rootProps, [
+        h('div', { class: 'actions', 'aria-hidden': 'true' }),
+        h('div', { class: 'k-schema-main' }, [
+          h('div', { class: 'k-schema-left' }, [
+            h('h3', null, typeof slots.title === 'function' ? slots.title() : null),
+            typeof slots.desc === 'function' ? slots.desc() : null,
+          ]),
+        ]),
+        h('div', { class: 'bottom ptx-subrole-body' }, [
+          h('table', { class: 'k-schema-table ptx-subrole-table' }, [
+            h('thead', null, [
+              h('tr', null, [
+                h('th', null, '监听群'),
+                h('th', null, '投递群'),
+                h('th', null, '词条'),
+                h('th', null, '周报'),
+                h('th', null, '操作'),
+              ]),
+            ]),
+            h('tbody', null, body),
+          ]),
+          h('div', { class: 'ptx-subrole-foot' }, [
+            h('button', {
+              type: 'button',
+              class: 'ptx-subrole-btn',
+              'data-ptx-act': 'add-row',
+              disabled: rowLocked(),
+              onClick: () => addRow(),
+            }, '添加行'),
+          ]),
+          renderStatus(),
+        ]),
+      ]);
+    }
+
+    return {
+      state,
+      render,
+      loadPolicies,
+      openPanel,
+      closePanel,
+      savePanel,
+      setSource,
+      toggleField,
+      addRow,
+      removeRow,
+      moveRow,
+      addTarget,
+      removeTarget,
+      startNewTarget,
+      commitNewTarget,
+      cancelNewTarget,
+      setNewTarget,
+      setDraft,
+      stepCount,
+    };
+  }
+
+  const component = {
+    name: 'PtxSubscriptionsRows',
+    props: {
+      modelValue: { type: Array, default: () => [] },
+      schema: { type: Object, default: null },
+      initial: { type: Array, default: null },
+      disabled: Boolean,
+      prefix: { type: String, default: '' },
+      extra: { type: Object, default: null },
+    },
+    emits: ['update:modelValue'],
+    setup(props, context) {
+      const ctxObj = context && typeof context === 'object' ? context : {};
+      const emit = typeof ctxObj.emit === 'function' ? ctxObj.emit : () => {};
+      const slots = ctxObj.slots && typeof ctxObj.slots === 'object' ? ctxObj.slots : {};
+      const model = createModel(props, emit, slots);
+      /* 进入组件时读一次策略（禁用态不读：那一页连面板都打不开，请求纯浪费）。
+         没有 onMounted（测试桩）时由调用方自己决定何时读。 */
+      if (onMounted) onMounted(() => { model.loadPolicies(); });
+      return model.render;
+    },
+  };
+
+  return { component, createModel };
+}
+
+/* ---------------- 注册（role → 组件） ---------------- */
+
+let subscriptionsRoleRuntime = null;
+
+/* 宿主 Vue 运行时：入口固定在 `<uiPath>/@plugin-<id>/index.js`，`../vue.js` 就是宿主
+   自己那份。多试一级只为兼容入口被放进子目录的情形；两次都失败按「取不到」处理。 */
+function loadSubscriptionsRoleRuntime() {
+  if (subscriptionsRoleRuntime) return subscriptionsRoleRuntime;
+  subscriptionsRoleRuntime = import('../vue.js').catch(() => import('../../vue.js'));
+  return subscriptionsRoleRuntime;
+}
+
+/**
+ * 把 `ptx-subscriptions` 注册进 Console 的 schema 扩展表。
+ *
+ * `ctx.schema` 是 setting 服务（`$setting`）的 `extendSchema` 混入 —— 客户端入口与内置服务
+ * 在同一次 `start()` 里应用，顺序不保证：还没混入时等 `$setting` 上线再注册（否则整张表
+ * 静默退回数组卡片）。
+ *
+ * role 只写 `meta`，不影响反序列化：宿主根本不提供 schema 扩展时，这张表退回宿主的
+ * 数组卡片编辑器（能用，只是不好用），插件配置照常保存。
+ */
+function installSubscriptionsRole(ctx) {
+  if (!ctx) return null;
+  if (typeof ctx.schema !== 'function') {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['$setting'], (fork) => { installSubscriptionsRole(fork); });
+    }
+    return null;
+  }
+  ensureSubscriptionsRoleStyles();
+  return loadSubscriptionsRoleRuntime()
+    .then((mod) => {
+      const runtime = mod && typeof mod.h === 'function' ? mod : (mod && mod.default);
+      const role = createSubscriptionsRole(runtime);
+      ctx.schema({ type: 'array', role: SUBSCRIPTIONS_ROLE, component: role.component });
+      return role;
+    })
+    .catch((err) => {
+      if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
+        console.warn(
+          '[Patchouli] 订阅表 role 组件未能装载（取不到宿主 Vue 运行时），退回数组卡片：',
+          err && err.message ? err.message : err,
+        );
+      }
+      return null;
+    });
+}
+// END SUBSCRIPTIONS ROLE
 
 /* ------------------------------------------------------------------ *
  * 13. 挂载 / 路由感应 / 生命周期
@@ -8475,7 +9990,13 @@ export default function applyPatchouliWikiReader(ctx) {
   const boot = () => {
     /* 配置卡的标签主题与浮窗无关：脚本一启动就铺好，不依赖用户是否打开面板。 */
     ensureSchemaTagTheme();
-    if (tagPolicyMenu) tagPolicyMenu.attach();
+    /* 订阅表的自定义 role（`ptx-subscriptions`）：注册一次即可，取不到宿主 Vue 运行时
+       时只记一条警告并退回数组卡片，不影响其余功能。 */
+    installSubscriptionsRole(ctx);
+    /* 标签右键菜单（注入方案）**保留但默认关闭**：订阅表已由 role 组件接管，
+       两套 UI 盯着同一批标签节点只会互相踩。rollout 期间用
+       `window.__ptxTagMenuInjection = true` 显式打开对照，验证完这一整段删除。 */
+    if (tagPolicyMenu && window.__ptxTagMenuInjection === true) tagPolicyMenu.attach();
     checkRoute();
     state.routeTimer = setInterval(checkRoute, 700);
   };

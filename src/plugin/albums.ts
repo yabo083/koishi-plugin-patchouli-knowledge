@@ -7,8 +7,9 @@
  * - `subscriptions[].targets` → `array(const union)` + role `select`
  *   （`subscriptionTargetsSchema`，模块加载时先算一份，`apply()` 每次重载再原地替换
  *   `inner.list`——`require` 缓存让重载不重跑模块顶层，静态 union 否则永远停在首启）。
- *   订阅表是 `.role('table')`：schemastery-vue 的表格在渲染前就按 `toColumns(inner)`
- *   校验列，`Schema.dynamic` 那时只是 `Schema.any()`，永远进不了表格。
+ *   订阅表是 `ptx-subscriptions` role 组件：它从**序列化后的 schema** 里读候选
+ *   （`inner.dict.targets.inner.list`）铺「添加目标」下拉，`Schema.dynamic` 那时只是
+ *   `Schema.any()`，候选一项都读不到。
  *
  * 相册无法由 bot 创建，这里只探测已经存在的相册。
  * 探测范围只覆盖**订阅表里出现的监听群**（`*` 行 = 全部群，此时才回退到机器人所在群
@@ -886,8 +887,8 @@ export function albumUnionItems(
  * 的注册条件是 `type: 'array'` 且 `meta.role === 'select'`。
  *
  * 与 `albumDelivery.albums` 的 `Schema.dynamic` 不同，这里**不能**用 dynamic：
- * 订阅表是 `.role('table')`，表格列在渲染前就按 `toColumns(inner)` 校验，
- * dynamic 解析太晚（那时只是 `Schema.any()`）。
+ * 订阅表由 `ptx-subscriptions` role 组件渲染，组件直接读序列化后的
+ * `inner.list` 铺下拉，dynamic 解析太晚（那时只是 `Schema.any()`）。
  */
 export function subscriptionTargetsSchema(
   albums: readonly AlbumCandidate[],
@@ -1075,9 +1076,9 @@ function configuredFromBlocks(blocks: readonly Record<string, unknown>[]): strin
  * 调用两次：模块加载期（`Config` 求值时算初值，首次启动就能用）与 `apply()` 每次
  * **重载**（`require` 缓存让重载不重跑模块顶层，不重算的话新相册永远进不了候选）。
  *
- * 为什么必须是静态 const union：订阅表是 `.role('table')`，表格列要求 inner 是
- * **静态** const union（`toColumns` 在渲染前校验），`Schema.dynamic` 的解析发生在
- * 渲染期，永远赶不上。
+ * 为什么必须是静态 const union：订阅表由 `ptx-subscriptions` role 组件渲染，组件直接
+ * 读序列化后 schema 里的 `inner.list` 铺下拉；`Schema.dynamic` 的解析发生在渲染期，
+ * 组件永远读不到候选。
  *
  * 读取内容：
  * - 全部路径锚定**实例目录**（`ctx.baseDir`，缺省才用 `process.cwd()`），不跟进程 cwd 走；

@@ -648,11 +648,11 @@ const HIDDEN_LEGACY_FIELDS: Record<string, Schema> = Object.fromEntries(
  *   的值补进 union —— 这是「配置校验一定看得见实例值」的兜底入口（测试也走它）；
  * - 同一个目录只读一次盘（`startupTargetValues` 的进程内缓存，有上界）。
  *
- * 为什么不能在 `apply()` 里注入 dynamic schema：订阅表是 `.role('table')`，
- * schemastery-vue 的表格列在渲染前就按 `toColumns(schema.inner)` 校验，而
- * `Schema.dynamic()` 那时只是 `Schema.any()`（解析发生在渲染期）→ validate 失败、
- * 退回每行一张卡片。**表格 + 动态候选无法共存**，所以候选是静态 const union，
- * 由 `refreshSubscriptionTargets()` 在每次重载时原地换掉（见该函数）。
+ * 为什么候选必须是静态 const union（不能用 `Schema.dynamic`）：订阅表改由客户端的
+ * `ptx-subscriptions` role 组件接管，组件从**序列化后的 schema** 里读候选
+ * （`inner.dict.targets.inner.list`）来铺「添加目标」下拉；`Schema.dynamic()` 那时只是
+ * `Schema.any()`，候选在渲染期才注入，组件拿不到任何一项。静态 union 由
+ * `refreshSubscriptionTargets()` 在每次重载时原地换掉（见该函数）。
  */
 const STARTUP_TARGETS = startupTargetValues();
 
@@ -851,8 +851,9 @@ export const Config: Schema<PluginOptions> = Schema.object({
   // 历史 `target` 保留为隐藏字段：单值能加载，早期版本写出的字符串数组同样必须过校验
   // （`flattenConfig` 再把它摊成每个元素一行）。
   //
-  // 列头就是字段 description，文案只留最短的一行（`监听群` / `投递群` / `词条` / `周报`）：
-  // 表格上方那段多行说明纯噪音，语义都在候选本身与 README 里。
+  // `role` 是**自定义的** `ptx-subscriptions`（客户端产物按标记载入的 role 组件接管这张表）：
+  // role 只写 `meta`，不影响反序列化，界面缺席时宿主退回数组卡片。列头仍取字段 description，
+  // 文案只留最短的一行（`监听群` / `投递群` / `词条` / `周报`）。
   subscriptions: Schema.array(
     Schema.object({
       source: Schema.string().default('').description('监听群'),
@@ -864,7 +865,7 @@ export const Config: Schema<PluginOptions> = Schema.object({
       weekly: Schema.boolean().default(false).description('周报'),
     }),
   )
-    .role('table')
+    .role('ptx-subscriptions')
     .default([])
     .max(256),
   // ── 5. 功能总闸 ───────────────────────────────────────────────────────
@@ -2915,6 +2916,18 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       );
       return;
     }
+    /* 额度必须在渲染之前判：配额耗尽时不该再画一张图。drain 里还会再判一次，那是最终权威。
+       `allows()` 只看当前周期的计数，所以「今天满了」不等于「没机会」：cron 把下一班排在
+       明天时，这条必须入队等新周期的额度——只有「本周期内就到期且已满额」的目标才真的该丢。 */
+    const candidates = targets.filter((target) => {
+      const key = entryTargetKey(target, sourceChannelId);
+      if (deliveryGate.allows('entry', sourceChannelId, key)) return true;
+      return deliveryGate.wouldDeferPastPeriod('entry', sourceChannelId, key);
+    });
+    if (candidates.length === 0) {
+      logger.warn(`[Patchouli] 词条《${entryId}》今日卡片配额已满，未出卡（来源群 ${sourceChannelId}）`);
+      return;
+    }
     const rendered = await renderEntryCard(ctx, system, entryId, {
       maskNames: system.getCardSettings().maskNames,
       maxHeight: system.settings('query').cardMaxHeight,
@@ -2927,14 +2940,14 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
       kind: 'entry',
       source: sourceChannelId,
       eventKey: entryId,
-      targets: targets.map((target) => ({ targetKey: entryTargetKey(target, sourceChannelId), target })),
+      targets: candidates.map((target) => ({ targetKey: entryTargetKey(target, sourceChannelId), target })),
       png: rendered.image,
     });
-    const targetText = targets
+    const targetText = candidates
       .map((target) => (target.kind === 'album' ? `相册 ${target.channelId}/${target.albumId}` : `群 ${target.channelId}`))
       .join('、');
     logger.info(
-      `[Patchouli] 词条《${entryId}》投递入队 ${offer.accepted}/${targets.length}` +
+      `[Patchouli] 词条《${entryId}》投递入队 ${offer.accepted}/${candidates.length}` +
         (offer.deferred > 0 ? `（${offer.deferred} 个待窗口）` : '') +
         (offer.dropped > 0 ? `（${offer.dropped} 个超额 / 队满丢弃）` : '') +
         `（来源群 ${sourceChannelId}，目标：${targetText}）`,
@@ -2983,10 +2996,10 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
    * 把相册候选注入控制台：`Schema.dynamic(ALBUM_SCHEMA_KEY)` 按 key 读取，注入后在线
    * 页面立即刷新（`albumDelivery.albums`）。
    *
-   * `subscriptions[].targets` **不在这里**：它是 `.role('table')` 里的静态 union，
-   * 候选只能由 `refreshSubscriptionTargets()` **原地换 `inner.list`**（模块加载期先按
-   * `process.cwd()` 读一次，`apply()` 按 `ctx.baseDir` 重读并覆盖），`Schema.dynamic`
-   * 那套注入改不动表格。
+   * `subscriptions[].targets` **不在这里**：那是 `ptx-subscriptions` role 组件读的静态
+   * union，候选只能由 `refreshSubscriptionTargets()` **原地换 `inner.list`**（模块加载期
+   * 先按 `process.cwd()` 读一次，`apply()` 按 `ctx.baseDir` 重读并覆盖），`Schema.dynamic`
+   * 那套注入改不动它。
    */
   function applyAlbumSchema(albums: readonly AlbumCandidate[]): void {
     if (disposed) return;

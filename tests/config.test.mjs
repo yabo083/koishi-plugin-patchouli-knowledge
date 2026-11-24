@@ -268,11 +268,11 @@ test('CONFIG-10: 插件页顶层八块 + 历史 advancedMode，features 默认�
   assert.equal(topField('advancedMode').meta.hidden, true);
   assert.equal(topField('advancedMode').meta.default, false);
 
-  // 订阅表：`.role('table')` 回来了，`targets` 的候选是 const union（模块加载期先算一份，
-  // `apply()` 每次重载原地替换 `inner.list`）。表格列在渲染前按 `toColumns(inner)` 校验，
-  // `Schema.dynamic`（= `Schema.any()`）永远过不了，所以候选必须是静态 const union。
+  // 订阅表：role 是自定义的 `ptx-subscriptions`（客户端产物里的 role 组件接管这张表），
+  // `targets` 的候选仍是 const union（模块加载期先算一份，`apply()` 每次重载原地替换
+  // `inner.list`）——组件用它做「添加目标」的下拉，宿主保存校验也照样按它走。
   const subscriptions = topField('subscriptions');
-  assert.equal(subscriptions.meta.role, 'table', '静态目标候选可以进表格');
+  assert.equal(subscriptions.meta.role, 'ptx-subscriptions', '自定义 role 交给客户端组件接管表格');
   assert.equal(subscriptions.inner.type, 'object');
   assert.equal(subscriptions.meta.description, undefined, '表格上方不再有多行说明');
   const targets = subscriptions.inner.dict.targets;
