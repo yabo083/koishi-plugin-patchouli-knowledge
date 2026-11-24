@@ -53,7 +53,7 @@ function createNode() {
  * 载入产物并按用例摆好宿主环境。
  * `mount()` 被替换成记账桩：真壳层需要完整 DOM，而本文件只断言挂载 / 收回的判定。
  */
-function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '' }) {
+function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', bodyText = '', panelNode = false }) {
   /* 数据面的「零请求」断言靠这个记账桩：产物里的 `fetch` 与生成块抓到的
      `window.fetch` 都指向它，任何一条 /api 请求都躲不过去。 */
   const requests = [];
@@ -84,11 +84,24 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
     hidden: false,
     title,
     documentElement: null,
-    body: null,
+    /* 用户意图兜底（点开胶囊后的深探测）读的是页面正文：桩里给出可控文本。 */
+    body: { innerText: bodyText, appendChild: noop, removeChild: noop, addEventListener: noop, querySelector: () => null, getAttribute: () => null },
     addEventListener: noop,
     removeEventListener: noop,
     getElementById: () => null,
-    querySelector: (selector) => (breadcrumb && selector === '.el-breadcrumb' ? { textContent: breadcrumb } : null),
+    querySelector: (selector) => {
+      if (breadcrumb && selector === '.el-breadcrumb') return { textContent: breadcrumb };
+      /* 宽取样点可能正好落在浮窗自己的 DOM 里（壳层文案带「LLMWiki 知识阅读器」）：
+         这类命中必须被丢弃，否则挂载即自我认领。 */
+      if (panelNode && selector === '[class*="plugin"]') {
+        return {
+          textContent: 'LLMWiki 知识阅读器',
+          id: '',
+          parentNode: { id: 'patchouli-organic-root', parentNode: null },
+        };
+      }
+      return null;
+    },
     querySelectorAll: () => [],
     createElement: () => createNode(),
   };
@@ -144,6 +157,21 @@ return {
   state,
   win: window,
   doc: document,
+  /* 胶囊的 data-act="expand" 委派到 expandPanel；mount 被桩掉时没有事件绑定，
+     测试直接调用同一个入口，语义与用户点开胶囊一致。 */
+  expandPanel,
+  probeOwnershipDeep,
+  monitorStatusText,
+  phaseLabel,
+  refreshPhase,
+  probeState: function () {
+    return {
+      key: routeProbe.key,
+      identified: routeProbe.identified,
+      deepTried: routeProbe.deepTried,
+      deepOwned: routeProbe.deepOwned,
+    };
+  },
   mountCount: function () { return __mounts; },
   classes: function (which) {
     const node = which === 'root' ? rootEl : which === 'frame' ? frameEl : pillEl;
@@ -357,4 +385,85 @@ test('ROUTE-10: 本插件页 own 变真才启动数据面；离开本插件页�
   api.checkRoute();
   api.checkRoute();
   assert.equal(api.requests().length, settled, '数据面停掉后轮询链不再续，请求数不增长');
+});
+
+test('ROUTE-11: 随机实例 id + 标题与面包屑都不含身份文本 → 用户点开胶囊后深探测认领本页并开始取数', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    // 宿主把插件名画在页头之外的地方（说明 / 表单标题），首帧取样读不到
+    bodyText: '插件配置 实例 0848oh 知识库范围 频道白名单',
+  });
+  api.checkRoute();
+
+  assert.equal(api.state.own, false, '首帧身份文本不命中：先不认领');
+  assert.equal(api.state.collapsed, true, '只留胶囊，整窗不盖住宿主表单');
+  assert.deepEqual(api.requests(), [], '认领之前一个 /api 请求都不发');
+
+  // 用户点开胶囊（data-act="expand" → expandPanel）：这是「我要用这个面板」的唯一凭据
+  api.expandPanel();
+
+  assert.equal(api.state.own, true, '用户意图兜底：正文命中标识即认领本页');
+  assert.equal(api.auth.ownPage, true, '认领结果必须同步给生成块');
+  assert.equal(api.state.collapsed, false, '点开就是展开，不留在胶囊态');
+  assert.equal(api.auth.gates, 1, '认领本页即弹门禁');
+  const started = api.requests();
+  assert.ok(started.length > 0, '认领后立刻启动数据面');
+  assert.equal(
+    started.every((url) => url.startsWith('/patchouli/api/')),
+    true,
+    '深探测本身零请求：取数只打 /api',
+  );
+  assert.equal(api.probeState().deepTried, true, '本页的深探测已用掉');
+  assert.equal(api.probeState().deepOwned, true, '认领结果记在本页上');
+
+  // 下一轮路由判定现算 routeMatches() 仍是 false：不得把用户刚认领的页收回去
+  api.checkRoute();
+  assert.equal(api.state.own, true, '轮询判定不得反悔用户的认领');
+  assert.equal(api.state.dataFlow, true, '数据面保持运行');
+  assert.equal(api.state.collapsed, false, '面板保持展开');
+  assert.equal(api.auth.dismissals, 0, '不得因为下一轮判定收起门禁');
+});
+
+test('ROUTE-12: 随机实例 id + 正文也不含身份文本 → 保持未认领、零请求、文案区分「不是本插件页」', () => {
+  const api = loadClient({
+    pathname: '/plugins/0848oh',
+    title: 'Koishi',
+    breadcrumb: 'Koishi 控制台 / 插件配置',
+    bodyText: '适配器配置 账号协议 心跳间隔 重连次数',
+  });
+  api.checkRoute();
+  assert.equal(api.state.own, false);
+  assert.equal(api.monitorStatusText(), '当前不是本插件页', '未认领页面的监控条不得报「连接中断」');
+
+  api.expandPanel();
+
+  assert.equal(api.state.own, false, '正文也认不出：不认领');
+  assert.equal(api.probeState().deepTried, true, '深探测每页只跑一次');
+  assert.deepEqual(api.requests(), [], '深探测不产生任何网络请求，拒绝也不会绕开闸口');
+  assert.equal(api.auth.gates, 0, '认不出身份不得弹全屏门禁');
+  assert.equal(api.state.dataFlow, false, '不启动数据面');
+  assert.equal(api.monitorStatusText(), '当前不是本插件页', '展开后仍是「不是本插件页」，不是断线');
+  assert.equal(api.phaseLabel('UNOWNED'), '当前不是本插件页', '状态胶囊同样区分未认领与断线');
+  assert.equal(api.phaseLabel('OFFLINE'), '连接中断', '真断线的文案保持不变');
+
+  // 再来一次点击也不会重探（每页一次），更不会因此认领
+  api.expandPanel();
+  assert.equal(api.state.own, false, '重复点击不重探、不认领');
+  assert.deepEqual(api.requests(), [], '零请求保持不变');
+});
+
+test('ROUTE-13: 身份取样落到浮窗自己的 DOM 里不算页面身份（挂载不得自我认领）', () => {
+  const api = loadClient({
+    pathname: '/plugins/adapter-onebot',
+    title: '适配器 · Koishi',
+    panelNode: true,
+  });
+  api.checkRoute();
+
+  assert.equal(api.routeMatches(), false, '浮窗自己的「LLMWiki 知识阅读器」不是页面身份');
+  assert.equal(api.state.own, false);
+  assert.equal(api.state.collapsed, true, '别的插件页仍是胶囊');
+  assert.deepEqual(api.requests(), [], '自我认领会连带把别人的插件页变成取数页 —— 必须零请求');
 });

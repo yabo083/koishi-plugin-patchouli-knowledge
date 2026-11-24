@@ -45,11 +45,19 @@ export function trafficRuntime(): string {
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
+  /* 监控条状态文案的唯一真源：**不是本插件页**与**真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向。 */
+  function monitorStatusText() {
+    if (!state.own) return '当前不是本插件页';
+    return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
+  }
+
   function updateMetrics() {
     var root = monitorViewport();
     if (!root || !root.querySelector('[data-traffic-summary]')) return;
     var status = state.status;
-    if (!status) {
+    /* 未认领本页时数据面没启动：清掉可能从上一页留下的数字，只说「不是本插件页」。 */
+    if (!status || !state.own) {
       if (trafficChannel && trafficChannel !== channelScopeId()) {
         trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
         trafficText('[data-message-author]', '');
@@ -57,7 +65,7 @@ export function trafficRuntime(): string {
         resetLatestMessage();
         for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
       }
-      trafficText('.ptx-monitor-status', state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务');
+      trafficText('.ptx-monitor-status', monitorStatusText());
       return;
     }
     var channel = String(status.channelId || channelScopeId());

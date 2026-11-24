@@ -70,6 +70,9 @@ const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
    面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
 const IDENTITY_PROBE_TICKS = 8;
+/* 用户意图兜底：用户手动点开胶囊时允许一次深探测（页面正文前 600 字）认领本页。
+   有界取样是硬要求：正文可能极长，绝不能整段进内存参与比对。 */
+const DEEP_PROBE_CHARS = 600;
 const ROOT_ID = 'patchouli-organic-root';
 const STYLE_ID = 'patchouli-organic-style';
 const PREFIX = 'ptxClient';
@@ -311,6 +314,8 @@ const PHASE_LABELS = {
   COOLING: '平息观察',
   SUMMARIZING: '沉淀生成',
   OFFLINE: '连接中断',
+  /* 未认领本页：数据面没启动，不是「连不上」——两者混用会让用户白排查网络。 */
+  UNOWNED: '当前不是本插件页',
 };
 
 function phaseLabel(phase) {
@@ -326,6 +331,7 @@ const PHASE_TIPS = {
   COOLING: '讨论已平息，等待沉淀',
   SUMMARIZING: '正在生成词条',
   OFFLINE: '无法连接服务，请检查后刷新',
+  UNOWNED: '在本插件的插件页打开才取数',
 };
 
 /* 词条状态中文映射：后端只有 verified / tentative / open 三态 */
@@ -1127,12 +1133,16 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   #patchouli-organic-root .ptx-phase[data-phase="SUMMARIZING"] i { background: var(--bio-secondary); }
   #patchouli-organic-root .ptx-phase[data-phase="LOADING"] { color: var(--bio-ink-3); background: var(--surface-track); border-color: var(--hairline-strong); }
   #patchouli-organic-root .ptx-phase[data-phase="LOADING"] i { background: var(--bio-ink-4); animation: ptxPhasePulse 2.6s var(--ease-organic) infinite; }
+  /* 未认领本页：中性态（不是故障），与 OFFLINE 的警示红明确区分 */
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"] { color: var(--bio-ink-3); background: var(--surface-track); border-color: var(--hairline-strong); }
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"] i { background: var(--bio-ink-4); }
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] { color: var(--danger-ink); background: var(--surface-danger); border-color: rgba(196, 72, 92, 0.24); }
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"] i { background: var(--bio-danger); }
 
   /* 可点击反馈：只加深描边（各相位用自己的语义色阶），底色与呼吸点一律不动 */
   #patchouli-organic-root .ptx-phase:hover { border-color: rgba(14, 164, 79, 0.36); }
-  #patchouli-organic-root .ptx-phase[data-phase="LOADING"]:hover { border-color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-phase[data-phase="LOADING"]:hover,
+  #patchouli-organic-root .ptx-phase[data-phase="UNOWNED"]:hover { border-color: var(--bio-ink-4); }
   #patchouli-organic-root .ptx-phase[data-phase="BURSTING"]:hover,
   #patchouli-organic-root .ptx-phase[data-phase="OFFLINE"]:hover { border-color: rgba(196, 72, 92, 0.46); }
   #patchouli-organic-root .ptx-phase[data-phase="COOLING"]:hover { border-color: rgba(184, 121, 30, 0.46); }
@@ -4021,11 +4031,19 @@ function monitorViewport() { return viewportEl; }
     return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
+  /* 监控条状态文案的唯一真源：**不是本插件页**与**真断线**必须分开说。
+     未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向。 */
+  function monitorStatusText() {
+    if (!state.own) return '当前不是本插件页';
+    return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
+  }
+
   function updateMetrics() {
     var root = monitorViewport();
     if (!root || !root.querySelector('[data-traffic-summary]')) return;
     var status = state.status;
-    if (!status) {
+    /* 未认领本页时数据面没启动：清掉可能从上一页留下的数字，只说「不是本插件页」。 */
+    if (!status || !state.own) {
       if (trafficChannel && trafficChannel !== channelScopeId()) {
         trafficText('.ptx-vhead-sub', '群聊 ' + channelScopeId());
         trafficText('[data-message-author]', '');
@@ -4033,7 +4051,7 @@ function monitorViewport() { return viewportEl; }
         resetLatestMessage();
         for (var index = 0; index < 4; index += 1) trafficText('[data-metric="' + index + '"]', '—');
       }
-      trafficText('.ptx-monitor-status', state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务');
+      trafficText('.ptx-monitor-status', monitorStatusText());
       return;
     }
     var channel = String(status.channelId || channelScopeId());
@@ -4891,7 +4909,10 @@ function startTicker() {
 }
 
 function refreshPhase() {
-  const phase = state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING');
+  /* 未认领本页时状态位说「不是本插件页」：数据面没启动，报 OFFLINE（连接中断）是错误归因。 */
+  const phase = state.own
+    ? (state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING'))
+    : 'UNOWNED';
   if (frameEl) frameEl.setAttribute('data-phase', phase);
   if (!phaseEl) return;
   phaseEl.setAttribute('data-phase', phase);
@@ -5835,6 +5856,9 @@ function collapsePanel() {
 function expandPanel() {
   if (!frameEl) return;
   clearIdleTimer();
+  /* 用户手动点开胶囊 = 明确要这个面板：随机实例 id 的插件页里 DOM 身份文本可能全不命中，
+     这里才允许一次深探测认领本页（不产生任何网络请求）。 */
+  if (!state.own) probeOwnershipDeep();
   state.collapsed = false;
   if (pillEl) pillEl.classList.remove('is-visible');
   // 先摘除 docked 让面板立即可见，再撤销折叠态播放展开过渡
@@ -5843,6 +5867,12 @@ function expandPanel() {
   /* visibility:hidden 期间宽度读不到，重新可见的这一帧补一次档位判定 */
   syncResponsiveTier();
   setTimeout(resetIdleTimer, 80);
+  /* 没认领本页就没有数据面可拉：直接按「不是本插件页」刷新状态位，
+     不去发注定被闸口拒掉的请求（也就不用把拒绝当断线来报）。 */
+  if (!state.own) {
+    refreshPhase();
+    return;
+  }
   loadStatus().then(() => { refreshPhase(); if (state.stage === 'metrics') updateMetrics(); });
 }
 
@@ -6753,6 +6783,8 @@ function unmount() {
   state.collapsed = false;
   state.own = false;
   state.dataFlow = false;
+  /* 壳层销毁即本次认领作废：重新挂载要重新取样 / 重新走一次用户意图兜底。 */
+  resetRouteProbe('');
   /* 壳层都没了就不再是「本插件页」：生成块的 401 兜底不能还给幽灵面板弹门禁。 */
   syncGateOwnPage(false);
   state.maximized = false;
@@ -6803,8 +6835,33 @@ function currentRouteKey() {
   return `${path}${hash}`;
 }
 
-/* 页面身份文本：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。 */
-const IDENTITY_SELECTORS = ['[data-plugin-name]', '[data-plugin]', '.el-breadcrumb', 'h1'];
+/* 页面身份文本：只有这里读到的内容参与软校验，读不到就当作「认不出」而不是「不是本插件」。
+   宿主各版本画的标题层级不一样（h1 / h2 / el-page-header / 自绘 header），单点取样经常落空，
+   所以按优先级铺开一排取样点；命中任一即算认出，取样多少不影响判定语义。
+   `document.title` 与 `[data-plugin-name]` 排在最前，仍是宿主给得最准的两处。 */
+const IDENTITY_SELECTORS = [
+  '[data-plugin-name]',
+  '[data-plugin]',
+  '.el-breadcrumb',
+  'h1',
+  'h2',
+  '.el-page-header__content',
+  '.el-page-header',
+  'header',
+  '[class*="page-header"]',
+  '[class*="plugin"]',
+];
+
+/* 取样落在浮窗自己的 DOM 里就丢弃：壳层的文案本身带「LLMWiki 知识阅读器」，
+   拿它当页面身份会自我认领 —— 别的插件页一挂载就被判成本插件页。 */
+function insideOwnPanel(node) {
+  let cur = node || null;
+  while (cur) {
+    if (cur.id === ROOT_ID) return true;
+    cur = cur.parentNode || null;
+  }
+  return false;
+}
 
 function pageIdentityText() {
   const parts = [];
@@ -6817,7 +6874,8 @@ function pageIdentityText() {
   for (const selector of IDENTITY_SELECTORS) {
     let node = null;
     try { node = document.querySelector(selector); } catch (err) { node = null; }
-    const text = node && typeof node.textContent === 'string' ? node.textContent : '';
+    if (!node || insideOwnPanel(node)) continue;
+    const text = typeof node.textContent === 'string' ? node.textContent : '';
     if (text) parts.push(text);
   }
   return parts.join(' ').toLowerCase();
@@ -6830,11 +6888,51 @@ function pageIdentityMatches() {
   return IDENTITY_HINTS.some((hint) => text.includes(hint));
 }
 
-/* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。 */
-let routeProbe = { key: '', identified: false, ticks: 0, promoted: false };
+/* 软校验状态机：key 变了重开窗口；窗口过后不再重探，避免一会儿展开一会儿收回地跟用户抢状态。
+   `deepTried` / `deepOwned` 是用户意图兜底的账本：每页只深探测一次，认领结果跟着本页走。 */
+let routeProbe = { key: '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
 
 function resetRouteProbe(key) {
-  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false };
+  routeProbe = { key: key || '', identified: false, ticks: 0, promoted: false, deepTried: false, deepOwned: false };
+}
+
+/* 页面正文（可见文本）样本：只取前 `DEEP_PROBE_CHARS` 字。
+   浮窗自己挂在 body 上，它的文案（LLMWiki 知识阅读器）也在 body.innerText 里；
+   不剔掉就会自我认领 —— 任何插件页点一下胶囊都变成本插件页。 */
+function pageBodyText() {
+  let text = '';
+  try {
+    const body = document.body;
+    if (body && typeof body.innerText === 'string') text = body.innerText;
+  } catch (err) { text = ''; }
+  if (!text) return '';
+  /* 有界：先按样本长度的 4 倍截断再剔除自身文案。正文可以很长，这里绝不整段复制
+     （浮窗文案只有几百字，4 倍窗口足够覆盖它；超出部分本就进不了前 600 字的判定）。 */
+  const scanLimit = DEEP_PROBE_CHARS * 4;
+  if (text.length > scanLimit) text = text.slice(0, scanLimit);
+  try {
+    const own = rootEl && typeof rootEl.innerText === 'string' ? rootEl.innerText : '';
+    if (own && text.indexOf(own) >= 0) text = text.split(own).join(' ');
+  } catch (err) { /* 读不到自身文案时按原样取样 */ }
+  return text.slice(0, DEEP_PROBE_CHARS);
+}
+
+/* 用户意图兜底：宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / 标题层级可能全都不命中，
+   浮窗只能挂成胶囊。用户**手动点开胶囊**就是明确表态「我要用这个面板」，此时才允许一次深探测：
+   读页面正文前 600 字，命中任一标识即认领本页（启动数据面 + 门禁）。
+   每页只探测一次；纯 DOM 读取，不产生任何网络请求。 */
+function probeOwnershipDeep() {
+  if (state.own) return true;
+  if (routeProbe.deepTried) return false;
+  routeProbe.deepTried = true;
+  const text = pageBodyText().toLowerCase();
+  if (!text) return false;
+  if (!IDENTITY_HINTS.some((hint) => text.includes(hint))) return false;
+  /* 认领结果记在本页上：下一次 checkRoute 现算 routeMatches() 时不能把用户刚要到手的页收回去。 */
+  routeProbe.deepOwned = true;
+  routeProbe.identified = true;
+  syncAuthGate(true);
+  return true;
 }
 
 /* 挂载即收回：软校验没认出本插件页时只留悬浮胶囊，不遮住别的插件页。
@@ -6871,6 +6969,9 @@ function syncAuthGate(own) {
   syncGateOwnPage(own);
   if (own === state.own) return;
   state.own = own;
+  /* 归属一变，状态位与监控条的语义就变了（本页 / 非本页 / 断线三态）：
+     立刻按新归属重画，别让上一页的「连接中断」留在胶囊上误导用户。 */
+  refreshPhase();
   if (own) {
     startDataFlow();
     try {
@@ -6881,6 +6982,7 @@ function syncAuthGate(own) {
     return;
   }
   stopDataFlow();
+  if (state.stage === 'metrics') updateMetrics();
   try {
     if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
   } catch (err) {
@@ -6919,8 +7021,9 @@ function checkRoute() {
   const fresh = !state.mounted;
   if (fresh) mount();
 
-  /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。 */
-  syncAuthGate(routeMatches());
+  /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。
+     深探测认领过的页面同样是本页：用户在胶囊上的点击不该被下一轮判定反悔。 */
+  syncAuthGate(routeMatches() || routeProbe.deepOwned);
 
   if (rootEl) {
     /* 刚进入的页面还没被认领（别人的插件页 / 身份文本未画出来）时只留胶囊：
