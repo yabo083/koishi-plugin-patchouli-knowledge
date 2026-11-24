@@ -6,9 +6,11 @@ import path from 'node:path';
 
 import {
   Config,
+  MAX_TARGET_POLICIES,
   PatchouliKnowledgeSystem,
   SETTINGS_META,
   SETTINGS_SECTIONS,
+  SettingsConflictError,
   SettingsDocumentError,
   flattenConfig,
   readSettingsOverrides,
@@ -24,6 +26,7 @@ import {
   writeTargetBindings,
   writeTargetPolicies,
 } from '../lib/index.js';
+import { patchTargetPolicy } from '../lib/plugin/settings-store.js';
 
 const quiet = { info: () => {}, warn: () => {}, error: () => {} };
 
@@ -962,9 +965,12 @@ test('SETTINGS-STORE-16: 策略与绑定表同一次原子写；坏文档读空�
     assert.equal(raw.bindingMigration, 1, '绑定表与迁移标记仍是同一次落盘');
     assert.deepEqual(await readTargetPolicies(wikiDir), { [key]: policy });
 
-    // ② 标量段 / 订阅表写入必须原样保留策略（单文档读改写）。
+    // ② 标量段 / 订阅表写入必须原样保留策略（单文档读改写）：新订阅表仍引用该目标。
     await writeSettingsOverrides(wikiDir, 'query', { cardMaxHeight: 7200 });
-    await writeSubscriptionOverride(wikiDir, [{ source: '100', targets: ['@chat'], entry: true, weekly: false }]);
+    await writeSubscriptionOverride(wikiDir, [
+      { source: '100', targets: ['@chat'], entry: true, weekly: false },
+      { source: '200', targets: ['100/A1'], entry: true, weekly: false },
+    ]);
     assert.deepEqual(await readTargetPolicies(wikiDir), { [key]: policy });
     assert.deepEqual(await readTargetBindings(wikiDir), { 周报相册: '100/A1' });
 
@@ -1071,6 +1077,69 @@ test('SETTINGS-STORE-17: /api/settings 只读展示 policies（数组形状）�
     } finally {
       system.dispose();
     }
+  } finally {
+    await cleanup(wikiDir);
+  }
+});
+
+test('SETTINGS-STORE-18: 删订阅目标 / 删行时同一次落盘清掉孤儿策略，不再占 256 项上限', async () => {
+  const wikiDir = await makeWiki();
+  const policy = { entryCron: '0 22 * * *', weeklyCron: '', perDay: 0, perWeek: 0 };
+  const keptKey = '100\u0000100/A1';
+  const chatKey = '100\u0000@chat:100';
+  const droppedTargetKey = '100\u0000100/A2';
+  const droppedRowKey = '300\u0000300/A9';
+  try {
+    // ① 两条行 · 三个目标：策略与绑定表一起落盘。
+    await writeSubscriptionOverride(
+      wikiDir,
+      [
+        { source: '100', targets: ['@chat', '周报相册', '已删相册'], entry: true, weekly: false },
+        { source: '300', targets: ['300/A9'], entry: true, weekly: false },
+      ],
+      { 周报相册: '100/A1', 已删相册: '100/A2' },
+    );
+    await writeTargetPolicies(wikiDir, {
+      [keptKey]: policy,
+      [chatKey]: policy,
+      [droppedTargetKey]: policy,
+      [droppedRowKey]: policy,
+    });
+
+    // ② 删掉一个目标（名字也从绑定表消失）+ 删掉一整行：这两项已经没有标签能打开。
+    await writeSubscriptionOverride(wikiDir, [{ source: '100', targets: ['@chat', '周报相册'], entry: true, weekly: false }], {
+      周报相册: '100/A1',
+    });
+    assert.deepEqual(
+      await readTargetPolicies(wikiDir),
+      { [keptKey]: policy, [chatKey]: policy },
+      '同一次落盘清掉孤儿策略，仍被引用的策略原样保留',
+    );
+
+    // ③ 相册暂时探不到 → 名字还在行里、绑定掉了：策略必须留住（重新绑回同一地址时还该生效）。
+    await writeSubscriptionOverride(wikiDir, [{ source: '100', targets: ['@chat', '周报相册'], entry: true, weekly: false }], {});
+    assert.deepEqual(
+      await readTargetPolicies(wikiDir),
+      { [keptKey]: policy, [chatKey]: policy },
+      '掉绑但名字仍在行里 → 不算孤儿（沿用上一次绑定）',
+    );
+
+    // ④ 上限：孤儿项能堆满 256 项，之后新策略保存 400；清掉后必须能重新保存。
+    const full = {};
+    for (let index = 0; index < MAX_TARGET_POLICIES; index += 1) full[`400\u0000400/A${index}`] = policy;
+    assert.equal(Object.keys(await writeTargetPolicies(wikiDir, full)).length, MAX_TARGET_POLICIES);
+    await assert.rejects(
+      patchTargetPolicy(wikiDir, '500\u0000500/A1', { perDay: 1 }),
+      (error) => error instanceof SettingsConflictError,
+      '孤儿项堆满上限时新策略确实保存不了',
+    );
+
+    await writeSubscriptionOverride(wikiDir, [{ source: '100', targets: ['@chat', '周报相册'], entry: true, weekly: false }], {
+      周报相册: '100/A1',
+    });
+    assert.deepEqual(await readTargetPolicies(wikiDir), {}, '一整表孤儿项一次性清空');
+    const accepted = await patchTargetPolicy(wikiDir, '500\u0000500/A1', { perDay: 1 });
+    assert.equal(accepted.ok, true, '清掉孤儿后新策略不再被上限挡住');
   } finally {
     await cleanup(wikiDir);
   }

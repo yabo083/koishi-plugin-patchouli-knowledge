@@ -336,9 +336,12 @@ test('SUBS-HTTP-08: 覆盖层优先于 config，且并发 POST 串行落盘不�
     subscriptions: [{ source: '999', targets: ['@chat'], entry: true, weekly: false }],
   });
   try {
-    const first = koaCtx({ body: { rows: [{ source: '111', targets: ['@chat'], entry: true, weekly: false }] } });
-    const second = koaCtx({ body: { rows: [{ source: '222', targets: ['@chat'], entry: false, weekly: true }] } });
-    // 两个请求同时发出：队列必须保证「后入队者看到前者的结果」，文件只能是完整 JSON
+    const firstRows = [{ source: '111', targets: ['@chat'], entry: true, weekly: false }];
+    const secondRows = [{ source: '222', targets: ['@chat'], entry: false, weekly: true }];
+    const first = koaCtx({ body: { rows: firstRows } });
+    const second = koaCtx({ body: { rows: secondRows } });
+    // 两个请求同时发出：谁最后落盘由各自的相册目录读完成先后决定（不保证与发出顺序一致），
+    // 但队列必须保证落盘的是**某一次提交的整份结果**，绝不是合并 / 半截 / 空表。
     await Promise.all([
       request('POST /patchouli/api/subscriptions', first),
       request('POST /patchouli/api/subscriptions', second),
@@ -347,7 +350,11 @@ test('SUBS-HTTP-08: 覆盖层优先于 config，且并发 POST 串行落盘不�
     assert.equal(second.status, 200);
 
     const stored = await readSubscriptionOverride(wikiDir);
-    assert.deepEqual(stored, [{ source: '222', targets: ['@chat'], entry: false, weekly: true }], '最后一次写入生效');
+    assert.ok(
+      JSON.stringify(stored) === JSON.stringify(firstRows) ||
+        JSON.stringify(stored) === JSON.stringify(secondRows),
+      `串行落盘只接受整份提交，实际：${JSON.stringify(stored)}`,
+    );
     const get = koaCtx();
     await request('GET /patchouli/api/subscriptions', get);
     assert.equal(get.body.source, 'settings');

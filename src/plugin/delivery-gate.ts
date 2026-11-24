@@ -668,7 +668,10 @@ export class DeliveryGate {
     const cache = new Map<string, Buffer>();
     const missing = new Set<string>();
     for (const item of batch) {
-      const key = `${item.kind}\u0000${item.eventKey}`;
+      /* 产物身份必须带来源群，与队列身份 / 下游幂等键同一口径：`eventKey` 会跨来源撞
+         （周报同一取材时刻的 `fireKey`、词条同一天的标题 slug），只按「种类 + 事件键」
+         缓存会让第二个来源的卡片拿到第一个来源的 PNG。 */
+      const key = `${item.kind}\u0000${item.source}\u0000${item.eventKey}`;
       const cached = cache.get(key);
       if (cached !== undefined) {
         ready.push({ item, png: cached });

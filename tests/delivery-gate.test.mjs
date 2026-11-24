@@ -928,6 +928,44 @@ test('DELIVERY-GATE-SCOPE-SOURCE: 两个来源群的同一事件投同一相册�
       `100000002:2026-11-24-some-topic:${ALBUM_B}`,
       `100000002:fire-1:${ALBUM_A}`,
     ].sort());
+    /* 产物也不能按「种类 + 事件键」合并：第二个来源的卡必须带自己的 PNG。 */
+    const pngByKey = new Map(deliveries.map((delivery) => [delivery.dedupeKey, delivery.png.toString()]));
+    assert.equal(pngByKey.get(`100000001:fire-1:${ALBUM_A}`), 'png:weekly-100000001');
+    assert.equal(pngByKey.get(`100000002:fire-1:${ALBUM_A}`), 'png:weekly-100000002');
+    assert.equal(pngByKey.get(`100000002:2026-11-24-some-topic:${ALBUM_B}`), 'png:entry-100000002');
+  } finally {
+    await harness.disposeDir();
+  }
+});
+
+test('DELIVERY-GATE-RENDER-CACHE: 同批同事件键不同来源各渲各的产物，不复用别的来源的 PNG', async () => {
+  let renders = 0;
+  const harness = await makeHarness({
+    render: async (item) => {
+      renders += 1;
+      return PNG(`${item.source}:${item.eventKey}`);
+    },
+  });
+  try {
+    const at = harness.now();
+    for (const source of ['100000001', '100000002']) {
+      await harness.gate.offer({
+        kind: 'weekly',
+        source,
+        eventKey: 'fire-1',
+        targets: [albumPlan(ALBUM_A)],
+        /* 不给 png：两条都要真正走进渲染，命中缓存就会暴露成第二个来源拿到第一个来源的图。 */
+      });
+    }
+    await harness.gate.drain(at);
+
+    const deliveries = harness.calls[0];
+    assert.equal(deliveries.length, 2);
+    assert.deepEqual(deliveries.map((delivery) => delivery.png.toString()), [
+      'png:100000001:fire-1',
+      'png:100000002:fire-1',
+    ]);
+    assert.equal(renders, 2, '两个来源各渲一次，产物身份必须带来源群');
   } finally {
     await harness.disposeDir();
   }

@@ -1077,3 +1077,48 @@ test('TAG-19: 保存成全缺省 = 删项，缓存 / 折叠徽标 / 目标列表
     '已删除的策略不得再显示为已设置',
   );
 });
+
+test('TAG-20: 超过一页的目标分页展示，第 33 个起的每个目标都点得到', async () => {
+  const targets = [];
+  for (let index = 1; index <= 40; index += 1) targets.push('相册' + String(index));
+  const client = setup({
+    subscriptions: {
+      rows: [
+        { source: '111111', targets: targets.slice(0, 16) },
+        { source: '111111', targets: targets.slice(16) },
+      ],
+    },
+  });
+  const [row] = buildCollapsedTable(client.document, [{ source: '111111', visible: '相册1', collapsed: 39 }]);
+  client.menu.attach();
+  await client.menu.refresh();
+
+  row.plusTag.dispatchEvent(makeEvent('contextmenu', { clientX: 400, clientY: 240 }));
+  await flush();
+  const picker = client.document.querySelector('.ptx-policy-picker');
+  assert.ok(picker, '右键折叠标签要弹「选择投递目标」');
+
+  let buttons = picker.querySelectorAll('.ptx-policy-target');
+  assert.equal(buttons.length, 33, '第一页 32 个目标 + 一个「继续显示」（单屏 DOM 有界）');
+  const firstPage = buttons
+    .filter((button) => button.getAttribute('data-ptx-more') !== '1')
+    .map((button) => button.textContent);
+  assert.deepEqual(firstPage, targets.slice(0, 32), '第一页按订阅表顺序铺满 32 个');
+
+  const more = picker.querySelector('[data-ptx-more]');
+  assert.ok(more, '还有目标没铺出来时必须有「继续显示」入口');
+  assert.match(more.textContent, /8/u, '按钮写明还剩几个');
+  more.dispatchEvent(makeEvent('click'));
+
+  buttons = picker.querySelectorAll('.ptx-policy-target');
+  assert.equal(buttons.length, 40, '翻页后 40 个目标全部可达');
+  assert.equal(picker.querySelectorAll('[data-ptx-more]').length, 0, '最后一页不再有「继续显示」');
+
+  /* 被折叠掉的那一个也要能配置：点最后一个目标 → 策略菜单标题是它。 */
+  const last = buttons[buttons.length - 1];
+  assert.equal(last.textContent, '相册40');
+  last.dispatchEvent(makeEvent('click'));
+  const menu = client.document.querySelector('.ptx-policy-menu');
+  assert.ok(menu, '点最后一项要进策略菜单');
+  assert.match(menu.querySelector('.ptx-policy-who').textContent, /111111 → 相册40/u);
+});

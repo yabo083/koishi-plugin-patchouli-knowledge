@@ -6506,8 +6506,9 @@ const TAG_POLICY_COUNT_ATTR = 'data-ptx-policy-count';
 const TAG_POLICY_PLUS_TEXT = /^\+\s*\d+$/;
 const TAG_POLICY_PICKER_CLASS = 'ptx-policy-picker';
 const TAG_POLICY_TARGET_CLASS = 'ptx-policy-target';
-/* 一行最多 16 个目标，但同一监听群可以有多行；菜单按钮的 DOM 数量必须有上限。 */
-const TAG_POLICY_PICKER_LIMIT = 32;
+/* 一行最多 16 个目标、同一监听群可以有多行，目标总数因此没有单独上限（≤ 行数 × 16）。
+   列表一次只铺一页按钮把单屏 DOM 压住，剩下的用「继续显示」翻页——每个目标都必须点得到。 */
+const TAG_POLICY_PICKER_PAGE = 32;
 
 /* 定时预设：点 chip 只把 cron 填进**本块**的输入框，保存仍然要用户点「保存」（不发请求）。
    日词条每天都有、周主题每周一次，两块各给各的预设，改一块绝不碰另一块。 */
@@ -7236,15 +7237,16 @@ function createTagPolicyMenu(options) {
       : (Array.isArray(payload) ? payload : []);
     const wanted = normalizePolicySource(source);
     const out = [];
+    const seen = new Set();
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue;
       if (normalizePolicySource(row.source) !== wanted) continue;
       const list = Array.isArray(row.targets) ? row.targets : [];
       for (const raw of list) {
         const target = typeof raw === 'string' ? raw.trim() : '';
-        if (!target || out.indexOf(target) >= 0) continue;
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
         out.push(target);
-        if (out.length >= TAG_POLICY_PICKER_LIMIT) return out;
       }
     }
     return out;
@@ -7326,27 +7328,52 @@ function createTagPolicyMenu(options) {
           return;
         }
         listNode.textContent = '';
-        for (const target of targets) {
-          const button = doc.createElement('button');
-          button.setAttribute('type', 'button');
-          button.className = TAG_POLICY_TARGET_CLASS;
-          button.setAttribute('data-ptx-target', target);
-          button.textContent = target;
-          const key = tagPolicyKey(source, target);
-          if (cache.has(key)) button.classList.add('is-set');
-          button.addEventListener('click', (event) => {
-            if (event && typeof event.preventDefault === 'function') event.preventDefault();
-            if (menuEl !== root) return;
-            if (!isOwnPage()) {
-              closeMenu();
-              return;
-            }
-            /* 折叠标签没有可见的 `el-tag` 可回写后缀：`tag` 传 null（见 openMenu 的保存分支）。 */
-            openMenu(null, { source, target, key }, x, y);
-          });
-          listNode.appendChild(button);
-        }
-        placeMenu(root, x, y);
+        /* 分页铺按钮：单屏 DOM 有界，但每个目标都必须能点到（第 33 个起靠「继续显示」）。
+           回执迟到 / 菜单已换掉时不再往里写——翻页按钮点得慢也受同一条闸门约束。 */
+        let shown = 0;
+        let moreBtn = null;
+        const appendPage = () => {
+          if (moreBtn && moreBtn.parentNode === listNode) listNode.removeChild(moreBtn);
+          moreBtn = null;
+          const pageEnd = Math.min(targets.length, shown + TAG_POLICY_PICKER_PAGE);
+          for (; shown < pageEnd; shown += 1) {
+            const target = targets[shown];
+            const button = doc.createElement('button');
+            button.setAttribute('type', 'button');
+            button.className = TAG_POLICY_TARGET_CLASS;
+            button.setAttribute('data-ptx-target', target);
+            button.textContent = target;
+            const key = tagPolicyKey(source, target);
+            if (cache.has(key)) button.classList.add('is-set');
+            button.addEventListener('click', (event) => {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault();
+              if (menuEl !== root) return;
+              if (!isOwnPage()) {
+                closeMenu();
+                return;
+              }
+              /* 折叠标签没有可见的 `el-tag` 可回写后缀：`tag` 传 null（见 openMenu 的保存分支）。 */
+              openMenu(null, { source, target, key }, x, y);
+            });
+            listNode.appendChild(button);
+          }
+          if (shown < targets.length) {
+            const more = doc.createElement('button');
+            more.setAttribute('type', 'button');
+            more.className = TAG_POLICY_TARGET_CLASS + ' ptx-policy-more';
+            more.setAttribute('data-ptx-more', '1');
+            more.textContent = '继续显示剩余 ' + String(targets.length - shown) + ' 个';
+            more.addEventListener('click', (event) => {
+              if (event && typeof event.preventDefault === 'function') event.preventDefault();
+              if (menuEl !== root) return;
+              appendPage();
+            });
+            listNode.appendChild(more);
+            moreBtn = more;
+          }
+          placeMenu(root, x, y);
+        };
+        appendPage();
       }, () => {
         if (menuEl !== root) return;
         showDraft();
