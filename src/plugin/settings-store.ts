@@ -22,7 +22,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import { resolveWikiLayout } from '../wiki/layout';
 import { normalizeTriggerOptions } from '../trigger/detector';
-import type { SubscriptionRow, TargetPolicies, TriggerOptions } from '../types';
+import type { SubscriptionRow, TargetPolicies, TargetPolicy, TriggerOptions } from '../types';
 import {
   ALBUM_TARGET_PATTERN,
   CHAT_TARGET,
@@ -30,7 +30,7 @@ import {
   TARGET_GROUP_PREFIX,
   normalizeSubscriptionRows,
 } from './subscriptions';
-import { parsePolicies } from './policy-resolve';
+import { MAX_TARGET_POLICIES, parsePolicies } from './policy-resolve';
 
 /** 面板可调的五个段（顺序即 GET 响应里的展示顺序）。 */
 export const SETTINGS_SECTIONS = ['trigger', 'topics', 'media', 'query', 'judge'] as const;
@@ -872,6 +872,37 @@ export async function writeTargetPolicies(
   const target = settingsPath(wikiDir);
   const next = await enqueueWrite(target, () =>
     performDocumentWrite(target, (current) => ({ ...current, policies: parsePolicies(policies) })),
+  );
+  return next.policies;
+}
+
+/**
+ * 逐项写一条策略（面板右键菜单的唯一入口）：`policy === null` = 删除该项。
+ *
+ * 读改写整段在**同一条串行链**里完成：两个并发 POST 不会各自读到旧表再互相覆盖。
+ * 表项已满且是新增键时抛 `SettingsConflictError`（HTTP 层翻成 400），文件保持原样。
+ * 键与值都由调用方先过 `isPolicyKey` / `normalizePolicy`——这里再清洗一遍整表，
+ * 顺手把文件里遗留的非法项清掉。
+ */
+export async function upsertTargetPolicy(
+  wikiDir: string,
+  key: string,
+  policy: TargetPolicy | null,
+): Promise<TargetPolicies> {
+  const target = settingsPath(wikiDir);
+  const next = await enqueueWrite(target, () =>
+    performDocumentWrite(target, (current) => {
+      const policies: TargetPolicies = { ...current.policies };
+      if (policy === null) {
+        delete policies[key];
+      } else {
+        if (!Object.hasOwn(policies, key) && Object.keys(policies).length >= MAX_TARGET_POLICIES) {
+          throw new SettingsConflictError(`投递策略最多 ${MAX_TARGET_POLICIES} 项，请先删除不再使用的目标`);
+        }
+        policies[key] = policy;
+      }
+      return { ...current, policies: parsePolicies(policies) };
+    }),
   );
   return next.policies;
 }

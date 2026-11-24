@@ -59,7 +59,7 @@ export interface WeeklyAlbumDeps {
    * 额度预筛（按稳定地址判断该相册本周还有额度）：用尽的目标不取材、不渲染。
    * 只是省算力，**最终仍以 `deliver` 里的占额为准**。
    */
-  readonly allowTarget?: (album: string) => boolean;
+  readonly allowTarget?: (album: string, source: string) => boolean;
   readonly logger: WeeklyAlbumLogger;
   readonly recentEntries: (channelId: string | undefined, limit: number) => Promise<readonly WikiEntryRecord[]>;
   /** 词条 → 脱敏后的公开视图；读正文 / 原始会话失败时返回 `undefined`。 */
@@ -96,12 +96,12 @@ export interface WeeklyAlbumSourcePlan {
 export function planWeeklyAlbumSources(
   snapshot: SubscriptionSnapshot,
   fallbackAlbums: readonly string[],
-  allowTarget?: (album: string) => boolean,
+  allowTarget?: (album: string, source: string) => boolean,
 ): WeeklyAlbumSourcePlan[] {
   if (!snapshot.active) {
     const albums = uniqueStrings(
       fallbackAlbums.filter(
-        (value) => ALBUM_TARGET_PATTERN.test(value) && (allowTarget === undefined || allowTarget(value)),
+        (value) => ALBUM_TARGET_PATTERN.test(value) && (allowTarget === undefined || allowTarget(value, WEEKLY_ALL_SOURCES)),
       ),
     );
     return albums.length === 0 ? [] : [{ source: WEEKLY_ALL_SOURCES, albums }];
@@ -118,7 +118,7 @@ export function planWeeklyAlbumSources(
       // 停投 + warn（解析层负责告警），绝不改投到同名相册。
       const value = albumValueOfTarget(trimmed);
       if (value === undefined || collected.includes(value)) continue;
-      if (allowTarget !== undefined && !allowTarget(value)) continue;
+      if (allowTarget !== undefined && !allowTarget(value, row.source)) continue;
       collected.push(value);
     }
     bySource.set(row.source, collected);

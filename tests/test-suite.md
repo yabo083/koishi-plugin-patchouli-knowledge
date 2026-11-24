@@ -194,7 +194,8 @@
 | **API-TOPICS-01** | 手动主题校准入口 | 缺省按**订阅目标群**扇出（订阅表生效时只跑来源群，表为空才回退旧白名单；`features.topics` 总闸关掉时目标为空）、`force` 透传、逐群返回 `createdTopicIds/updatedTopicIds/assignedEntryIds`；指定 `channelId` 只跑该群且不再解析目标表 | `registerWebUi` 路由 + `topicTargets` / `runTopics` 调用记录；真 system 侧见 `SUBS-HTTP-10` |
 | **AUTH-01..17** | 管理面鉴权（会话 + 首次初始化） | 未配置 fail closed；登录换 64 位会话、Cookie/Bearer 双通道；错误令牌 / 未知会话 / 无凭据分别归类；长期令牌可运维直连；过期即拒且过半滑动续期；登出吊销幂等；守卫 401 短路；Cookie 不含长期令牌；`/session` 自检与 `bootstrapRequired`；会话表上限；`/bootstrap` 生成 32B 密钥并落盘 0600、自定义密钥 ≥16、已配置 409、重启用落盘密钥恢复；私网/回环判定；公网或 `x-forwarded-for` 透传公网时 423 且不落定 | `TokenAuthority` / `handleBootstrap` |
 | **DELIVERY-BATCH-01..04** | 批量投递 | 有 `broadcast` 时单次提交并透传 retry；只有 `deliver` 时退化为逐个；无服务时相册目标结构化失败；空目标表直接成功 | `deliverCardToTargets` |
-| **SCHED-01..17** | 定时投递闸门（窗口 / 限量 / 抖动 / 批量） | 无策略直通；窗口内立即投、窗口外排队到窗口首刻；跨午夜 `22:00-02:00` 的 01:30 属开始日；每目标独立额度、跨自然日 / 自然周惰性清零；同一事件投 3 目标各扣 1 次；队列与计数跨重启且同事件键不重复扣；抖动 `deliverAt` 落库、重启不重算；3 条同时到期只发一次 `broadcast`；按 `outcomes` 只重试失败目标；第 1025 条拒收且旧项保留；坏状态文件按空状态运行且不被覆盖；并发 `offer` 只入队一次；`dispose` 停闸不再发送；目标失效出队并告警 | `DeliveryGate`（注入时钟 / 定时器 / render / broadcast 桩） |
+| **CRON-01..06 / SCHED-01..21 / POLICY-CRON-SPLIT-01..02** | 定时投递闸门（cron / 限量 / 批量） | cron 五字段解析、步进 / 列表 / 非法、`nextCronAt` 严格大于且按上海时区、跨日 / 周 / 月与日周并集；**同一目标 `entryCron` / `weeklyCron` 各排各的（词条当天 22:00、周报下周一 09:00），旧数据单 `cron` 读成 `entryCron` 而 `weeklyCron` 为空**；无策略直通、空 cron 立即投、cron 到点才投（当天已过排次日）；额度**到点、渲染前**判定（超额出队告警且不渲染；重试不重复占额；并发 drain 只占一次）、每（来源群 × 目标）独立、跨自然日 / 周惰性清零、同一事件投 3 目标各扣 1 次；同目标相邻两条 1–3 分钟随机间隔并落库、重启不重算；队列与计数跨重启且同事件键不重复入队；3 个目标同时到期只发一次 `broadcast`；按 `outcomes` 只重试失败目标；第 1025 条拒收且旧项保留；坏状态文件按空状态运行且不被覆盖；并发 `offer` 只入队一次；`dispose` 停闸不再发送；目标失效出队并告警；同一投递群在不同监听群下策略独立 | `DeliveryGate`（注入时钟 / 定时器 / render / broadcast 桩）、`policy-resolve` |
+| **POLICY-API-01** | 投递策略 HTTP 面 | `GET /api/policies` 拆键（相册名回显 / 回退稳定地址；`entryCron` 与 `weeklyCron` 各回各的）、`POST` 逐项 upsert + **局部更新**（没给的字段沿用该项现值）不动其他项、四字段全缺省 = 删项、旧字段 `cron` 一律 400、非法输入 400 且文件字节不变、并发 POST 串行化、`/api/settings.policies` 同形 | `policies-http.test.mjs` |
 | **ENTRY-DELIVER-01..05** | 词条投递目标 | 未改道时按相册表逐个投递；配置 `redirectChannelId` 后只发该群聊天（相册被忽略）；改道目标允许带平台前缀；非法 / 重复相册串丢弃；两者皆空返回空表供调用方告警 | `planEntryTargets` |
 | **MEDIA-01..08** | 卡片素材池 | 目录为空即禁用（零 I/O）；低于水位补到 `batch` 条、达水位不重复请求；在线消费即删并返回 `data:` URI；文件名 FIFO；一言去重并截断 120 字；离线模式不触网、消费转入 `used/`、冷却后回到队列（环形）；非图片响应不落盘；配置 `apiKey` 时附加 `key` 参数且保留既有查询串、未配置则匿名 | `MediaPool` + 桩 fetch |
 | **CARDSEQ-01..06** | 卡片序号（按群独立） | 每群各自从 1 递增；同一词条恒同号且与传入群无关；跨实例延续（文件 `{version:2,channels:{群:{next,map}}}`）；同 id 并发同号、异 id 不重号；结构不符 / 损坏一律当空表从头数；空路径只内存计数 | `CardSequence` |
@@ -325,7 +326,7 @@
 | **API-TOPIC-02** | 手动主题校准按目标群扇出、force 透传并返回逐群结果 | `api.test.mjs` |
 | **API-TOPIC-03** | 无 channelId 的批量校准只跑订阅目标（不碰 `config.channels` 旧群与库内历史群） | `api.test.mjs` |
 | **CARD-07** | 每周相册总结一页列出主题，不复制正文，PNG 裁剪到实际高度 | `card-delivery.test.mjs` |
-| **SCHED-01..17 / DELIVERY-GATE-*** | 闸门 17 条时序用例 + 渲染失败 3 次退避、单批 20 条切批、`scope` / 去重键、`@chat` 按来源群建策略键 | `delivery-gate.test.mjs` |
+| **SCHED-01..21 / POLICY-CRON-SPLIT-01 / DELIVERY-GATE-*** | 闸门 21 条时序用例 + `entryCron` / `weeklyCron` 分流、额度前置到渲染之前（超额不渲染）、重试不重复占额、并发 drain 不重复占额、渲染失败 3 次退避、单批 20 条切批、`scope` / 去重键、策略键按（来源群 × 目标） | `delivery-gate.test.mjs` |
 | **DELIVERY-BATCH-02** | 服务只有 deliver、没有 broadcast → NO_BROADCAST，不退化逐个投递 | `delivery-batch.test.mjs` |
 | **DELIVERY-BATCH-03** | 无投递服务时结构化失败，不抛出 | `delivery-batch.test.mjs` |
 | **DELIVERY-BATCH-04** | 空目标表直接成功返回，不发任何请求 | `delivery-batch.test.mjs` |

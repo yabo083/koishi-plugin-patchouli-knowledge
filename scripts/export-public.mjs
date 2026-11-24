@@ -46,7 +46,15 @@ const EXCLUDE_SEGMENTS = ['node_modules', 'lib', 'tmp', '.gemini-designer'];
  * `docs/preview-cards.html` 内嵌真实词条正文（已脱敏昵称，但讨论内容属于群内语境），
  * 不随开源快照发布；需要预览效果时由维护者本地生成。
  */
-const EXCLUDE_FILES = ['docs/preview-cards.html'];
+const EXCLUDE_FILES = [
+  'docs/preview-cards.html',
+  // 内部自动化：拉取 PR 审查意见 → 调 omp 修复 → 验证 → 推送。只服务本地维护流程，
+  // 不属于插件运行时，随开源快照发布会让审查器反复审一套与产品无关的 shell 逻辑。
+  'scripts/review-loop.sh',
+  'scripts/review-loop-io.mjs',
+  'tests/review-loop-io.test.mjs',
+  'tests/review-loop-loop.test.mjs',
+];
 
 /**
  * 恒定形状（不含任何真实主机名 / 群号：那些走外部精确名单，见下）。

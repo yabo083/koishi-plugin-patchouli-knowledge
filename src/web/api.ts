@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import * as nodePath from 'node:path';
 import type { Context } from 'koishi';
 import type { PatchouliKnowledgeSystem } from '../plugin/index';
-import type { DispatcherConfig, LatestMessage, RichMessageElement, TuningSnapshot, TrafficSeries, TriggerOptions, WikiEntry } from '../types';
+import type { DispatcherConfig, LatestMessage, RichMessageElement, SubscriptionRow, TargetPolicies, TuningSnapshot, TrafficSeries, TriggerOptions, WikiEntry } from '../types';
 import { LATEST_ENTRIES_LIMIT, MEDIA_PROXY_SEGMENT, TRAFFIC_CAPACITY, TRAFFIC_SAMPLE_MS } from '../types';
 import {
   PATCHOULI_SYSTEM_PROMPT,
@@ -14,9 +14,16 @@ import {
 import type { WikiEntryRecord } from '../wiki/storage';
 import { resolveWikiLayout } from '../wiki/layout';
 import { TOPIC_SETTING_LIMITS } from '../plugin/topic-settings';
-import { SETTINGS_META, readTargetPolicies, writeTargetPolicies } from '../plugin/settings-store';
-import { validatePolicies } from '../plugin/policy-resolve';
-import { CHAT_TARGET } from '../plugin/subscriptions';
+import { SETTINGS_META, SettingsConflictError, readTargetPolicies, upsertTargetPolicy } from '../plugin/settings-store';
+import { ALBUM_TARGET_PATTERN, CHAT_TARGET, bareChannelId, isTargetGroupHeader } from '../plugin/subscriptions';
+import {
+  MAX_PERIOD_QUOTA,
+  isDefaultPolicy,
+  isPolicyKey,
+  normalizePolicy,
+  policyKey,
+  splitPolicyKey,
+} from '../plugin/policy-resolve';
 import { albumTargetValues, albumValue, loadAlbumCatalog, type AlbumCandidate } from '../plugin/albums';
 import {
   DEFAULT_TUNING_PARAMETERS,
@@ -900,6 +907,90 @@ function policyTargetKeys(system: PatchouliKnowledgeSystem): string[] {
   return [...keys].sort();
 }
 
+/** 一条策略的面板载荷（`GET /api/policies` 的数组项）。 */
+export interface PolicyEntry {
+  /** 监听群号（策略键的前半段）。 */
+  source: string;
+  /** 投递目标：订阅表里的写法（相册名 / `@chat`），拿不到名字时退回稳定地址。 */
+  target: string;
+  /** 日词条投递时间（5 字段 cron，空串 = 立即投）。 */
+  entryCron: string;
+  /** 周主题投递时间（5 字段 cron，空串 = 立即投）。 */
+  weeklyCron: string;
+  perDay: number;
+  perWeek: number;
+}
+
+/**
+ * 策略表 → 面板载荷。
+ *
+ * 键拆成 `source` + `target`；`target` 优先回显**订阅表里的写法**——前端按单元格标签
+ * 文案匹配后缀，写稳定地址会匹配不上（相册名 → `群号/相册ID` 只在绑定表里有一份）。
+ */
+function policyEntries(system: PatchouliKnowledgeSystem, policies: TargetPolicies): PolicyEntry[] {
+  const rows = typeof system.subscriptionTable === 'function' ? system.subscriptionTable().rows : [];
+  const bindings = typeof system.targetBindingsSnapshot === 'function' ? system.targetBindingsSnapshot() : {};
+  const entries: PolicyEntry[] = [];
+  for (const [key, policy] of Object.entries(policies)) {
+    const parts = splitPolicyKey(key);
+    if (parts === undefined) continue;
+    entries.push({
+      source: parts.source,
+      target: policyTargetToken(rows, bindings, parts.source, parts.target),
+      entryCron: policy.entryCron,
+      weeklyCron: policy.weeklyCron,
+      perDay: policy.perDay,
+      perWeek: policy.perWeek,
+    });
+  }
+  return entries.sort((left, right) =>
+    left.source === right.source ? left.target.localeCompare(right.target) : left.source.localeCompare(right.source),
+  );
+}
+
+/** 稳定目标地址 → 该来源行里对应的写法（`@chat` / 相册名）；找不到就原样返回地址。 */
+function policyTargetToken(
+  rows: readonly SubscriptionRow[],
+  bindings: Readonly<Record<string, string>>,
+  source: string,
+  target: string,
+): string {
+  const tokens: string[] = [];
+  for (const row of rows) {
+    if (bareChannelId(row.source) !== source) continue;
+    for (const token of row.targets) {
+      const trimmed = token.trim();
+      if (trimmed !== '' && !tokens.includes(trimmed)) tokens.push(trimmed);
+    }
+  }
+  if (target === `${CHAT_TARGET}:${source}`) return tokens.includes(CHAT_TARGET) ? CHAT_TARGET : target;
+  for (const token of tokens) {
+    if (token === CHAT_TARGET || isTargetGroupHeader(token)) continue;
+    if (token === target || bindings[token] === target) return token;
+  }
+  return target;
+}
+
+/**
+ * 面板写法 → 稳定目标地址（POST 的唯一翻译点）。
+ *
+ * `@chat` = 本行来源群聊天；相册名按绑定表解析（与订阅表保存时同一条规则）；
+ * 已落盘的稳定地址按形状直接认。解析不到返回 `undefined` —— 存一个永远匹配不上的键
+ * 等于静默不生效，不如 400 让用户先保存订阅表。
+ */
+function resolvePolicyTarget(system: PatchouliKnowledgeSystem, source: string, target: string): string | undefined {
+  const value = target.trim();
+  const chatPrefix = `${CHAT_TARGET}:`;
+  if (value === CHAT_TARGET) return `${CHAT_TARGET}:${source}`;
+  if (value.startsWith(chatPrefix)) {
+    const group = bareChannelId(value.slice(chatPrefix.length));
+    return group === '' || group === '*' ? undefined : `${CHAT_TARGET}:${group}`;
+  }
+  if (ALBUM_TARGET_PATTERN.test(value)) return value;
+  const bound = system.targetBindingsSnapshot()[value];
+  return typeof bound === 'string' && ALBUM_TARGET_PATTERN.test(bound) ? bound : undefined;
+}
+
 export function registerWebUi(
   ctx: Context,
   system: PatchouliKnowledgeSystem,
@@ -1171,12 +1262,15 @@ export function registerWebUi(
     }
   });
 
-  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判 / 投递策略）
+  // 2h. API: 运行时设置覆盖层（触发算法 / 主题校准 / 素材池 / 长图 / 裁判）
   //
   // GET 返回**合并后**的五段值（覆盖层 > koishi.yml > Schema 默认值）与字段元数据，
-  // 外加投递策略（`policies`）与当前真实存在的目标清单（`targets`，面板据此渲染区块）。
-  // POST 只接受 {section, patch}，未知键丢弃、非法值 400；`section: 'policies'` 走
-  // 严格的整表校验（键形状 / 窗口语法 / 数值边界）。写入落在
+  // 外加投递策略（`policies`，数组形状与 `GET /api/policies` 相同）与当前真实存在的
+  // 目标清单（`targets`）——纯只读展示。
+  // 策略的写入口是 `POST /api/policies`（订阅表里投递群标签的右键菜单）；
+  // `POST /api/settings` 的 `section: 'policies'` 一律 400，绝不接受第二个写入口
+  // （单一真源，ADR-022 同样适用）。
+  // POST 只接受 {section, patch}，未知键丢弃、非法值 400。写入落在
   // `<wikiDir>/.patchouli/settings.json`，绝不改宿主 config（ADR-022）。
   // 校验分两层且都在落盘之前：字段级 + 「合并后」跨字段（触发器的 `normalizeTriggerOptions`）。
   // 任一层不过都是 400 且文件与运行态都不变——不会再出现「500 但坏值已落盘」。
@@ -1186,8 +1280,8 @@ export function registerWebUi(
     kCtx.body = {
       sections: system.getSettingsSections(),
       meta: SETTINGS_META,
-      // 策略缺失 / 文件损坏 → 空表（= 全天不限量），读路径绝不 500。
-      policies: wikiDir === undefined ? {} : await readTargetPolicies(wikiDir),
+      // 策略缺失 / 文件损坏 → 空表（= 立即投、不限量），读路径绝不 500。
+      policies: wikiDir === undefined ? [] : policyEntries(system, await readTargetPolicies(wikiDir)),
       targets: policyTargetKeys(system),
     };
   });
@@ -1199,27 +1293,11 @@ export function registerWebUi(
       kCtx.body = { ok: false, error: 'Invalid payload' };
       return;
     }
-    // 投递策略是整张结构化表，不是标量段：严格校验后与订阅表 / 绑定表共用同一次原子写。
+    // 投递策略只认 `/api/policies`（逐项 upsert，见 2h2）：整表写入会让并发保存互相覆盖。
     if (body.section === 'policies') {
       kCtx.type = 'application/json';
-      const checked = validatePolicies(body.patch);
-      if (!checked.ok) {
-        kCtx.status = 400;
-        kCtx.body = { ok: false, error: checked.error };
-        return;
-      }
-      const wikiDir = typeof system.wikiDir === 'string' && system.wikiDir.trim() !== '' ? system.wikiDir : undefined;
-      if (wikiDir === undefined) {
-        kCtx.status = 500;
-        kCtx.body = { ok: false, error: '知识库目录不可用，投递策略无法落盘' };
-        return;
-      }
-      try {
-        kCtx.body = { ok: true, value: await writeTargetPolicies(wikiDir, checked.value) };
-      } catch (err: unknown) {
-        kCtx.status = 500;
-        kCtx.body = { ok: false, error: errorMessage(err) };
-      }
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: '投递策略请在订阅表的投递群标签上右键设置（POST /api/policies）' };
       return;
     }
     try {
@@ -1234,6 +1312,107 @@ export function registerWebUi(
     } catch (err: unknown) {
       kCtx.status = 500;
       kCtx.body = { ok: false, error: errorMessage(err) };
+    }
+  });
+
+  // 2h2. API: 投递策略（订阅表「投递群」标签右键菜单的读写口）
+  //
+  // 键 = `<来源群>\u0000<目标键>`：同一个投递群在不同监听群里各有一份独立策略。
+  // GET 把键拆成 `{ source, target, entryCron, weeklyCron, perDay, perWeek }`；`target` 回显
+  // 订阅表里的写法（相册名 / `@chat`），前端按标签文案匹配后缀。
+  // POST 是**逐项 upsert + 局部更新**：没给的字段沿用该项现有值，其余项原样保留
+  // （并发保存因此不会互相覆盖）；四字段全等于缺省（空 cron / 0 / 0）= 删除该项。
+  // 非法输入 400 且文件一个字节都不动。
+  router.get(`${cleanBase}/api/policies`, async (kCtx: KoishiKoaContext) => {
+    kCtx.type = 'application/json';
+    const wikiDir = typeof system.wikiDir === 'string' ? system.wikiDir.trim() : '';
+    kCtx.body = { policies: wikiDir === '' ? [] : policyEntries(system, await readTargetPolicies(wikiDir)) };
+  });
+
+  router.post(`${cleanBase}/api/policies`, async (kCtx: KoishiKoaContext) => {
+    const body = kCtx.request.body as
+      | {
+          source?: unknown;
+          target?: unknown;
+          entryCron?: unknown;
+          weeklyCron?: unknown;
+          perDay?: unknown;
+          perWeek?: unknown;
+          cron?: unknown;
+        }
+      | undefined;
+    if (typeof body !== 'object' || body === null) {
+      kCtx.status = 400;
+      kCtx.body = {
+        ok: false,
+        error: 'Invalid payload：需要 { source, target, entryCron?, weeklyCron?, perDay?, perWeek? }',
+      };
+      return;
+    }
+    /* 旧单一定时字段已经拆开：静默忽略会让面板的旧缓存把投递时间清成「立即投」。 */
+    if (body.cron !== undefined) {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: 'cron 已拆成 entryCron（日词条）/ weeklyCron（周主题），请分别提交' };
+      return;
+    }
+    const source = typeof body.source === 'string' ? bareChannelId(body.source) : '';
+    if (source === '') {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: 'source 不能为空' };
+      return;
+    }
+    const targetText = typeof body.target === 'string' ? body.target.trim() : '';
+    if (targetText === '') {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: 'target 不能为空' };
+      return;
+    }
+    const target = resolvePolicyTarget(system, source, targetText);
+    if (target === undefined) {
+      kCtx.status = 400;
+      kCtx.body = {
+        ok: false,
+        error: `目标 ${JSON.stringify(targetText)} 未绑定到相册（请先在订阅表里保存该相册）`,
+      };
+      return;
+    }
+    const key = policyKey(source, target);
+    if (!isPolicyKey(key)) {
+      kCtx.status = 400;
+      kCtx.body = { ok: false, error: `策略键非法：${JSON.stringify(key)}` };
+      return;
+    }
+    try {
+      /* 局部更新：**没给**的字段沿用该项现有值（面板只发改动的那几项），
+         没这一项时按缺省补（立即投 / 不限量）。整条四字段全默认 = 删除该项。 */
+      const existing = (await readTargetPolicies(system.wikiDir))[key];
+      const policy = normalizePolicy({
+        entryCron: body.entryCron === undefined ? existing?.entryCron : body.entryCron,
+        weeklyCron: body.weeklyCron === undefined ? existing?.weeklyCron : body.weeklyCron,
+        perDay: body.perDay === undefined ? existing?.perDay : body.perDay,
+        perWeek: body.perWeek === undefined ? existing?.perWeek : body.perWeek,
+      });
+      if (policy === null) {
+        kCtx.status = 400;
+        kCtx.body = {
+          ok: false,
+          error:
+            `策略字段非法：entryCron / weeklyCron 需为 5 字段表达式（分 时 日 月 周），` +
+            `perDay / perWeek 需为 0–${MAX_PERIOD_QUOTA} 的整数`,
+        };
+        return;
+      }
+      const stored = await upsertTargetPolicy(system.wikiDir, key, isDefaultPolicy(policy) ? null : policy);
+      kCtx.type = 'application/json';
+      kCtx.body = { ok: true, policies: policyEntries(system, stored) };
+    } catch (err: unknown) {
+      kCtx.type = 'application/json';
+      kCtx.status = err instanceof SettingsConflictError ? 400 : 500;
+      kCtx.body = {
+        ok: false,
+        error:
+          err instanceof SettingsConflictError ? err.message : `投递策略保存失败：${errorMessage(err)}`,
+      };
     }
   });
 
