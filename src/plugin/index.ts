@@ -632,6 +632,10 @@ const HIDDEN_LEGACY_FIELDS: Record<string, Schema> = Object.fromEntries(
 /**
  * 订阅目标候选的初值：**模块加载时**读一次实例目录（`koishi.yml` + 相册缓存）。
  *
+ * 模块顶层没有 `ctx`，这里只能先按 `process.cwd()` 猜一次；`apply()` 会带上 `ctx.baseDir`
+ * 重读一次并原地换掉候选（见 `refreshSubscriptionTargets`），所以 cwd 猜错只影响
+ * `apply()` 落地之前的那段窗口。
+ *
  * 为什么不能在 `apply()` 里注入 dynamic schema：订阅表是 `.role('table')`，
  * schemastery-vue 的表格列在渲染前就按 `toColumns(schema.inner)` 校验，而
  * `Schema.dynamic()` 那时只是 `Schema.any()`（解析发生在渲染期）→ validate 失败、
@@ -2482,6 +2486,20 @@ export class PatchouliKnowledgeSystem {
     this.tuningClocks.set(channelId, updatedAt);
   }
 
+  /**
+   * 主题校准的目标群——定时调度与 `POST /api/topics` 共用这一份判定。
+   *
+   * 订阅表生效（`topicGroups !== null`）时只跑订阅来源群：`config.channels` 里残留的旧群
+   * 不该被批量校准顺手烧一遍模型。表为空时才回退旧白名单，再回退库里出现过的群。
+   * `features.topics === false` 返回空表（总闸关掉时没有目标）。
+   */
+  public async topicTargets(): Promise<string[]> {
+    if (this.config.features.topics === false) return [];
+    const snapshot = this.subscriptions();
+    if (snapshot.topicGroups !== null) return [...snapshot.topicGroups];
+    return this.config.channels.length > 0 ? [...this.config.channels] : this.localStore.listChannels();
+  }
+
   /** 由 `apply()` 挂入调度器实例；挂入后 `runTopics()` 经调度器执行并记水位。 */
   public attachTopicScheduler(scheduler: TopicScheduler): void {
     this.topicScheduler = scheduler;
@@ -2786,8 +2804,9 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   // （不做这步预过滤的话，`albums.json` 里早先探测过的退订群相册会一直挂在候选里。）
   const startupProbe = subscriptionProbeSources(system.subscriptionTable().rows, config.channels);
   // 解析表用实例里的绑定表（构造期已读盘）：候选只决定下拉与展示文案。
+  // 路径必须锚定 `ctx.baseDir`：进程 cwd 不是实例目录时读错配置会让静态 union 拒载整份配置。
   let currentTargets = refreshSubscriptionTargets(
-    { ...readStartupTargetValues(), bindings: system.targetBindingsSnapshot() },
+    { ...readStartupTargetValues({ baseDir: ctx.baseDir }), bindings: system.targetBindingsSnapshot() },
     startupProbe.listenAll ? undefined : startupProbe.explicit,
   );
   // 管理面密钥：配置留空且尚未初始化时，引导用户从面板完成（不再要求先上服务器抄 token）。
@@ -3061,11 +3080,8 @@ export function apply(ctx: Context, rawConfig: PluginOptions): void {
   // 每日主题校准：04:00 按群各自归并；失败 30 分钟后重试，日切水位落盘。
   const topicScheduler = new TopicScheduler(system.topicConfig, {
     channels: async () => {
-      // 功能总闸：主题校准关闭时没有目标（调度器自己会睡眠到下一个事件）。
-      if (config.features.topics === false) return [];
-      const snapshot = system.subscriptions();
-      if (snapshot.topicGroups !== null) return [...snapshot.topicGroups];
-      return config.channels.length > 0 ? config.channels : await system.localStore.listChannels();
+      // 目标群判定只有一份（`topicTargets`）：订阅表生效时就是订阅来源群，总闸关掉时为空。
+      return system.topicTargets();
     },
     run: async (channelId, options) => {
       // 绕过 `runTopics` 的调度器委派，否则会递归回本调度器。

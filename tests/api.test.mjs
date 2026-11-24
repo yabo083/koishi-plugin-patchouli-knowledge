@@ -580,14 +580,20 @@ test('API-PROMPT-04: 服务重启后自动回灌 .patchouli/custom-prompt.txt，
   }
 });
 
-test('API-TOPIC-02: 手动主题校准按白名单群扇出、force 透传并返回逐群结果', async () => {
+test('API-TOPIC-02: 手动主题校准按目标群扇出、force 透传并返回逐群结果', async () => {
   const { router, routes } = createRouterDouble();
   const calls = [];
+  let targetCalls = 0;
   const system = {
     media: { stats: async () => ({ pending: 0, used: 0 }), metrics: { produced: 0, failed: 0, consumed: 0, swept: 0 } },
     config: { channels: ['g1', 'g2'] },
     localStore: { listChannels: async () => ['g1', 'g2'] },
     mediaRegistry: { resolve: () => undefined },
+    // 目标群由 system 解析（订阅表生效时只给订阅来源群），路由层不得自己拼 config.channels
+    topicTargets: async () => {
+      targetCalls += 1;
+      return ['g1', 'g2'];
+    },
     runTopics: async (channelId, options) => {
       calls.push({ channelId, options });
       return { channelId, dayKey: '2026-11-02', createdTopicIds: [], updatedTopicIds: [], assignedEntryIds: [] };
@@ -603,17 +609,43 @@ test('API-TOPIC-02: 手动主题校准按白名单群扇出、force 透传并返
   assert.equal(koa.status, 0, '成功路径不写 status，交由框架默认 200');
   assert.equal(koa.body.ok, true);
   assert.equal(koa.body.force, true);
+  assert.equal(targetCalls, 1, '批量校准必须向 system 要目标群');
   assert.deepEqual(koa.body.results.map((item) => item.channelId), ['g1', 'g2']);
   assert.deepEqual(calls, [
     { channelId: 'g1', options: { force: true } },
     { channelId: 'g2', options: { force: true } },
   ]);
 
-  // 指定单群 + force:false
+  // 指定单群 + force:false：直连该群，不再解析目标表
   calls.length = 0;
   const single = { request: { body: { channelId: 'g2', force: false } }, query: {}, status: 0, body: null };
   await handler(single);
+  assert.equal(targetCalls, 1, '指定单群时不得再走批量目标解析');
   assert.deepEqual(calls, [{ channelId: 'g2', options: { force: false } }]);
+});
+
+test('API-TOPIC-03: 无 channelId 的批量校准只跑订阅集合，不碰 config.channels 的旧群', async () => {
+  const { router, routes } = createRouterDouble();
+  const calls = [];
+  const system = {
+    media: { stats: async () => ({ pending: 0, used: 0 }), metrics: { produced: 0, failed: 0, consumed: 0, swept: 0 } },
+    /* 旧白名单里残留的群 + 库里的历史群都不该被批量校准顺手烧一遍模型 */
+    config: { channels: ['g-old'] },
+    localStore: { listChannels: async () => ['g-db', 'g-sub'] },
+    mediaRegistry: { resolve: () => undefined },
+    topicTargets: async () => ['g-sub'],
+    runTopics: async (channelId, options) => {
+      calls.push({ channelId, options });
+      return { channelId, dayKey: '2026-11-02', createdTopicIds: [], updatedTopicIds: [], assignedEntryIds: [] };
+    },
+  };
+  registerWebUi({ router }, system, '/patchouli');
+
+  const koa = { request: { body: {} }, query: {}, status: 0, body: null };
+  await routes.get('POST /patchouli/api/topics')(koa);
+
+  assert.equal(koa.body.ok, true);
+  assert.deepEqual(calls, [{ channelId: 'g-sub', options: { force: true } }], '批量校准只跑订阅来源群');
 });
 
 test('TUNE-API-03: /api/tune 夹紧 thetaMin（[10,60]，3 位小数）并在 tuning 中回传', async () => {

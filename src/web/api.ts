@@ -1481,11 +1481,10 @@ export function registerWebUi(
     }
 
     try {
-      const targets = channelId
-        ? [channelId]
-        : system.config.channels.length > 0
-          ? [...system.config.channels]
-          : await system.localStore.listChannels();
+      /* 未指定群 = 批量校准：目标群用与定时调度**同一份**判定（`topicTargets`）。
+         订阅表生效时只跑订阅来源群——`config.channels` 里残留的旧群与全库群不该被顺手烧一遍模型；
+         `features.topics` 总闸也在这里面（关掉时目标为空表）。 */
+      const targets = channelId ? [channelId] : await system.topicTargets();
       const results: unknown[] = [];
       for (const target of targets) {
         results.push(await runTopics(target, { force }));

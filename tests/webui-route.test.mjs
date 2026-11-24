@@ -9,9 +9,11 @@ import fs from 'node:fs';
  * 的 `checkRoute()` 里。这里按既有 WEBUI 契约测试的路径把产物当函数体载入（只替换掉 default
  * 导出），用最小 DOM 桩驱动 `checkRoute()`，断言的是「哪些路径会挂载」而非渲染细节。
  *
- * 关键回归点：浮窗只认**本插件**的插件页 —— `/plugins/patchouli-knowledge[:实例id]`，或名字是宿主
- * 生成的随机实例 id 但页面身份文本（标题 / 面包屑 / data-plugin-name）认出本插件。别的插件页一律
- * 不挂载：宽泛的 `/plugins` 前缀会把全屏鉴权遮罩盖到别人的配置页上。
+ * 两个判定必须分开（R1 回归根因：把它们耦在一起会让浮窗整块消失）：
+ * - **挂载**：任何 `/plugins/**` 页面都挂 —— 宿主用随机实例 id 渲染插件页时，页面名字与身份文本
+ *   都可能读不到；不挂载等于用户根本看不到入口。
+ * - **展开 + 全屏鉴权门**：只在本插件页（`/plugins/patchouli-knowledge[:实例id]`，或随机实例 id
+ *   但标题 / 面包屑 / data-plugin-name 认出本插件）。别的插件页只留一个悬浮胶囊。
  */
 const CLIENT_SOURCE = fs.readFileSync(new URL('../client/dist/index.js', import.meta.url), 'utf8');
 
@@ -142,7 +144,7 @@ return {
 };`,
   );
 
-  return factory(
+  const api = factory(
     windowStub,
     documentStub,
     () => Promise.reject(new Error('probe: no network')),
@@ -154,6 +156,15 @@ return {
     () => 0,
     noop,
   );
+
+  /* 产物自带真实门禁实现（会 `document.body.appendChild` 弹模态）；测试里换成记账桩：
+     本文件断言的是「该不该开关门禁」，不是模态长什么样。 */
+  const auth = { gates: 0, dismissals: 0 };
+  auth.gate = () => { auth.gates += 1; };
+  auth.dismiss = () => { auth.dismissals += 1; };
+  windowStub.__ptxAuth = auth;
+
+  return { ...api, auth };
 }
 
 test('ROUTE-01: 随机实例 id + 页面身份文本命中时挂载并展开（真实部署形态）', () => {
@@ -165,20 +176,28 @@ test('ROUTE-01: 随机实例 id + 页面身份文本命中时挂载并展开（�
   assert.equal(api.state.visible, true);
   assert.equal(api.state.collapsed, false, '身份命中：面板直接展开');
   assert.equal(api.classes('root').includes('ptx-hidden'), false, '命中后必须摘掉隐藏态');
+  assert.equal(api.auth.gates, 1, '本插件页打开即门禁');
 });
 
-test('ROUTE-02: 别的插件的插件页不挂载 —— C1 回归（不得被鉴权遮罩盖住）', () => {
+test('ROUTE-02: 别的插件的插件页挂载但不展开、不弹鉴权门 —— C1/R1 边界', () => {
   const api = loadClient({
     pathname: '/plugins/adapter-onebot',
     title: '适配器 · Koishi',
     breadcrumb: 'Koishi 控制台 / 插件配置 / onebot',
   });
+  let gates = 0;
+  let dismissals = 0;
+  api.auth.gate = () => { gates += 1; };
+  api.auth.dismiss = () => { dismissals += 1; };
   api.checkRoute();
 
-  assert.equal(api.routeMatches(), false);
-  assert.equal(api.mountCount(), 0, '陌生插件页一律不挂载，否则全屏门禁会盖住宿主页面');
-  assert.equal(api.state.mounted, false);
-  assert.equal(api.state.visible, false);
+  assert.equal(api.routeMatches(), false, '别的插件页不是本插件页');
+  assert.equal(api.mountCount(), 1, '插件页就是浮窗入口：别的插件页也要挂载');
+  assert.equal(api.state.mounted, true);
+  assert.equal(gates, 0, '陌生插件页绝不能弹全屏鉴权遮罩');
+  assert.equal(dismissals, 0, '没开过门禁就无需收起');
+  assert.equal(api.state.collapsed, true, '未认领的插件页只留悬浮胶囊');
+  assert.equal(api.classes('pill').includes('is-visible'), true, '胶囊是未认领页面上的唯一入口');
 });
 
 test('ROUTE-03: /plugins/patchouli-knowledge:实例id 按名字挂载，无需身份文本', () => {
@@ -221,16 +240,18 @@ test('ROUTE-06: hash 路由 /#/plugins/patchouli-knowledge 同样挂载', () => 
   assert.equal(api.state.visible, true);
 });
 
-test('ROUTE-07: 身份文本迟到时先不挂载，认出后只挂载一次并自动展开', () => {
+test('ROUTE-07: 身份文本迟到时先挂载但不展开，认出后自动展开一次', () => {
   const api = loadClient({ pathname: '/plugins/abc123' });
   api.checkRoute();
-  assert.equal(api.mountCount(), 0, '随机实例 id + 读不到标识：先不认领，别遮住宿主');
+  assert.equal(api.mountCount(), 1, '随机实例 id 且读不到标识：仍要挂载（R1：浮窗不得整块消失）');
+  assert.equal(api.state.collapsed, true, '身份没认出：只留胶囊，不遮住宿主页面');
+  assert.equal(api.classes('pill').includes('is-visible'), true);
 
   // 宿主 SPA 随后画出标题 / 面包屑
   api.doc.title = 'LLMWiki 知识库 · Koishi';
   api.checkRoute();
-  assert.equal(api.mountCount(), 1, '认出本插件后挂载一次');
-  assert.equal(api.state.collapsed, false, '首帧即展开');
+  assert.equal(api.mountCount(), 1, '身份迟到只展开，不重复挂载');
+  assert.equal(api.state.collapsed, false, '认出本插件后自动展开');
   assert.equal(api.classes('root').includes('ptx-hidden'), false);
 
   // 用户手动收回后不再被掀开；重复判定不得重复挂载
@@ -240,28 +261,48 @@ test('ROUTE-07: 身份文本迟到时先不挂载，认出后只挂载一次并�
   assert.equal(api.mountCount(), 1, '重复判定不得重复挂载');
 });
 
-test('ROUTE-08: 离开本插件页恢复隐藏，换到别的插件页仍隐藏，返回后重新显示', () => {
+test('ROUTE-08: 离开插件页收起门禁与浮窗；换到别的插件页只留胶囊；返回本插件页重新展开并重新门禁', () => {
   const api = loadClient({ pathname: '/plugins/patchouli-knowledge' });
   api.checkRoute();
   assert.equal(api.state.visible, true);
 
   api.win.location.pathname = '/other/path';
+  let gates = 0;
   let dismissed = 0;
-  // 门禁模态由生成块挂在 body 上：离开本插件页必须把它收起来。
-  api.win.__ptxAuth = { dismiss: () => { dismissed += 1; } };
+  // 门禁模态由生成块挂在 body 上：离开插件页必须把它收起来。
+  api.auth.gate = () => { gates += 1; };
+  api.auth.dismiss = () => { dismissed += 1; };
   api.checkRoute();
-  assert.equal(dismissed, 1, '离开本插件页必须收起鉴权模态，别让它跟着盖住别的插件页');
+  assert.equal(dismissed, 1, '离开插件页必须收起鉴权模态，别让它跟着盖住别的页面');
   assert.equal(api.state.visible, false, '离开插件页必须隐藏浮窗');
   assert.equal(api.classes('root').includes('ptx-hidden'), true);
 
-  // 换到别的插件的插件页：仍然隐藏 —— 浮窗与鉴权遮罩都不能跟过去。
+  // 换到别的插件的插件页：浮窗回来但只留胶囊 —— 整窗与鉴权遮罩都不能跟过去。
   api.doc.title = '适配器 · Koishi';
   api.win.location.pathname = '/plugins/adapter-onebot';
   api.checkRoute();
-  assert.equal(api.state.visible, false, '别的插件页不得恢复浮窗');
+  assert.equal(api.mountCount(), 1, '壳层复用，不重复挂载');
+  assert.equal(api.state.visible, true, '插件页上胶囊要在');
+  assert.equal(api.state.collapsed, true, '别的插件页上整窗不得展开');
+  assert.equal(gates, 0, '别的插件页绝不弹门禁');
 
   api.win.location.pathname = '/plugins/patchouli-knowledge';
   api.checkRoute();
-  assert.equal(api.state.visible, true, '回到本插件页重新显示');
+  assert.equal(api.state.collapsed, false, '回到本插件页重新展开');
+  assert.equal(gates, 1, '回到本插件页重新门禁');
   assert.equal(api.mountCount(), 1, '壳层复用，不重复挂载');
+});
+
+test('ROUTE-09: 随机实例 id + 首帧读不到任何身份文本 → 仍挂载、不展开、不弹门禁（R1 回归）', () => {
+  const api = loadClient({ pathname: '/plugins/0848oh', title: '', breadcrumb: '' });
+  api.checkRoute();
+
+  assert.equal(api.routeMatches(), false, '认不出身份：不当作本插件页');
+  assert.equal(api.mountCount(), 1, '读不到标题也必须挂载 —— R1 的根因就是这里不 mount');
+  assert.equal(api.state.mounted, true);
+  assert.equal(api.classes('root').includes('ptx-hidden'), false, '挂载后必须摘掉隐藏态，用户才看得到胶囊');
+  assert.equal(api.classes('pill').includes('is-visible'), true, '未认领的页面留胶囊当入口');
+  assert.equal(api.state.collapsed, true, '身份没认出时只留胶囊，整窗不盖住宿主表单');
+  assert.equal(api.auth.gates, 0, '认不出身份不得弹全屏鉴权门');
+  assert.equal(api.auth.dismissals, 0, '没开过门禁就无需收起');
 });

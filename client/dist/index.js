@@ -1,6 +1,7 @@
 // Patchouli Knowledge - LLMWiki 知识阅读器下属组件 (Koishi Console Client Extension)
 // 挂载路径: /plugins/** (plugin-console 静态服务以 <uiPath>/@plugin-<entry>/index.js 提供)
-//   路由判定只看 /plugins 前缀，不绑定实例 id：换实例 / 换配置页路径都不会失去唯一入口
+//   挂载只看 /plugins 前缀（换实例 / 随机实例 id 都不会失去入口）；
+//   页面身份（名字或标题 / 面包屑）只决定自动展开与是否弹全屏鉴权门
 // 材质：瓷白 / 葱绿 · 工具级精密质感
 //   - 外骨骼容器：固定圆角 14px + 四边同一条中性发丝线（--hairline-frame，底边不做单独覆盖）
 //     + 单层中性双层立体影（近层贴边 3px / 远层铺开 28px，无荧光泛光、无墨绿脏边）
@@ -56,12 +57,15 @@ const THEME_KEY = 'patchouli-theme';
 const VIEW_KEY = 'patchouli-view-mode';
 const CHANNEL_SCOPE_KEY = 'patchouli-channel-scope';
 /* 路由形状：console 的插件页统一挂在 `<uiPath>/<key>`（hash 路由也算），key 通常是插件名，
-   多实例 / 分组时是宿主生成的随机 id。只认「名字就是本插件」或「页面身份文本认出本插件」
-   这两种页——宽泛的 /plugins 前缀会让全屏鉴权门盖住别的插件页。 */
+   多实例 / 分组时是宿主生成的随机 id。
+   两次判定必须分开，否则随机实例 id 的页面连浮窗都不会出现：
+   - `isPluginPage()`：**宽**——只要在某个插件的插件页上就挂载（浮窗与胶囊是只读入口，不遮宿主）；
+   - `routeMatches()`：**窄**——名字或页面身份文本认出本插件才展开、才弹全屏鉴权门。 */
 const ROUTE_SEGMENT = '/plugins/';
 /* 本插件在 console 里的页面名（koishi-plugin- 前缀已去掉）；`:实例 id` 后缀同样命中。 */
 const PLUGIN_ROUTE_NAMES = ['patchouli-knowledge', 'patchouli'];
-/* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」；名字认得出时只影响自动展开。 */
+/* 软校验：名字认不出（随机实例 id）时它决定「是不是本插件页」（展开 + 鉴权门）；名字认得出时
+   只影响自动展开。 */
 const IDENTITY_HINTS = ['patchouli', 'llmwiki', 'llm wiki', '知识库', '知识阅读器', '大图书馆'];
 /* 软校验的短发窗口（单位 = checkRoute 轮次，700ms/轮 ≈ 5.6s）：宿主 SPA 常常先挂空壳再画标题 /
    面包屑，第一轮读不到标识不代表不是本插件页。窗口过后不再重探，避免与用户手动操作抢状态。 */
@@ -2948,6 +2952,8 @@ const state = {
   mounted: false,
   visible: false,
   collapsed: false,
+  /* 鉴权门只在**本插件页**上开一次：离开本插件页（同插件体系内换页）就收起。 */
+  gateShown: false,
   maximized: false,
   sized: false,
   restoreStyle: '',
@@ -3062,8 +3068,21 @@ const RUNTIME_GROUPS = [
 ];
 /* 枚举显示别名：只改文案，不改提交值；未收录的值原样显示。 */
 const RUNTIME_OPTION_LABELS = { triggerMode: { potential: '势能', rate: '速率' } };
-/* 凭据类字段以密码框呈现（键名判定，不是字段白名单） */
+/* 凭据类字段以密码框呈现（服务端 meta 的 `secret` 是首选判据，键名正则只作兜底） */
 const RUNTIME_SECRET_KEY = /(?:apikey|token|secret)/i;
+const RUNTIME_SECRET_PLACEHOLDER = '已配置（留空不修改）';
+
+function runtimeIsSecret(meta) {
+  if (!meta) return false;
+  return meta.secret === true || RUNTIME_SECRET_KEY.test(String(meta.key));
+}
+
+/* 读路径的密钥恒为空串，同段 `secretConfigured.<key>` 才是「有没有存过值」。 */
+function runtimeSecretConfigured(section, key) {
+  const bag = state.runtimeSettings.sections && state.runtimeSettings.sections[section];
+  const flags = bag && typeof bag === 'object' ? bag.secretConfigured : null;
+  return Boolean(flags && typeof flags === 'object' && flags[key] === true);
+}
 
 function runtimeMeta(section, key) {
   for (const item of state.runtimeSettings.meta) {
@@ -3110,9 +3129,15 @@ function runtimeHint(meta) {
 }
 
 function runtimeTextControl(meta, value, attrs, aria) {
-  const type = RUNTIME_SECRET_KEY.test(String(meta.key)) ? 'password' : 'text';
+  const secret = runtimeIsSecret(meta);
+  const type = secret ? 'password' : 'text';
+  /* 已存的密钥只回显空串：没有占位文案时看起来像「没配置」，用户会重填甚至以为丢了。 */
+  const placeholder =
+    secret && runtimeSecretConfigured(String(meta.section), String(meta.key))
+      ? ` placeholder="${RUNTIME_SECRET_PLACEHOLDER}"`
+      : '';
   return `<input class="ptx-input ptx-settings-text" type="${type}"${attrs} autocomplete="off" spellcheck="false"` +
-    ` value="${escapeHtml(value == null ? '' : String(value))}"${aria}>`;
+    ` value="${escapeHtml(value == null ? '' : String(value))}"${placeholder}${aria}>`;
 }
 
 function runtimeControl(meta) {
@@ -3565,6 +3590,12 @@ function applyRuntimeField(node, meta, value) {
     return;
   }
   node.value = value == null ? '' : String(value);
+  /* 密钥框的值恒为空串，状态只能靠占位文案表达：保存成功后要立刻从「未配置」翻成「已配置」 */
+  if (runtimeIsSecret(meta)) {
+    const configured = runtimeSecretConfigured(String(meta.section), String(meta.key));
+    if (configured) node.setAttribute('placeholder', RUNTIME_SECRET_PLACEHOLDER);
+    else node.removeAttribute('placeholder');
+  }
 }
 
 /* 行内回执：保持在 2 秒后淡出（与 CSS 的 0.28s 过渡配套），只写目标行的提示节点 */
@@ -3626,6 +3657,17 @@ function saveRuntimeField(node) {
     }
     next = parsed;
   } else next = String(node.value == null ? '' : node.value);
+  /* 密钥的读路径恒为空串：留空 = 不修改（服务端写路径同样如此）。
+     前端绝不能把它当「清空」提交，否则保存一次别的字段就会顺手抹掉密钥。 */
+  if (runtimeIsSecret(meta) && next === '') {
+    applyRuntimeField(node, meta, '');
+    runtimeRowNotice(
+      rowKey,
+      runtimeSecretConfigured(section, key) ? '留空不修改' : '尚未配置',
+      false,
+    );
+    return Promise.resolve();
+  }
   if (next === before) {
     if (modeSwitch) state.runtimeSettings.draftMode = '';
     runtimeRowNotice(rowKey, '', false);
@@ -3642,9 +3684,18 @@ function saveRuntimeField(node) {
       /* 只并入本次写入的键：同段其它字段的并发响应可能更旧，整段覆盖会把它冲掉 */
       if (value) {
         const sections = state.runtimeSettings.sections || {};
-        sections[section] = Object.assign({}, sections[section], {
+        const bag = Object.assign({}, sections[section], {
           [key]: Object.prototype.hasOwnProperty.call(value, key) ? value[key] : next,
         });
+        /* 密钥回包附 `secretConfigured`：不并入的话保存成功后占位文案仍写着「未配置」 */
+        if (value.secretConfigured && typeof value.secretConfigured === 'object') {
+          bag.secretConfigured = Object.assign(
+            {},
+            sections[section] && sections[section].secretConfigured,
+            value.secretConfigured,
+          );
+        }
+        sections[section] = bag;
         state.runtimeSettings.sections = sections;
       }
       if (modeSwitch) {
@@ -6528,11 +6579,8 @@ function mount() {
   rootEl = buildShell();
   document.body.appendChild(rootEl);
 
-  /* 打开即门禁：没有有效会话就先盖模态（Console 组件由客户端产物自行渲染，
-     这里的 gate() 与独立页面共用同一份 src/web/auth-bootstrap.ts 生成物）。 */
-  try {
-    if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
-  } catch {}
+  /* 鉴权门**不在这里**开：只有本插件页才弹（`checkRoute` 按路由判定），
+     否则在别的插件页上首帧就会盖一块全屏遮罩。 */
 
   frameEl = rootEl.querySelector('.ptx-window');
   pillEl = rootEl.querySelector('.ptx-pill');
@@ -6637,6 +6685,7 @@ function unmount() {
   state.mounted = false;
   state.visible = false;
   state.collapsed = false;
+  state.gateShown = false;
   state.maximized = false;
   state.sized = false;
   state.restoreStyle = '';
@@ -6660,10 +6709,17 @@ function routeKeyOwned(key) {
   return PLUGIN_ROUTE_NAMES.some((name) => key === name || key.startsWith(`${name}:`));
 }
 
-/* 路由判定：只认本插件的插件页。
+/* 宽判定：当前是不是「某个插件的插件页」——**只决定挂载**。
+   宿主用随机实例 id 渲染插件页（`/plugins/<随机id>`），名字可能永远对不上本插件，首帧也读不到
+   标题 / 面包屑；把它和身份判定耦在一起会让浮窗整块消失（用户根本看不到入口）。 */
+function isPluginPage() {
+  return [window.location.pathname || '', window.location.hash || '']
+    .some((route) => route.toLowerCase().includes(ROUTE_SEGMENT));
+}
+
+/* 窄判定：是不是**本插件**的插件页。
    名字命中（`/plugins/patchouli-knowledge[:id]`）无条件认领；名字是宿主生成的随机实例 id 时，
-   退回页面身份文本（标题 / 面包屑 / data-plugin-name）——别的插件页不会出现本插件标识，
-   因此既不会挂载，也不会被全屏鉴权门遮罩。 */
+   退回页面身份文本（标题 / 面包屑 / data-plugin-name）。它只影响展开与鉴权门，不影响挂载。 */
 function routeMatches() {
   const key = pluginRouteKey();
   if (key === '') return false;
@@ -6724,14 +6780,29 @@ function collapseQuietly() {
   if (pillEl) pillEl.classList.add('is-visible');
 }
 
-function checkRoute() {
-  const match = routeMatches();
+/* 鉴权门跟随「是不是本插件页」：开了才收起，收起后回到本插件页才重开。
+   别的插件页上 mount 只是留一个悬浮胶囊，绝不盖全屏遮罩（宿主页面要能正常操作）。 */
+function syncAuthGate(own) {
+  if (own === state.gateShown) return;
+  state.gateShown = own;
+  try {
+    if (own) {
+      if (window.__ptxAuth && typeof window.__ptxAuth.gate === 'function') window.__ptxAuth.gate();
+    } else if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') {
+      window.__ptxAuth.dismiss();
+    }
+  } catch (err) {
+    /* 宿主没暴露门禁接口时无事可做 */
+  }
+}
 
-  if (!match) {
+function checkRoute() {
+  if (!isPluginPage()) {
     /* 离开插件页：探针清零，回到插件页时重新做一次软校验 */
     resetRouteProbe('');
+    state.gateShown = false;
     /* 鉴权模态是挂在 body 上的独立节点：路由离开时必须一并收起，
-       否则切到别的插件页后仍被这块全屏遮罩盖住（与「不遮住宿主」同一契约）。 */
+       否则切到别处后仍被这块全屏遮罩盖住（与「不遮住宿主」同一契约）。 */
     try {
       if (window.__ptxAuth && typeof window.__ptxAuth.dismiss === 'function') window.__ptxAuth.dismiss();
     } catch (err) {
@@ -6748,18 +6819,25 @@ function checkRoute() {
   }
 
   const key = currentRouteKey();
-  if (routeProbe.key !== key) resetRouteProbe(key);
+  const newRoute = routeProbe.key !== key;
+  if (newRoute) resetRouteProbe(key);
   if (!routeProbe.identified && routeProbe.ticks < IDENTITY_PROBE_TICKS) {
     routeProbe.ticks += 1;
     // 名字直接就是本插件：无需等宿主画标题，首帧即展开。
     routeProbe.identified = routeKeyOwned(pluginRouteKey()) || pageIdentityMatches();
   }
 
+  /* 任何插件页都挂载：随机实例 id + 首帧读不到标题时，浮窗仍然要出现在用户眼前。 */
   const fresh = !state.mounted;
   if (fresh) mount();
 
+  /* 本插件页判定每轮现算（宿主是 SPA，标题 / 面包屑会迟到）：它决定展开与鉴权门。 */
+  syncAuthGate(routeMatches());
+
   if (rootEl) {
-    if (fresh && !routeProbe.identified) collapseQuietly();
+    /* 刚进入的页面还没被认领（别人的插件页 / 身份文本未画出来）时只留胶囊：
+       整窗不盖住宿主表单；用户自己点开的胶囊不再被下一次判定收回。 */
+    if ((fresh || newRoute) && !routeProbe.identified) collapseQuietly();
     rootEl.classList.remove('ptx-hidden');
   }
 

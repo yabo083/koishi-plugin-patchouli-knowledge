@@ -390,6 +390,54 @@ test('SUBS-HTTP-09: 保存成功后触发 onSubscriptionsChanged（控制台候�
   }
 });
 
+test('SUBS-HTTP-10: 批量校准目标群 = 订阅来源群（config.channels 不参与，总闸关掉为空）', async () => {
+  const wikiDir = await makeWiki();
+  const { system } = await boot({
+    wikiDir,
+    subscriptions: [{ source: '300001', targets: [], entry: true, weekly: false }],
+    channels: ['100000009'],
+  });
+  try {
+    assert.equal(system.subscriptions().active, true);
+    assert.deepEqual(
+      await system.topicTargets(),
+      ['300001'],
+      '订阅表生效时只跑订阅来源群：config.channels 里的旧群不得被批量校准顺手烧一遍',
+    );
+  } finally {
+    system.dispose();
+    await rm(wikiDir, { recursive: true, force: true });
+  }
+
+  // 表为空：沿用旧白名单（升级前的行为不变）
+  const legacyDir = await makeWiki();
+  const legacy = new PatchouliKnowledgeSystem(
+    Config({ storage: { wikiDir: legacyDir }, advanced: { channels: ['100000009'] } }),
+    quiet,
+  );
+  await legacy.ready;
+  try {
+    assert.deepEqual(await legacy.topicTargets(), ['100000009'], '表为空时沿用旧白名单');
+  } finally {
+    legacy.dispose();
+    await rm(legacyDir, { recursive: true, force: true });
+  }
+
+  // 功能总闸关掉：没有目标（定时轮空，管理入口的批量校准同样不跑）
+  const offDir = await makeWiki();
+  const off = new PatchouliKnowledgeSystem(
+    Config({ storage: { wikiDir: offDir }, features: { topics: false } }),
+    quiet,
+  );
+  await off.ready;
+  try {
+    assert.deepEqual(await off.topicTargets(), [], 'features.topics === false 时目标为空');
+  } finally {
+    off.dispose();
+    await rm(offDir, { recursive: true, force: true });
+  }
+});
+
 test('BIND-04: 保存时绑定落盘、首轮迁移一次性写入且幂等', async () => {
   const wikiDir = await makeWiki();
   const cached = [album('100000001', 'ALBUM01', '图书室', '周报相册')];

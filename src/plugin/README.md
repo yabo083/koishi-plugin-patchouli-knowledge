@@ -319,7 +319,7 @@ if (session.partial !== true && peak !== undefined && margin > 0 &&
   错投由三条规则挡死：①枚举内名字唯一——同批重名一律改成 `群名 · 相册名`，群名也重再追加
   `（群号）`，仍重再加 `#n`，相册名缺失回退稳定地址，`@chat` / `#group:` 是保留值（相册名撞上
   时同样走限定名，**名为 `@chat` 的相册在候选里叫 `群名 · @chat`**）；②**保存时绑定**——
-  面板保存订阅表时，把每个 `targets` 里的名字用**当时**的候选解析成 `群号/相册ID`，与订阅表
+  保存订阅表时（`POST /api/subscriptions`），把每个 `targets` 里的名字用**当时**的候选解析成 `群号/相册ID`，与订阅表
   **同一次原子落盘**写进 `settings.json` 顶层的 `targetBindings`（名字 → 地址）；
   ③**投递只查绑定表**——`resolveTarget` / `albumValueOfTarget` 先排除保留值，再查
   `targetBindings`，最后才按旧稳定地址 `群号/相册ID` 的形状直接认。绑定表里没有 = 解析失败：
