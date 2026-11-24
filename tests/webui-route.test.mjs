@@ -660,6 +660,25 @@ test('ROUTE-22: 认领后路由 key 变化 → 认领清除、回到未认领、
   assert.equal(api.requests().length, settled, '异步结算也不补发请求');
 });
 
+test('ROUTE-24: 切页后 tick 到来前点胶囊 → 认领绑定当前路由，不被下一轮 tick 丢弃', () => {
+  const api = loadClient({ pathname: '/plugins/0848oh', title: 'Koishi' });
+  api.checkRoute();
+  assert.equal(api.probeState().key, '/plugins/0848oh');
+  assert.equal(api.state.own, false);
+
+  // 宿主刚切到新插件页，700ms 轮询还没跑
+  api.win.location.pathname = '/plugins/9x2fq7';
+  api.expandPanel();
+
+  assert.equal(api.probeState().key, '/plugins/9x2fq7', '认领记录的是点击时刻的路由');
+  assert.equal(api.state.own, true);
+
+  api.checkRoute();
+  assert.equal(api.probeState().userClaimed, true, 'tick 不再把认领当跨页清掉');
+  assert.equal(api.state.own, true, '新页保持认领');
+  assert.equal(api.state.dataFlow, true);
+});
+
 test('ROUTE-23: 认领后 /api 整片 404 + 非 JSON → 监控条报「接口不可用」，不撤销认领', async () => {
   const api = loadClient({ pathname: '/plugins/0848oh', title: 'Koishi', apiMissing: true });
   api.checkRoute();

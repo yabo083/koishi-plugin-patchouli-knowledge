@@ -5950,6 +5950,9 @@ function expandPanel() {
      一个都读不到 —— 归属是开集问题，正文文本不再参与推断，用户点开胶囊就是唯一凭据：
      认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。 */
   if (!state.own && isPluginPage()) {
+    /* 认领绑定到**点击时刻**的路由：宿主切页后 700ms 内的点击若记在旧 key 上，
+       下一轮 tick 会把它当跨页认领清掉，新页白点一次。 */
+    routeProbe.key = currentRouteKey();
     routeProbe.userClaimed = true;
     syncAuthGate(true);
   }
