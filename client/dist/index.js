@@ -266,8 +266,16 @@ function requestJson(url, options) {
         if (status === 404 || status === 405 || status === 410) throw readFailure(status);
         throw new Error('HTTP ' + res.status);
       }
-      if (typeof res.json !== 'function') return res;
-      return res.json().catch(() => { throw readFailure(0); });
+      /* 先取文本再解析：body 流中途被 reset 时 `res.text()` 抛的是连接层错误，
+         必须走「连接中断」；只有真拿到响应体却解析不出 JSON，才算这套接口不存在。
+         读 `res.json()` 会把两种失败混成一种，用户认领的页面上报「接口不可用」误导排查。 */
+      if (typeof res.text !== 'function') {
+        if (typeof res.json !== 'function') return res;
+        return res.json().catch(() => { throw readFailure(0); });
+      }
+      return res.text().then((body) => {
+        try { return JSON.parse(body); } catch (err) { throw readFailure(0); }
+      });
     })
     .then((data) => { noteApiRead(null); return data; }, (err) => { noteApiRead(err); throw err; });
 }
@@ -4073,11 +4081,12 @@ function monitorViewport() { return viewportEl; }
 
   /* 监控条状态文案的唯一真源：**不是本插件页** / **接口不可用** / **真断线**必须分开说。
      未认领的页面上数据面根本没启动，报「连接中断」会把用户引向错误的排查方向；
-     用户点开胶囊认领的页面上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
-     认领不撤销 —— 用户已经明确要用这个面板，能做的只是把原因说准。 */
+     本插件页上接口整片 404 / 非 JSON，重连也不会好，同样不是断线。
+     判据只看「本页 + 接口账」：认领是点胶囊还是元数据命中与失败归因无关，
+     拿 userClaimed 当门槛会让元数据认领的页面把 404 报成断线。 */
   function monitorStatusText() {
     if (!state.own) return '当前不是本插件页';
-    if (routeProbe.userClaimed && state.apiUnavailable) return '接口不可用';
+    if (state.apiUnavailable) return '接口不可用';
     return state.statusChecked ? '连接中断，保留最后一次数据' : '正在连接监控服务';
   }
 
@@ -4995,11 +5004,12 @@ function startTicker() {
 }
 
 function refreshPhase() {
-  /* 两种「不是断线」的态要分开说：未认领本页（数据面没启动）、认领后接口整片不存在
-     （404 / 非 JSON，重连也不会好）。报 OFFLINE 是错误归因。 */
+  /* 两种「不是断线」的态要分开说：未认领本页（数据面没启动）、本页接口整片不存在
+     （404 / 非 JSON，重连也不会好）。报 OFFLINE 是错误归因。
+     失败态只看 `state.own`：元数据认领的页面与点胶囊认领的页面要说出同一个原因。 */
   const phase = !state.own
     ? 'UNOWNED'
-    : (routeProbe.userClaimed && state.apiUnavailable
+    : (state.apiUnavailable
       ? 'API_UNAVAILABLE'
       : (state.status ? String(state.status.phase || 'IDLE') : (state.statusChecked ? 'OFFLINE' : 'LOADING')));
   if (frameEl) frameEl.setAttribute('data-phase', phase);
@@ -5949,9 +5959,12 @@ function expandPanel() {
      但未认领的页面只留胶囊）。宿主用随机实例 id 渲染插件页时，标题 / 面包屑 / h1 可能
      一个都读不到 —— 归属是开集问题，正文文本不再参与推断，用户点开胶囊就是唯一凭据：
      认领本页、启动数据面、弹门禁。认领跟着本页走（路由 key 一变就作废，见 resetRouteProbe）。 */
-  if (!state.own && isPluginPage()) {
+  if (isPluginPage()) {
     /* 认领绑定到**点击时刻**的路由：宿主切页后 700ms 内的点击若记在旧 key 上，
-       下一轮 tick 会把它当跨页认领清掉，新页白点一次。 */
+       下一轮 tick 会把它当跨页认领清掉，新页白点一次。
+       这一句对已认领的页面同样要跑（`state.own` 还是上一页的判定结果），
+       而点胶囊在任何插件页上都是「本页归我」的凭据 —— 元数据认领的页面切走后，
+       新页第一个可用的凭据就是这一下点击。 */
     routeProbe.key = currentRouteKey();
     routeProbe.userClaimed = true;
     syncAuthGate(true);

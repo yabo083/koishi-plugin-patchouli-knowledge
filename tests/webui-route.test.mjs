@@ -95,14 +95,24 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
  *   自己的 DOM 里（壳层文案带专有名字），必须被丢弃，否则挂载即自我认领。
  * - `apiMissing`：`/patchouli/api/*` 全部回 404 + 非 JSON（插件没启用 / 路径被反代吞掉），
  *   用来验证「接口不可用」与「连接中断」分开说。
+ * - `bodyFault`：响应头正常但 body 流读取失败（宿主 / 反代中途 reset）。
+ *   这种失败在浏览器里是 `res.text()` 抛 TypeError，属于连接层，不是「非 JSON」。
  */
-function loadClient({ pathname = '/', hash = '', search = '', title = '', breadcrumb = '', nodes = null, apiMissing = false }) {
+function loadClient({
+  pathname = '/', hash = '', search = '', title = '', breadcrumb = '', nodes = null,
+  apiMissing = false, bodyFault = false,
+}) {
   /* 数据面的「零请求」断言靠这个记账桩：产物里的 `fetch` 与生成块抓到的
      `window.fetch` 都指向它，任何一条 /api 请求都躲不过去。 */
   const requests = [];
   const fetchStub = (input) => {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     requests.push(String(url));
+    if (bodyFault) {
+      /* 头拿到了、body 流被 reset：读响应体时抛 TypeError（连接层错误） */
+      const reset = () => Promise.reject(new TypeError('terminated'));
+      return Promise.resolve({ ok: true, status: 200, text: reset, json: reset });
+    }
     if (apiMissing) {
       /* 形状同真实 404：ok 为假、body 不是 JSON（静态站 / 反代兜底页） */
       return Promise.resolve({
@@ -167,8 +177,12 @@ function loadClient({ pathname = '/', hash = '', search = '', title = '', breadc
 let __mounts = 0;
 function __stateNode() {
   const classes = new Set();
+  /* 属性留档：refreshPhase 把阶段写在 frameEl 的 data-phase 上，
+     屏上的那一格就是这里（真实壳层读 phaseEl，桩里没有它）。 */
+  const attrs = {};
   return {
     __classes: classes,
+    __attrs: attrs,
     classList: {
       add: function () { for (let i = 0; i < arguments.length; i += 1) classes.add(arguments[i]); },
       remove: function () { for (let i = 0; i < arguments.length; i += 1) classes.delete(arguments[i]); },
@@ -184,7 +198,7 @@ function __stateNode() {
     offsetHeight: 560,
     offsetLeft: 0,
     offsetTop: 0,
-    setAttribute: function () {},
+    setAttribute: function (name, value) { attrs[name] = String(value); },
     getAttribute: function () { return null; },
     removeAttribute: function () {},
     addEventListener: function () {},
@@ -232,6 +246,11 @@ return {
   classes: function (which) {
     const node = which === 'root' ? rootEl : which === 'frame' ? frameEl : pillEl;
     return node ? Array.from(node.__classes) : [];
+  },
+  /* 屏上的状态格：真实壳层画在 phaseEl 的 data-phase 上；桩 mount 不建 phaseEl，
+     refreshPhase 写下的那份就在 frameEl 的同名属性里。 */
+  phase: function () {
+    return frameEl && frameEl.__attrs ? frameEl.__attrs['data-phase'] : null;
   },
 };`,
   );
@@ -702,4 +721,70 @@ test('ROUTE-23: 认领后 /api 整片 404 + 非 JSON → 监控条报「接口�
   api.checkRoute();
   assert.equal(api.state.apiUnavailable, false, '认领作废时接口账一起清');
   assert.equal(api.state.own, false);
+});
+
+test('ROUTE-25: 已认领页切到随机实例 id → tick 到来前点胶囊，认领迁到新路由、面板不被收回', () => {
+  /* 场景一：胶囊认领过的页面切走（`userClaimed` 还在），700ms 轮询还没跑就又点一次。 */
+  const own = loadClient({ pathname: '/plugins/0848oh', title: 'Koishi' });
+  own.checkRoute();
+  own.expandPanel();
+  assert.equal(own.state.own, true, '点开即认领');
+
+  own.win.location.pathname = '/plugins/9x2fq7';
+  own.expandPanel();
+  assert.equal(own.probeState().key, '/plugins/9x2fq7', '认领绑到点击时刻的路由');
+
+  own.checkRoute();
+  assert.equal(own.probeState().userClaimed, true, 'tick 不再把这次点击当跨页认领清掉');
+  assert.equal(own.state.own, true, '新页保持认领');
+  assert.equal(own.state.collapsed, false, '面板不被下一轮 tick 收起');
+
+  /* 场景二：认领来自元数据（标题命中），切到的新页一个身份元数据都读不到 ——
+     这一下点击就是新页唯一的凭据，不能因为上一页的判定还是 own 就跳过。 */
+  const meta = loadClient({ pathname: '/plugins/0848oh', title: 'Patchouli Knowledge · Koishi' });
+  meta.checkRoute();
+  assert.equal(meta.state.own, true, '标题命中即为本插件页');
+  assert.equal(meta.probeState().userClaimed, false, '没有人点过胶囊');
+
+  meta.win.location.pathname = '/plugins/9x2fq7';
+  meta.doc.title = 'Koishi';
+  meta.expandPanel();
+
+  assert.equal(meta.probeState().key, '/plugins/9x2fq7', '认领跟着点击时刻的路由');
+  assert.equal(meta.probeState().userClaimed, true, '点击补上新页的身份凭据');
+
+  meta.checkRoute();
+  assert.equal(meta.state.own, true, '新页保持认领');
+  assert.equal(meta.state.dataFlow, true, '数据面继续为新页服务');
+  assert.equal(meta.state.collapsed, false, '面板不被下一轮 tick 收起');
+});
+
+test('ROUTE-26: 元数据认领的页面接口整片 404 / 非 JSON → 监控条与状态格都说「接口不可用」', async () => {
+  const api = loadClient({ pathname: '/plugins/0848oh', title: 'Patchouli Knowledge · Koishi', apiMissing: true });
+  api.checkRoute();
+
+  assert.equal(api.state.own, true, '标题命中即认领：不需要用户点胶囊');
+  assert.equal(api.probeState().userClaimed, false, '本轮没有人点过胶囊');
+
+  await settle();
+
+  assert.equal(api.state.apiUnavailable, true, '连续两次 404 / 非 JSON 判为接口不可用');
+  assert.equal(api.monitorStatusText(), '接口不可用', '失败归因与认领来源无关');
+  assert.equal(api.phase(), 'API_UNAVAILABLE', '状态格同源：不落到 OFFLINE');
+  assert.equal(api.phaseLabel(api.phase()), '接口不可用');
+  assert.equal(api.state.own, true, '认领不撤销');
+});
+
+test('ROUTE-27: 响应头正常但 body 流被 reset → 说「连接中断」，不算接口不可用', async () => {
+  const api = loadClient({ pathname: '/plugins/0848oh', title: 'Koishi', bodyFault: true });
+  api.checkRoute();
+  api.expandPanel();
+  assert.equal(api.state.own, true, '点开即认领');
+
+  await settle();
+
+  assert.ok(api.requests().length > 0, '确实读到了响应体');
+  assert.equal(api.state.apiUnavailable, false, '流被 reset 不是「这套接口不存在」');
+  assert.equal(api.monitorStatusText(), '连接中断，保留最后一次数据');
+  assert.equal(api.phase(), 'OFFLINE', '状态格报断线，不报接口不可用');
 });
