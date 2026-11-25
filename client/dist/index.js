@@ -1057,6 +1057,10 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   #patchouli-organic-root .ptx-btn.is-danger-solid:hover { color: #ffffff; background: #b03d50; border-color: #97364a; }
   #patchouli-organic-root .ptx-btn.is-danger-solid:active { background: #a83a4c; }
   #patchouli-organic-root .ptx-btn.is-busy { opacity: 0.56; pointer-events: none; }
+  /* 忙态同时置了原生 disabled（挡住键盘重复提交）：视觉上要和 .is-busy 一致 */
+  #patchouli-organic-root .ptx-btn:disabled,
+  #patchouli-organic-root .ptx-foot-btn:disabled,
+  #patchouli-organic-root .ptx-switch:disabled { opacity: 0.56; pointer-events: none; }
 
   /* 明暗主题切换：rail 底部与齿轮并列，日 / 月图标只由 .is-dark 切换显隐，不产生形变 */
   #patchouli-organic-root .ptx-theme .ptx-ico-sun { display: none; }
@@ -1293,8 +1297,11 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
   }
   #patchouli-organic-root .ptx-selectbtn-label { max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #patchouli-organic-root .ptx-selectbtn:hover { color: var(--bio-primary-strong); }
-  #patchouli-organic-root .ptx-selectbtn > svg { flex: none; color: var(--bio-ink-4); transition: transform 0.18s var(--ease-organic); }
-  #patchouli-organic-root .ptx-channel.is-open .ptx-selectbtn > svg { transform: rotate(180deg); }
+  /* 群聊图标也在这个按钮里（chip 里不留裸图标），箭头单独包一层，只有它会翻转 */
+  #patchouli-organic-root .ptx-selectbtn > svg,
+  #patchouli-organic-root .ptx-selectbtn-caret { flex: none; color: var(--bio-ink-4); }
+  #patchouli-organic-root .ptx-selectbtn-caret { display: inline-flex; transition: transform 0.18s var(--ease-organic); }
+  #patchouli-organic-root .ptx-channel.is-open .ptx-selectbtn-caret { transform: rotate(180deg); }
   #patchouli-organic-root .ptx-selectbtn:focus-visible { outline: 2px solid rgba(14, 164, 79, 0.55); outline-offset: 2px; border-radius: var(--r-tag); }
 
   /* 面板绝对定位在 chip 正下方：右缘对齐、不窄于 chip，内部滚动上限 236px。
@@ -1661,6 +1668,26 @@ const ORGANIC_STYLES = `/* ================= 宿主 ================= */
     flex: 1;
     height: 1px;
     background: var(--hairline);
+  }
+  /* 设置页的分节标题是原生 button（Enter / Space 直接触发 click）：
+     这里把 UA 默认外观全部抹平，视觉与原来的 div 标题行一致。 */
+  #patchouli-organic-root button.ptx-sec-h {
+    width: 100%;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  #patchouli-organic-root button.ptx-sec-h:focus-visible {
+    outline: 2px solid rgba(14, 164, 79, 0.55);
+    outline-offset: 2px;
+    border-radius: var(--r-tag);
   }
 
   #patchouli-organic-root .ptx-text { max-width: 72ch; font-size: 14px; line-height: 1.78; color: var(--bio-ink-2); white-space: pre-wrap; text-shadow: none; }
@@ -2869,6 +2896,8 @@ function loadSettings() {
   out.tickerInterval = clampInt(parsed.tickerInterval, TICKER_INTERVAL_MIN, TICKER_INTERVAL_MAX, out.tickerInterval);
   if (parsed.collapsedSections && typeof parsed.collapsedSections === 'object') {
     for (const [key, value] of Object.entries(parsed.collapsedSections)) {
+      /* 旧版折叠键是下标（`set-sec-0`）：换成标题键后它们只会套错分区，直接丢弃 */
+      if (/^set-sec-\d+$/.test(key)) continue;
       if (value === true) out.collapsedSections[String(key)] = true;
     }
   }
@@ -3596,25 +3625,33 @@ function promptStatusLabel() {
   return data.isCustom ? '自定义提示词生效中' : '默认预设生效中';
 }
 
-/* 就地回写，避免重新渲染整页（文本框里的换行缩进与焦点都不会被打断） */
-function syncPromptUI() {
+/* 就地回写，避免重新渲染整页（文本框里的换行缩进与焦点都不会被打断）。
+ * `kind` 限定只回填本次提交的那一套（custom / topic）：同一次 /api/prompt 响应同时带两套真值，
+ * 把另一套一并写进编辑区，就会静默覆盖用户在里面还没保存的草稿。 */
+function syncPromptUI(kind) {
   if (!viewportEl || state.stage !== 'settings') return;
-  const field = viewportEl.querySelector('[data-role="system-prompt"]');
-  if (field) field.value = promptEditorValue();
-  const statusEl = viewportEl.querySelector('.ptx-prompt-status');
-  if (statusEl) {
-    statusEl.textContent = promptStatusLabel();
-    statusEl.classList.toggle('is-custom', Boolean(state.prompt.data && state.prompt.data.isCustom));
+  const custom = kind !== 'topic';
+  const topic = kind !== 'custom';
+  if (custom) {
+    const field = viewportEl.querySelector('[data-prompt-kind="custom"]');
+    if (field) field.value = promptEditorValue();
+    const statusEl = viewportEl.querySelector('.ptx-prompt-status');
+    if (statusEl) {
+      statusEl.textContent = promptStatusLabel();
+      statusEl.classList.toggle('is-custom', Boolean(state.prompt.data && state.prompt.data.isCustom));
+    }
   }
-  /* 主题聚合提示词与系统提示词同源：一次 /api/prompt 响应同时带两套真值 */
-  const topicField = viewportEl.querySelector('[data-role="topic-system-prompt"]');
-  if (topicField && state.prompt.data) {
-    topicField.value = state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt || '';
-  }
-  const topicStatusEl = viewportEl.querySelector('.ptx-topic-prompt-status');
-  if (topicStatusEl && state.prompt.data) {
-    topicStatusEl.textContent = state.prompt.data.isTopicCustom ? '自定义主题提示词生效中' : '默认主题提示词生效中';
-    topicStatusEl.classList.toggle('is-custom', Boolean(state.prompt.data.isTopicCustom));
+  if (topic) {
+    /* 主题聚合提示词与系统提示词同源：一次 /api/prompt 响应同时带两套真值 */
+    const topicField = viewportEl.querySelector('[data-prompt-kind="topic"]');
+    if (topicField && state.prompt.data) {
+      topicField.value = state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt || '';
+    }
+    const topicStatusEl = viewportEl.querySelector('.ptx-topic-prompt-status');
+    if (topicStatusEl && state.prompt.data) {
+      topicStatusEl.textContent = state.prompt.data.isTopicCustom ? '自定义主题提示词生效中' : '默认主题提示词生效中';
+      topicStatusEl.classList.toggle('is-custom', Boolean(state.prompt.data.isTopicCustom));
+    }
   }
 }
 
@@ -3712,13 +3749,34 @@ function runtimeRowNotice(rowKey, text, isError) {
   cfgNoticeTimers.set(node, { hold, clear: 0 });
 }
 
+/* 忙态：`.is-busy` 只挡指针，键盘 Enter / Space 仍能重复触发同一个控件。
+   因此进入忙态时同时置原生 disabled（浏览器会跳过 disabled 元素），结束后一起恢复。 */
+function setControlBusy(node, busy) {
+  if (!node) return;
+  if ('disabled' in node) node.disabled = busy;
+  if (busy) node.setAttribute('aria-busy', 'true');
+  else if (typeof node.removeAttribute === 'function') node.removeAttribute('aria-busy');
+}
+
+function setButtonBusy(button, busy) {
+  if (!button) return;
+  if (button.classList) {
+    if (busy) button.classList.add('is-busy');
+    else button.classList.remove('is-busy');
+  }
+  setControlBusy(button, busy);
+}
+
 /* 单字段保存：只提交动过的那一个键；成功只回写该行，绝不重绘设置页。
- * 同字段连点时只有最后一次响应能改 UI（seq 令牌），不同字段互不打断。 */
+ * 在途期间控件是原生 disabled，同一控件的第二次提交进不来；seq 令牌管的是
+ * 不同代码路径对同一字段的并发写入 —— 只有最后一次响应能改 UI。 */
 function saveRuntimeField(node) {
   const section = node ? node.getAttribute('data-cfg-section') : '';
   const key = node ? node.getAttribute('data-cfg-key') : '';
   const meta = section && key ? runtimeMeta(section, key) : null;
   if (!meta) return Promise.resolve();
+  /* 请求在途时控件是原生 disabled：连点（含键盘 Enter / Space）只看第一次 */
+  if (node.disabled === true || node.getAttribute('aria-busy') === 'true') return Promise.resolve();
   const rowKey = `${section}.${key}`;
   const modeSwitch = section === 'trigger' && key === 'triggerMode';
   const before = runtimeValue(section, key);
@@ -3755,6 +3813,8 @@ function saveRuntimeField(node) {
   const token = (state.runtimeSettings.seq[tokenKey] || 0) + 1;
   state.runtimeSettings.seq[tokenKey] = token;
   runtimeRowNotice(rowKey, '保存中…', false);
+  /* 在途期间锁定本控件：连点、键盘 Enter / Space 重复提交都进不来；回执后一定解锁 */
+  setControlBusy(node, true);
   return postRuntimeSettings(section, { [key]: next })
     .then((data) => {
       if (state.runtimeSettings.seq[tokenKey] !== token) return;
@@ -3797,6 +3857,11 @@ function saveRuntimeField(node) {
       }
       applyRuntimeField(node, meta, before);
       runtimeRowNotice(rowKey, reason, true);
+    })
+    .then((result) => {
+      /* 成功 / 失败 / 被更新的请求顶掉，都在这里解锁；模式切换时节点已被替换，等价于空操作 */
+      setControlBusy(node, false);
+      return result;
     });
 }
 
@@ -3814,7 +3879,10 @@ function loadCardSettings() {
 
 /* 图片匿名化开关：切换即落盘并热生效，作用于下一次出图 */
 function toggleCardMask(node) {
+  /* 请求在途时按钮是原生 disabled：连点只看第一次，避免两次切换与服务端错位 */
+  if (node && (node.disabled === true || node.getAttribute('aria-busy') === 'true')) return Promise.resolve();
   const next = !(state.cardSettings.settings.maskNames !== false);
+  setControlBusy(node, true);
   return writeJson(`${API_BASE}/api/card/settings`, 'POST', { settings: { maskNames: next } })
     .then((data) => {
       if (data && data.settings) state.cardSettings.settings = data.settings;
@@ -3826,6 +3894,10 @@ function toggleCardMask(node) {
       toast(on ? '图片匿名化已开启' : '图片匿名化已关闭：图片将按原昵称输出');
     }, (err) => {
       toast(`图片匿名化切换失败：${err && err.message ? err.message : '未知错误'}`);
+    })
+    .then((result) => {
+      setControlBusy(node, false);
+      return result;
     });
 }
 
@@ -3835,10 +3907,10 @@ function postPrompt(payload) {
 
 /* 保存：内容与默认提示词完全一致时按「恢复默认」提交，绝不留下一份同文的伪自定义副本 */
 function savePrompt() {
-  const field = viewportEl ? viewportEl.querySelector('[data-role="system-prompt"]') : null;
+  const field = viewportEl ? viewportEl.querySelector('[data-prompt-kind="custom"]') : null;
   const value = field ? String(field.value == null ? '' : field.value) : '';
   const button = viewportEl ? viewportEl.querySelector('[data-action="save-prompt"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   const data = state.prompt.data;
   const defaultText = data && typeof data.defaultPrompt === 'string' ? data.defaultPrompt.trim() : '';
   const next = value.trim() === '' || value.trim() === defaultText ? '' : value;
@@ -3846,70 +3918,72 @@ function savePrompt() {
     .then((result) => {
       if (result && typeof result === 'object') state.prompt.data = result;
       state.prompt.error = '';
-      syncPromptUI();
+      /* 只回填系统提示词那套：主题编辑区里的草稿不受这次保存影响 */
+      syncPromptUI('custom');
       toast(next ? '自定义提示词已生效' : '已恢复默认提示词');
     }, (err) => {
       toast(`提示词保存失败：${err && err.message ? err.message : '未知错误'}`);
     })
     .then(() => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
     });
 }
 
 /* 主题聚合提示词：与系统提示词同一端点，字段换成 customTopicPrompt，
    内容与默认主题提示词完全一致时同样按「恢复默认」提交 */
 function saveTopicPrompt() {
-  const field = viewportEl ? viewportEl.querySelector('[data-role="topic-system-prompt"]') : null;
+  const field = viewportEl ? viewportEl.querySelector('[data-prompt-kind="topic"]') : null;
   const value = field ? String(field.value == null ? '' : field.value) : '';
   const data = state.prompt.data;
   const defaultText = data && typeof data.topicDefaultPrompt === 'string' ? data.topicDefaultPrompt.trim() : '';
   const next = value.trim() === '' || value.trim() === defaultText ? '' : value;
   const button = viewportEl ? viewportEl.querySelector('[data-action="save-topic-prompt"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return postPrompt({ customTopicPrompt: next })
     .then((result) => {
       if (result && typeof result === 'object') state.prompt.data = result;
+      /* 不整页重绘（那会把系统提示词编辑区的未保存草稿一起冲掉），只回填主题那套 */
+      syncPromptUI('topic');
       toast(next ? '主题聚合提示词已生效' : '已恢复主题聚合默认提示词');
-      renderStage();
     }, (err) => {
       toast(`主题提示词保存失败：${err && err.message ? err.message : '未知错误'}`);
     })
     .then(() => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
     });
 }
 
 function resetTopicPrompt() {
   const button = viewportEl ? viewportEl.querySelector('[data-action="reset-topic-prompt"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return postPrompt({ customTopicPrompt: '' })
     .then((result) => {
       if (result && typeof result === 'object') state.prompt.data = result;
+      syncPromptUI('topic');
       toast('已恢复主题聚合默认提示词');
-      renderStage();
     }, (err) => {
       toast(`恢复默认失败：${err && err.message ? err.message : '未知错误'}`);
     })
     .then(() => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
     });
 }
 
 /* 恢复默认：清空自定义后重新拉取，编辑区回填默认全文 */
 function resetPrompt() {
   const button = viewportEl ? viewportEl.querySelector('[data-action="reset-prompt"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return postPrompt({ customPrompt: '' })
     .then((result) => {
       if (result && typeof result === 'object') state.prompt.data = result;
       state.prompt.error = '';
-      syncPromptUI();
+      syncPromptUI('custom');
       toast('已恢复默认提示词');
     }, (err) => {
       toast(`恢复默认失败：${err && err.message ? err.message : '未知错误'}`);
     })
     .then(() => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
     });
 }
 
@@ -3932,7 +4006,7 @@ function renderSettings() {
       renderSection('图片脱敏',
         `<div class="ptx-settings-row">` +
           `<span class="ptx-settings-label">图片匿名化<em>开启后词条图片里的昵称一律替换为假名；关闭则按群聊原文昵称出图。切换即生效，作用于下一次出图。</em></span>` +
-          `<button class="ptx-switch${cardMask ? ' is-on' : ''}" data-act="toggle-card-mask" role="switch" aria-checked="${cardMask ? 'true' : 'false'}" aria-label="图片匿名化"></button>` +
+          `<button class="ptx-switch${cardMask ? ' is-on' : ''}" data-action="toggle-card-mask" role="switch" aria-checked="${cardMask ? 'true' : 'false'}" aria-label="图片匿名化"></button>` +
         `</div>`) +
       renderSection('索引视图',
         `<div class="ptx-settings-row">` +
@@ -3953,7 +4027,7 @@ function renderSettings() {
         `<div class="ptx-editor">` +
           `<label class="ptx-editor-field">` +
             `<span class="ptx-editor-label">帕秋莉系统提示词 (SYSTEM PROMPT)</span>` +
-            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-role="system-prompt" spellcheck="false" aria-label="帕秋莉系统提示词">${escapeHtml(promptEditorValue())}</textarea>` +
+            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-prompt-kind="custom" spellcheck="false" aria-label="帕秋莉系统提示词">${escapeHtml(promptEditorValue())}</textarea>` +
           `</label>` +
           `<div class="ptx-editor-foot">` +
             `<span class="ptx-prompt-status${state.prompt.data && state.prompt.data.isCustom ? ' is-custom' : ''}">${escapeHtml(promptStatusLabel())}</span>` +
@@ -3966,7 +4040,7 @@ function renderSettings() {
         `<div class="ptx-editor">` +
           `<label class="ptx-editor-field">` +
             `<span class="ptx-editor-label">主题校准系统提示词 (TOPIC PROMPT)</span>` +
-            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-role="topic-system-prompt" spellcheck="false" aria-label="主题聚合系统提示词">${escapeHtml((state.prompt.data && (state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt)) || '')}</textarea>` +
+            `<textarea class="ptx-input ptx-editor-area ptx-editor-md" data-prompt-kind="topic" spellcheck="false" aria-label="主题聚合系统提示词">${escapeHtml((state.prompt.data && (state.prompt.data.topicEffectivePrompt || state.prompt.data.topicDefaultPrompt)) || '')}</textarea>` +
           `</label>` +
           `<div class="ptx-editor-foot">` +
             `<span class="ptx-prompt-status ptx-topic-prompt-status${state.prompt.data && state.prompt.data.isTopicCustom ? ' is-custom' : ''}">${escapeHtml(state.prompt.data && state.prompt.data.isTopicCustom ? '自定义主题提示词生效中' : '默认主题提示词生效中')}</span>` +
@@ -5326,10 +5400,11 @@ function buildShell() {
           </div>
           <div class="ptx-tools">
             <div class="ptx-filter">
-              <div class="ptx-chip ptx-channel" ${tip('按群聊筛选')}>
-                ${organicIcon('scope', 12)}
+              <div class="ptx-chip ptx-channel" data-drag-guard="1" ${tip('按群聊筛选')}>
                 <button type="button" class="ptx-selectbtn" data-act="channel-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="群聊范围">
-                  <span class="ptx-selectbtn-label">全部</span>${organicIcon('chevronDown', 11)}
+                  ${organicIcon('scope', 12)}
+                  <span class="ptx-selectbtn-label">全部</span>
+                  <span class="ptx-selectbtn-caret">${organicIcon('chevronDown', 11)}</span>
                 </button>
                 <div class="ptx-menu" role="listbox" aria-label="群聊范围" hidden></div>
               </div>
@@ -5581,6 +5656,14 @@ function defaultPosition() {
   );
 }
 
+/* 顶栏的胶囊（群聊筛选 / 检索框）与显式 data-drag-guard 是控件不是把手：
+   点它们、点其中的图标，都不得被当成拖窗起手。 */
+function isDragGuardTarget(target) {
+  if (!target || !target.closest) return true;
+  if (target.closest('button, input, select, textarea, a')) return true;
+  return Boolean(target.closest('.ptx-chip, [data-drag-guard]'));
+}
+
 function bindDrag() {
   if (!frameEl) return;
 
@@ -5589,7 +5672,7 @@ function bindDrag() {
     if (!handle) return;
     /* 最大化时窗口由视口接管，拖拽整体禁用 */
     if (state.maximized) return;
-    if (event.target.closest('button, input, select, textarea, a')) return;
+    if (isDragGuardTarget(event.target)) return;
     if (event.button != null && event.button !== 0) return;
     drag.active = true;
     drag.pointerId = event.pointerId;
@@ -6065,6 +6148,43 @@ function toggleMaximize() {
  * 11c. 设置页（侧栏底部齿轮，与两个核心页签平级）
  * ------------------------------------------------------------------ */
 
+/* 分节标题换成原生 button：Enter / Space 由浏览器直接触发 click，键盘可达性不靠自造 keydown。
+   已经是 button 时只更新属性（不重建节点），否则一次开合就会把焦点甩掉。 */
+function toSectionToggle(head, title) {
+  if (head.tagName && String(head.tagName).toLowerCase() === 'button') return head;
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  if (head.className) toggle.className = head.className;
+  toggle.textContent = title;
+  if (head.parentNode && head.parentNode.replaceChild) head.parentNode.replaceChild(toggle, head);
+  return toggle;
+}
+
+/* 属性值进选择器前先转义：分区标题是中文，理论可含引号 / 反斜杠 */
+function cssAttrValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/* 折叠键 = 分区标题（重名标题才用出现次序兜底）。
+   绝不用列表下标：运行时分组按服务端字段表增删 / 重排后，下标会把展开态套到别的分区上。 */
+function sectionFoldKeys(sections) {
+  const counts = new Map();
+  const heads = sections.map((sec) => {
+    const head = sec.querySelector('.ptx-sec-h');
+    const title = head && head.textContent ? String(head.textContent).trim() : '';
+    if (title) counts.set(title, (counts.get(title) || 0) + 1);
+    return { head, title };
+  });
+  const seen = new Map();
+  return heads.map(({ head, title }, index) => {
+    if (!title) return { head, title, key: `#${index}` };
+    if ((counts.get(title) || 0) < 2) return { head, title, key: title };
+    const at = (seen.get(title) || 0) + 1;
+    seen.set(title, at);
+    return { head, title, key: `${title}#${at}` };
+  });
+}
+
 /* 设置页控件回写：落库后显示值与生效值永远一致（切换页签回来也会重新渲染） */
 function decorateSettings() {
   if (!viewportEl || state.stage !== 'settings') return;
@@ -6074,24 +6194,24 @@ function decorateSettings() {
   const main = shell.querySelector('.ptx-settings-main');
   if (!outline || !main) return;
   const sections = Array.from(main.children).filter((node) => node.classList && node.classList.contains('ptx-sec'));
+  const entries = sectionFoldKeys(sections);
   outline.innerHTML = '<div class="ptx-outline-h">大纲</div>';
   sections.forEach((sec, index) => {
-    const head = sec.querySelector('.ptx-sec-h');
+    const { head, title, key } = entries[index];
     if (!head) return;
-    const id = `set-sec-${index}`;
-    sec.setAttribute('data-sec', id);
-    const collapsed = state.settings.collapsedSections[id] === true;
+    sec.setAttribute('data-sec', key);
+    const collapsed = state.settings.collapsedSections[key] === true;
     sec.classList.toggle('is-collapsed', collapsed);
-    head.setAttribute('data-action', 'toggle-section');
-    head.setAttribute('data-target', id);
-    head.setAttribute('role', 'button');
-    head.setAttribute('tabindex', '0');
+    const toggle = toSectionToggle(head, title);
+    toggle.setAttribute('data-action', 'toggle-section');
+    toggle.setAttribute('data-target', key);
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'ptx-outline-item';
     item.setAttribute('data-action', 'jump-section');
-    item.setAttribute('data-target', id);
-    item.textContent = (head.textContent || '').trim();
+    item.setAttribute('data-target', key);
+    item.textContent = title;
     outline.appendChild(item);
   });
 }
@@ -6172,7 +6292,7 @@ function saveEntry() {
   let status = editorValue('entry-status').trim();
   if (!EDITOR_STATUSES.includes(status)) status = 'open';
   const button = viewportEl ? viewportEl.querySelector('[data-action="save-entry"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return writeJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, 'PUT', {
     title,
     status,
@@ -6192,7 +6312,7 @@ function saveEntry() {
       toast('词条已更新');
     })
     .catch((err) => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
       toast(`词条更新失败：${err && err.message ? err.message : '未知错误'}`);
     });
 }
@@ -6201,7 +6321,7 @@ function removeEntry() {
   const id = state.activeId;
   if (!id) return Promise.resolve();
   const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-delete-entry"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return writeJson(`${API_BASE}/api/entries/${encodeURIComponent(id)}`, 'DELETE')
     .then(() => {
       state.activeId = null;
@@ -6221,14 +6341,14 @@ function removeEntry() {
       toast('词条已删除');
     })
     .catch((err) => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
       toast(`删除失败：${err && err.message ? err.message : '未知错误'}`);
     });
 }
 
 function clearKnowledgeBase() {
   const button = viewportEl ? viewportEl.querySelector('[data-action="confirm-clear-kb"]') : null;
-  if (button) button.classList.add('is-busy');
+  setButtonBusy(button, true);
   return writeJson(`${API_BASE}/api/clear`, 'POST', {})
     .then(() => {
       state.entries = [];
@@ -6252,7 +6372,7 @@ function clearKnowledgeBase() {
       toast('知识库已清空，保留默认骨架');
     })
     .catch((err) => {
-      if (button) button.classList.remove('is-busy');
+      setButtonBusy(button, false);
       toast(`清空失败：${err && err.message ? err.message : '未知错误'}`);
     });
 }
@@ -6291,29 +6411,56 @@ function handleAction(action, node) {
   else if (action === 'toggle-section') {
     const target = node && node.getAttribute('data-target');
     if (target) {
-      state.settings.collapsedSections[target] = state.settings.collapsedSections[target] !== true;
+      /* 只记「收起的那些分区」：展开时删键，localStorage 里不会攒一堆 false */
+      if (state.settings.collapsedSections[target] === true) delete state.settings.collapsedSections[target];
+      else state.settings.collapsedSections[target] = true;
       saveSettings();
       decorateSettings();
     }
   }
   else if (action === 'jump-section') {
     const target = node && node.getAttribute('data-target');
-    const section = target && viewportEl ? viewportEl.querySelector(`[data-sec="${target}"]`) : null;
+    const section = target && viewportEl ? viewportEl.querySelector(`[data-sec="${cssAttrValue(target)}"]`) : null;
     if (section) section.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }
 }
 
 /* 唯一刷新入口：底栏核心按钮（data-act="refresh" 仅此一处）。
-   按钮常驻不随视图重绘，故 is-busy 必须自己收尾，否则刷新一次就永久转圈。 */
+   按钮常驻不随视图重绘，故 is-busy 必须自己收尾，否则刷新一次就永久转圈。
+   三路并行取数、逐路判成败：任一路失败都绝不能报「已刷新」。 */
 function refreshAll() {
   const button = frameEl ? frameEl.querySelector('[data-act="refresh"]') : null;
-  if (button) button.classList.add('is-busy');
-  return Promise.all([loadEntries(), loadStatus(), loadLatest()]).then(() => {
-    refreshTicker();
-    refreshPhase();
-    renderStage();
-    toast('词条索引与监控数据已刷新');
-    if (button) button.classList.remove('is-busy');
+  setButtonBusy(button, true);
+  const routes = [
+    { label: '词条', run: () => loadEntries().then(() => state.entriesError) },
+    {
+      label: '设置',
+      /* 非本插件页时这三条读请求会被闸口拦下（见 enterStage），不必再问一遍服务端 */
+      run: () => (!state.own
+        ? Promise.resolve('')
+        : Promise.all([loadPrompt(), loadRuntimeSettings(), loadCardSettings()])
+          .then(() => state.prompt.error || state.runtimeSettings.error || state.cardSettings.error)),
+    },
+    {
+      label: '监控',
+      run: () => Promise.all([loadStatus(), loadLatest()])
+        .then(() => (!state.status ? '状态接口无响应' : state.latestError ? '最新词条读取失败' : '')),
+    },
+  ];
+  return Promise.all(routes.map((route) => route.run().then(
+    (error) => ({ label: route.label, error: error || '' }),
+    (err) => ({ label: route.label, error: (err && err.message) || '未知错误' }),
+  ))).then((results) => {
+    try {
+      refreshTicker();
+      refreshPhase();
+      renderStage();
+      const failed = results.filter((item) => item.error);
+      if (!failed.length) toast('词条索引与监控数据已刷新');
+      else toast(`部分刷新失败：${failed.map((item) => `${item.label}（${item.error}）`).join('、')}`);
+    } finally {
+      setButtonBusy(button, false);
+    }
   });
 }
 
@@ -6329,6 +6476,8 @@ function bindActions() {
       return;
     }
     if (node.getAttribute('data-cfg-toggle')) {
+      /* 请求在途时开关是原生 disabled：这里再兜一层，保证连点不会把同一个字段翻两次 */
+      if (node.disabled === true || node.getAttribute('aria-busy') === 'true') return;
       /* 布尔开关：先翻转再落库，失败时由 saveRuntimeField 回滚到服务端现值 */
       const on = !node.classList.contains('is-on');
       node.classList.toggle('is-on', on);
